@@ -3,7 +3,10 @@
 /*
 !/.gitignore
 !/README.md
+!/CLAUDE.md
 !/Start Studio.bat
+!/Setup.bat
+!/setup.ps1
 !/_engines/
 
 /_engines/*

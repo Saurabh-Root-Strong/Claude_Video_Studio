@@ -78,15 +78,22 @@ class _FileLock:
     def __init__(self, path: Path, timeout: float = 30.0):
         self.path, self.timeout, self.fd = path, timeout, None
 
+    def _try(self) -> None:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(self.fd, 0, 0)
+            msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)
+        else:  # macOS / Linux
+            import fcntl
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
     def __enter__(self):
-        import msvcrt
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT)
         deadline = time.time() + self.timeout
         while True:
             try:
-                os.lseek(self.fd, 0, 0)
-                msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)
+                self._try()
                 return self
             except OSError:
                 if time.time() > deadline:
@@ -95,10 +102,14 @@ class _FileLock:
                 time.sleep(0.05)
 
     def __exit__(self, *exc):
-        import msvcrt
         try:
-            os.lseek(self.fd, 0, 0)
-            msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(self.fd, 0, 0)
+                msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
         finally:
             os.close(self.fd)
 

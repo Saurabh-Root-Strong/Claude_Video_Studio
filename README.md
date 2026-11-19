@@ -25,36 +25,32 @@ Anything else ("tighten this to 30 seconds", "animated title like reference 1") 
 In Claude Code, say **`process studio inbox`**. Claude follows [`_engines/studio/CLAUDE.md`](_engines/studio/CLAUDE.md),
 does the edit, and replies on the page.
 
-## Setup (Windows)
+## Install on any Windows PC (one click)
 
-Requirements: Windows 10/11, Python 3.12+, Node.js 20+, an NVIDIA GPU is recommended (CPU works, slower).
+1. **Download:** `git clone https://github.com/Saurabh-Root-Strong/Claude_Video_Studio.git`
+   (or GitHub → **Code → Download ZIP** and extract it anywhere, e.g. `D:\Claude_Video_Editor`).
+2. **Double-click `Setup.bat`.** It installs and checks everything, and it's safe to run again:
 
-```powershell
-# 1. engines
-winget install Gyan.FFmpeg
-winget install yt-dlp.yt-dlp          # also installs Deno
+   | Installs | Notes |
+   |---|---|
+   | FFmpeg, yt-dlp (winget) | skipped if already present |
+   | Python 3.12 + the studio's environment | skipped if Python 3.10+ exists |
+   | whisper.cpp `b5454` (CPU build, + CUDA build and cuBLAS on NVIDIA PCs) | pinned version |
+   | Speech models: large-v3-turbo (547 MB), Silero VAD | SHA-256 verified, downloads resume if they stall |
+   | Node.js LTS + Remotion + HyperFrames (`npm ci`, exact versions from lockfiles) | skip with `-SkipMotion` |
+   | Working folders: Raw Footage, References, Storyboards, Exports, Brand Kit | |
 
-# 2. whisper.cpp (CUDA build) + models -> _engines\whisper\
-#    https://github.com/ggml-org/whisper.cpp/releases  : whisper-bin-win-cuda-11.8.0-x64.zip  -> _engines\whisper\cuda\
-#                                                        whisper-bin-x64.zip (CPU fallback)    -> _engines\whisper\cpu\
-#    cuBLAS 11 DLLs (not bundled in the zip):  pip download nvidia-cublas-cu11 --no-deps --platform win_amd64 --only-binary=:all: --python-version 3.12
-#                                              copy cublas64_11.dll + cublasLt64_11.dll from the wheel into _engines\whisper\cuda\Release\
-#    models -> _engines\whisper\models\ :
-#      https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
-#      https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
-#    (large downloads stall sometimes: _engines\_downloads\resume_dl.ps1 resumes them)
+   Options: `Setup.bat -CpuOnly` (ignore the GPU), `-SkipMotion` (no Node/motion graphics), `-RunTests`.
+   Expect about 1.5 GB of downloads (about 2.5 GB with motion graphics).
+3. **Double-click `Start Studio.bat`.** The studio opens at http://127.0.0.1:8070. (On a PC that isn't set up, it
+   offers to run Setup first.)
 
-# 3. studio app
-cd _engines\studio
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+Requirements: Windows 10/11 with `winget` (built in; otherwise install "App Installer" from the Microsoft Store).
+An NVIDIA GPU is used automatically if present. Without one, the CPU build works, just slower.
 
-# 4. optional motion-graphics engines
-cd ..\remotion;    npm install
-cd ..\hyperframes; npm install
-```
-
-Then double-click **`Start Studio.bat`** and open http://127.0.0.1:8070.
+**Your video projects are not in git.** Footage, exports and project files stay on the PC where you made them
+(the repo is public, and video is too large for git). To move a project to another PC, copy its folders
+(`Raw Footage/<project>`, `References/<project>`, `Storyboards/<project>`) across, e.g. via a drive or cloud folder.
 
 The app creates its working folders next to `_engines/`: `Raw Footage/`, `References/`, `Storyboards/` (project
 files), `Exports/`, `Brand Kit/`. They are git-ignored.

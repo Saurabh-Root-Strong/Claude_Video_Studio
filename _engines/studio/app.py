@@ -433,7 +433,12 @@ def api_open(pid):
     target = {"exports": core.EXPORTS, "raw": core.raw_dir(pid), "refs": core.refs_dir(pid),
               "project": core.project_dir(pid), "brand": core.BRAND}.get(which, core.EXPORTS)
     target.mkdir(parents=True, exist_ok=True)
-    os.startfile(target)  # local convenience – app is bound to 127.0.0.1 only
+    if os.name == "nt":
+        os.startfile(target)  # local convenience – app is bound to 127.0.0.1 only
+    else:
+        import subprocess
+        import sys
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(target)])
     return jsonify(ok=True)
 
 
