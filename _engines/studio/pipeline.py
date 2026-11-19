@@ -158,7 +158,28 @@ def detect_cuts(src: Path, threshold: float = 0.3) -> list[float]:
     return sorted({round(float(m), 3) for m in re.findall(r"pts_time:([\d.]+)", out)})
 
 
-def detect_silences(src: Path, noise_db: int = -35, min_dur: float = 0.4) -> list[list[float]]:
+SILENCE_V = "silences.v2"  # marker: silences stored down to 0.2 s (before 2026-11-19: 0.4 s)
+
+
+def load_silences(pid: str, src_file: str) -> list[list[float]]:
+    """Pauses for a source. Projects analysed before pauses were stored down to 0.2 s get re-detected once
+    (one quick ffmpeg pass), otherwise 'cut pauses > 0.35 s' would silently miss the 0.35-0.4 s ones."""
+    p = core.work_file(pid, src_file, "silences.json")
+    sil = core.read_json(p, []) or []
+    marker = core.work_dir(pid) / f"{src_file}.{SILENCE_V}"
+    src = core.raw_dir(pid) / src_file
+    if not marker.exists() and src.is_file():
+        try:
+            sil = detect_silences(src)
+            core._atomic_write(core.work_dir(pid) / f"{src_file}.silences.json", sil)
+            marker.write_text("min 0.2 s\n", encoding="utf-8")
+        except PipelineError:
+            pass  # keep the old list – still valid, just coarser
+    return sil
+
+
+def detect_silences(src: Path, noise_db: int = -35, min_dur: float = 0.2) -> list[list[float]]:
+    # stored at 0.2 s so "cut pauses > 0.35 s" works; every consumer filters to its own minimum (0.3 / 0.4 s)
     out = run([FFMPEG, "-hide_banner", "-i", src, "-vn", "-af",
                f"silencedetect=noise={noise_db}dB:d={min_dur}", "-f", "null", "-"])
     sil, start = [], None
@@ -196,8 +217,9 @@ def suspect_windows(words: list[dict], silences: list[list[float]], duration: fl
     wins = []
     for i, j in hits:
         a, b = words[i]["s"], words[j]["e"]
-        before = [e for s, e in silences if e <= a + 0.05 and a - e <= 4.0]
-        after = [s for s, e in silences if s >= b - 0.05 and s - b <= 4.0]
+        real = [(s, e) for s, e in silences if e - s >= 0.3]  # snap to real pauses, not 0.2 s breaths
+        before = [e for s, e in real if e <= a + 0.05 and a - e <= 4.0]
+        after = [s for s, e in real if s >= b - 0.05 and s - b <= 4.0]
         a = max(before) if before else a - 0.3
         b = min(after) if after else b + 0.3
         wins.append((max(0.0, a), min(duration or b, b)))
@@ -213,8 +235,20 @@ def suspect_windows(words: list[dict], silences: list[list[float]], duration: fl
 
 def repair_transcript(wav: Path, words: list[dict], silences: list[list[float]], language: str, duration: float,
                       work: Path, log=lambda m: None) -> list[dict]:
-    """Re-transcribe each suspect window on its own (whisper behaves on short clips) and splice the result in."""
-    for k, (a, b) in enumerate(suspect_windows(words, silences, duration)):
+    """Re-transcribe each suspect window on its own (whisper behaves on short clips) and splice the result in.
+    Capped: at most 12 windows / a third of the file – beyond that the whole transcript is suspect and repairing
+    piecemeal would cost more than it fixes (log tells the user to re-analyze with the language set)."""
+    wins = suspect_windows(words, silences, duration)
+    budget = max(30.0, (duration or 0) / 3)
+    picked, used = [], 0.0
+    for a, b in wins:  # in time order
+        if len(picked) >= 12 or used + (b - a) > budget:
+            log(f"{len(wins) - len(picked)} more suspect stretch(es) left as is – if captions look wrong, "
+                f"set Language (tab 2) and re-analyze")
+            break
+        picked.append((a, b))
+        used += b - a
+    for k, (a, b) in enumerate(picked):
         clip = work / f"repair_{k}.wav"
         # pad the clip with the surrounding pause (+ 0.6 s of digital silence): a clip ending right where speech
         # stops makes whisper squeeze its last words onto one timestamp
@@ -422,6 +456,12 @@ def _analyze_one(pid: str, src: dict, tag: str, lang: str, wd: Path) -> None:
             finally:
                 wav.unlink(missing_ok=True)  # 16 kHz WAV is ~115 MB/hour – never leave it behind on failure
             core.job_log(pid, f"{tag}: {len(words)} words")
+            urdu = sum(1 for w in words if re.search(r"[؀-ۿ]", w["w"]))
+            if words and urdu > len(words) * 0.3:
+                # whisper's language auto-detect often writes Hindi speech in Urdu (Arabic) script – Hinglish and
+                # Hindi captions can't fix that; re-transcribing with language = Hindi does
+                core.job_log(pid, f"{tag}: ⚠ transcript is in Urdu script ({urdu}/{len(words)} words). If the "
+                                  f"speech is Hindi, set Language = Hindi (tab 2) and click Re-analyze.")
         core.set_job(pid, progress=f"{tag}: detecting scenes")
         cuts = detect_cuts(path)
         core.job_log(pid, f"{tag}: {len(cuts)} visual cuts")
@@ -429,6 +469,7 @@ def _analyze_one(pid: str, src: dict, tag: str, lang: str, wd: Path) -> None:
             json.dump(words, f, ensure_ascii=False)
         with open(wd / f"{key}.silences.json", "w", encoding="utf-8") as f:
             json.dump(silences, f)
+        (wd / f"{key}.{SILENCE_V}").write_text("min 0.2 s\n", encoding="utf-8")
 
         ranges = build_scenes(meta["duration"], cuts, words, silences)
         new_scenes = []
@@ -524,16 +565,24 @@ def target_size(data: dict, preview: bool) -> tuple[int, int]:
 
 
 def kept_ranges(scene: dict, silences: list[list[float]], settings: dict) -> list[tuple[float, float]]:
-    """Ranges (relative to scene.in) to keep after optional silence removal."""
+    """Ranges (relative to scene.in) to keep after optional silence removal and the scene's word cuts
+    (scene["cuts"] = [[src_start, src_end], ...] in SOURCE seconds: filler words, false starts)."""
     dur = scene["out"] - scene["in"]
     rs = scene.get("remove_silence")
     if rs is None:
         rs = settings.get("remove_silence", False)
-    if not rs:
+    cuts = []
+    for c in scene.get("cuts") or []:
+        try:
+            s2, e2 = max(float(c[0]), scene["in"]) - scene["in"], min(float(c[1]), scene["out"]) - scene["in"]
+        except (TypeError, ValueError, IndexError):
+            continue
+        if e2 - s2 >= 0.04:
+            cuts.append((s2, e2))
+    if not rs and not cuts:
         return [(0.0, dur)]
     pad, min_sil = 0.12, float(settings.get("silence_min", 0.6))
-    cuts = []
-    for s, e in silences:
+    for s, e in silences if rs else []:
         s2, e2 = max(s, scene["in"]) - scene["in"], min(e, scene["out"]) - scene["in"]
         if e2 - s2 >= min_sil:
             cuts.append((s2 + pad, e2 - pad))
@@ -545,6 +594,8 @@ def kept_ranges(scene: dict, silences: list[list[float]], settings: dict) -> lis
     if cur < dur:
         ranges.append((cur, dur))
     ranges = [(round(a, 3), round(b, 3)) for a, b in ranges if b - a >= 0.08]
+    if not ranges and scene.get("cuts"):
+        return []  # word cuts removed everything: the scene is effectively cut (render skips it)
     return ranges or [(0.0, dur)]
 
 
@@ -757,7 +808,7 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     gkey = green_key(pid, scene["src"]) if split and settings.get("bg_mode", "auto") == "auto" else None
     # cache key covers everything that changes the pixels/audio: scene edits, style, the words in range,
     # the source file itself and the logo file – so re-analysis or a replaced logo never reuses a stale segment
-    key = _seg_hash({k: v for k, v in scene.items() if k not in ("notes", "transcript", "thumb")}, relevant, caps,
+    key = _seg_hash({k: v for k, v in scene.items() if k not in ("notes", "transcript", "thumb", "sb_applied")}, relevant, caps,
                     w, h, fps, preview, words_in(words, scene["in"], scene["out"]), st.st_size, st.st_mtime,
                     logo_sig, "nvenc" if nvenc else "x264", gkey, 8)  # bump when caption/card/render logic changes
     out = seg_dir / f"seg_{key}.mp4"
@@ -981,37 +1032,71 @@ def music_lufs(path: Path) -> float:
     return val
 
 
-def finish_audio(src: Path, dst: Path, dur: float, music: Path | None, polish: bool) -> None:
-    """Final mix over the joined video (video stream copied): voice clean-up + -16 LUFS, optional ducked music."""
+def duck_filter(lufs: float, duck_db: float) -> str:
+    """Music ducking: compressor keyed by the voice. Ratio 20 => reduction ~= speech level - threshold.
+    Threshold offset calibrated by measurement (music RMS during speech vs in pauses, -14 LUFS voice):
+    duck 18 -> 18.8 dB measured. Shallow settings duck ~1-3 dB deeper than asked (attack/release smoothing)."""
+    thr_db = lufs + 5.0 - float(duck_db) / 0.95
+    return (f"sidechaincompress=threshold={10 ** (thr_db / 20):.5f}:ratio=20:knee=1:attack=15:release=350:"
+            f"detection=rms")
+
+
+def _num(v, default: float) -> float:
+    try:
+        return float(v) if v is not None and v != "" else default
+    except (TypeError, ValueError):
+        return default
+
+
+def measure_lufs(path: Path) -> float | None:
+    out = run([FFMPEG, "-hide_banner", "-i", path, "-vn", "-af", "ebur128=framelog=quiet", "-f", "null", "-"],
+              timeout=900)
+    found = re.findall(r"I:\s+(-?[\d.]+) LUFS", out)
+    v = float(found[-1]) if found else None
+    return v if v is not None and v > -70 else None  # silent / unmeasurable
+
+
+def finish_audio(src: Path, dst: Path, dur: float, music: Path | None, polish: bool,
+                 lufs: float = -16.0, duck_db: float = 10.0, trim_db: float = 0.0) -> None:
+    """Final mix over the joined video (video stream copied): voice clean-up + loudness target, optional music
+    sitting 12 LU under the voice between lines and ducked a further `duck_db` under dialogue."""
     voice = "aresample=48000"
+    lufs = max(-24.0, min(-10.0, float(lufs)))
+    tgt = f"I={lufs:g}:TP=-1.0:LRA=7"
     if polish:
         clean = "highpass=f=80,afftdn=nf=-25,acompressor=threshold=0.1:ratio=3:attack=5:release=120:makeup=1.5"
         # two-pass loudnorm: one-pass (dynamic) overshoots on short reels (measured -14.3 instead of -16)
         meas = run([FFMPEG, "-hide_banner", "-i", src, "-vn", "-af",
-                    f"{clean},loudnorm=I=-16:TP=-1.5:LRA=7:print_format=json", "-f", "null", "-"],
+                    f"{clean},loudnorm={tgt}:print_format=json", "-f", "null", "-"],
                    timeout=max(600, int(dur * 2)))
         try:
             m = json.loads(meas[meas.rindex("{"):meas.rindex("}") + 1])
-            ln = (f"loudnorm=I=-16:TP=-1.5:LRA=7:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
+            ln = (f"loudnorm={tgt}:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
                   f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:offset={m['target_offset']}:"
                   f"linear=true")
         except (ValueError, KeyError):
-            ln = "loudnorm=I=-16:TP=-1.5:LRA=7"
+            ln = f"loudnorm={tgt}"
         if "-inf" in ln:  # silent track: nothing to normalise
             ln = "anull"
         voice += f",{clean},{ln},aresample=48000"
     inputs = ["-i", src]
+    trim_db = max(-6.0, min(6.0, float(trim_db or 0.0)))
+    # final correction gain (measured after a first mix) + peak limiter at -1 dBTP.
+    # alimiter: level=false, or it auto-gains everything up to 0 dB (measured: -14.5 LUFS instead of -16)
+    tail = (f",volume={trim_db:.2f}dB" if abs(trim_db) > 0.05 else "") + \
+           (",alimiter=limit=0.891:level=false" if (music or abs(trim_db) > 0.05) else "")
     if music:
         inputs += ["-stream_loop", "-1", "-i", music]
         fade = max(0.0, dur - 1.5)
-        gain = -30.0 - music_lufs(music)  # fixed gain to -30 LUFS (loudnorm on a looped stream pumped it up 1.5 LU)
+        # fixed measured gain (loudnorm on a looped stream pumped it up 1.5 LU): music bed 12 LU under the voice
+        gain = (lufs - 12.0) - music_lufs(music)
         graph = (f"[0:a]{voice},asplit=2[vo][key];"
                  f"[1:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
                  f"volume={gain:.2f}dB,afade=t=in:d=1,afade=t=out:st={fade:.2f}:d=1.5[m];"
-                 f"[m][key]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=450[md];"  # ~10 dB under speech
-                 f"[vo][md]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.84:level=false[a]")  # level=true (default) auto-gains up to 0 dB
+                 + (f"[m][key]{duck_filter(lufs, duck_db)}[md];" if duck_db > 0.5 else "[key]anullsink;[m]anull[md];") +
+                 f"[vo][md]amix=inputs=2:duration=first:normalize=0{tail}[a]")
     else:
-        graph = f"[0:a]{voice}[a]"
+        graph = f"[0:a]{voice}{tail}[a]"
     run([FFMPEG, "-y", "-v", "error", *inputs, "-filter_complex", graph, "-map", "0:v", "-map", "[a]",
          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", f"{dur:.3f}", "-movflags", "+faststart", dst],
         timeout=max(600, int(dur * 3)))
@@ -1030,12 +1115,18 @@ def render_project(pid: str, preview: bool) -> Path:
     cache: dict[str, tuple[list, list]] = {}
     scenes = with_effective_cards(scenes, data["settings"])
 
+    for sc in scenes:
+        if sc["src"] not in cache:
+            cache[sc["src"]] = (core.read_json(core.work_file(pid, sc["src"], "words.json"), []) or [],
+                                load_silences(pid, sc["src"]))
+    # word cuts may remove a whole scene: skip it rather than render an empty segment
+    scenes = [sc for sc in scenes if kept_ranges(sc, cache[sc["src"]][1], data["settings"])]
+    if not scenes:
+        raise PipelineError("Every kept scene was cut away completely – nothing to render.")
+
     def render_all(nvenc: bool) -> list[Path]:
         segs = []
         for i, sc in enumerate(scenes, 1):
-            if sc["src"] not in cache:
-                cache[sc["src"]] = (core.read_json(core.work_file(pid, sc["src"], "words.json"), []) or [],
-                                    core.read_json(core.work_file(pid, sc["src"], "silences.json"), []) or [])
             words, sil = cache[sc["src"]]
             core.set_job(pid, progress=f"Rendering scene {i}/{len(scenes)}")
             segs.append(render_segment(pid, data, sc, words, sil, w, h, preview, nvenc=nvenc))
@@ -1065,18 +1156,42 @@ def render_project(pid: str, preview: bool) -> Path:
     st = data["settings"]
     music = music_file(pid, st)
     polish = bool(st.get("audio_polish", False))
-    if music or polish:
-        joined = wd / "joined.part.mp4"
-        try:
+    lufs = _num(st.get("loudness"), -16.0)
+    duck = _num(st.get("duck_db"), 10.0)  # 0 is a valid choice ("don't duck") – no `or default` here
+    try:
+        if music or polish:
+            joined = wd / "joined.part.mp4"
+            try:
+                run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
+                     joined.name], cwd=wd)
+                jdur = probe(joined)["duration"]
+                core.set_job(pid, progress="Mixing audio" + (" + music" if music else ""))
+                try:
+                    finish_audio(joined, tmp_out, jdur, music, polish, lufs, duck)
+                except PipelineError as e:
+                    if not music:
+                        raise
+                    # a damaged/unsupported music file must not cost the whole render
+                    core.job_log(pid, f"Music '{music.name}' could not be mixed ({str(e).splitlines()[-1][:100]})"
+                                      f" – rendered without music")
+                    music = None
+                    finish_audio(joined, tmp_out, jdur, None, polish, lufs, duck)
+                if polish:
+                    # short clips: the two-pass measurement can land ~1 LU off; measure the real mix and correct once
+                    got = measure_lufs(tmp_out)
+                    if got is not None and abs(got - lufs) > 0.5:
+                        tmp2 = tmp_out.with_name(tmp_out.stem + "2.mp4")
+                        finish_audio(joined, tmp2, jdur, music, polish, lufs, duck, trim_db=lufs - got)
+                        os.replace(tmp2, tmp_out)
+            finally:
+                joined.unlink(missing_ok=True)
+        else:
             run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
-                 joined.name], cwd=wd)
-            core.set_job(pid, progress="Mixing audio" + (" + music" if music else ""))
-            finish_audio(joined, tmp_out, probe(joined)["duration"], music, polish)
-        finally:
-            joined.unlink(missing_ok=True)
-    else:
-        run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
-             "-movflags", "+faststart", tmp_out], cwd=wd)
+                 "-movflags", "+faststart", tmp_out], cwd=wd)
+    except BaseException:
+        tmp_out.unlink(missing_ok=True)  # never leave a half-written file in Exports
+        tmp_out.with_name(tmp_out.stem + "2.mp4").unlink(missing_ok=True)
+        raise
     os.replace(tmp_out, out)  # never leave a half-written file in Exports
     dur = probe(out)["duration"]
     _prune_segments(wd, "preview" if preview else "final", segs)

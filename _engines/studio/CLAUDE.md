@@ -29,6 +29,16 @@ BRAND KIT + CARDS: the approved profile is `Brand Kit\brand-kit.md` (+ `brand-ki
 `"card off"`; a scene without a card keeps the previous one. Card text in Hinglish, 2-5 words, ONE orange *keyword*,
 only facts the speaker says or data the user gives (never invent numbers for number/chart cards).
 
+STORYBOARD (plan -> user review -> apply -> render): write a creative plan JSON
+({"summary":..., "<sceneNo>": {"role", "card", "punch":[{s,e,zoom,text,why}], "cuts":[{s,e,text,reason,default}],
+"broll":{"want"|"file"}}}) to `Storyboards/<pid>/claude_plan.json`, then `studio_cli.py storyboard build <pid> <plan>`
+(adds auto items: dead-air trims, pauses, filler/false-start candidates; flags squeezed whisper timings). User reviews
+at http://127.0.0.1:8070/storyboard/<pid> (Scenes tab → Storyboard) and clicks "Send feedback" → inbox command
+kind=storyboard. Then `storyboard show <pid>` (statuses, switches, notes), rework rejected beats per notes (edit plan,
+rebuild — statuses/notes are kept), `storyboard apply <pid>` (approved beats only, undoable), render. VERIFY any
+word cut on the audio first: whisper word times inside fast speech can be off 0.3 s (re-transcribe a padded clip
+with context; micro-silences inside words like "apne" are NOT word gaps). Never render before the user's feedback.
+
 FIRST CUT command (kind=first_cut): read brief + references, then cut weak/duplicate/filler scenes, set
 format/captions/silence removal per the brief, add text titles where useful, reorder if the brief asks, render preview,
 reply with a short scene-by-scene summary.

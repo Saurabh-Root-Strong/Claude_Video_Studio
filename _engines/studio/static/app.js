@@ -81,7 +81,7 @@ function renderAll() {
   if (changed("src", P.sources)) renderSources();
   if (changed("refs", P.references)) renderRefs();
   renderBrief();
-  if (changed("scenes", [P.scenes, P.settings, P.commands.filter((c) => c.status === "claude").map((c) => c.scene), selected])) renderScenes();
+  if (changed("scenes", [P.scenes, P.settings, P.storyboard, P.commands.filter((c) => c.status === "claude").map((c) => c.scene), selected])) renderScenes();
   if (changed("detail", [curScene(), P.commands.length, P.commands.map((c) => c.status).join()])) renderDetail();
   if (changed("renders", P.renders)) {
     renderRenders();
@@ -198,7 +198,11 @@ function renderBrief() {
     $("#brief").value = P.brief || "";
     for (const el of $$("#settingsForm [name]")) {
       const v = P.settings[el.name];
-      el.value = v === null || v === undefined ? "" : String(v);
+      const sv = v === null || v === undefined ? "" : String(v);
+      // a value the dropdown doesn't list (e.g. music = "mytrack.mp3" set by a command) must survive a Save:
+      // otherwise the select shows blank and saving silently changes the setting
+      if (el.tagName === "SELECT" && sv && ![...el.options].some((o) => o.value === sv)) el.add(new Option(sv, sv));
+      el.value = sv;
     }
   }
   $("#briefState").textContent = briefDirty ? "unsaved changes" : P.updated ? `saved` : "";
@@ -213,6 +217,7 @@ function collectSettings() {
     else if (["caption_words"].includes(el.name)) v = parseInt(v || "4", 10);
     else if (["silence_min"].includes(el.name)) v = parseFloat(v || "0.6");
     else if (["face_y"].includes(el.name)) v = parseFloat(v || "0.27");
+    else if (["loudness", "duck_db"].includes(el.name)) { if (v === "") continue; v = parseFloat(v); }  // blank = keep
     else if (el.name === "logo") v = v || null;
     s[el.name] = v;
   }
@@ -257,6 +262,9 @@ function sceneBadges(s) {
 }
 function renderScenes() {
   const t = P.totals || {};
+  const sbb = $("#sbBtn");
+  sbb.style.display = P.storyboard ? "" : "none";
+  if (P.storyboard) sbb.textContent = `Storyboard (${P.storyboard.reviewed}/${P.storyboard.beats} reviewed)`;
   $("#totals").innerHTML = P.scenes.length
     ? `<b>${t.count}</b> scenes · <b>${t.kept}</b> kept · original <b>${fmt(t.orig)}</b> → edit ≈ <b>${fmt(t.est)}</b> · format <b>${esc(P.settings.format)}</b> · captions <b>${P.settings.captions ? "on" : "off"}</b>${P.undo_depth ? ` · ${P.undo_depth} undo steps` : ""}`
     : `No scenes yet — upload footage and click <b>Analyze footage</b> in tab 1.`;
@@ -334,7 +342,8 @@ $("#globalSend").onclick = () => sendCommand(null, $("#globalCmd").value).then((
 $("#globalCmd").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#globalSend").click(); });
 $$("#quickChips button").forEach((b) => (b.onclick = () => { const s = curScene(); if (s) sendCommand(s.id, b.textContent); }));
 $("#undoBtn").onclick = () => api(`/api/projects/${PID}/undo`, { method: "POST" }).then((r) => { toast(r.ok ? "Undone." : "Nothing to undo."); refresh(true); });
-$("#previewBtn").onclick = () => api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "preview" } }).then(() => toast("Rendering preview… (only changed scenes are re-rendered)")).catch((e) => toast(e.message, true));
+$("#sbBtn").onclick = () => window.open(`/storyboard/${PID}`, "_blank");
+$("#previewBtn").onclick =() => api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "preview" } }).then(() => toast("Rendering preview… (only changed scenes are re-rendered)")).catch((e) => toast(e.message, true));
 $("#finalBtn").onclick = () => api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "final" } }).then(() => toast("Exporting full quality to the Exports folder…")).catch((e) => toast(e.message, true));
 
 /* ---------------- player ---------------- */

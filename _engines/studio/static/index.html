@@ -106,6 +106,8 @@
               <label>Face position (0 top – 1 bottom)<input name="face_y" type="number" step="0.01" min="0" max="1" /></label>
               <label>Music<select name="music"><option value="off">Off</option><option value="auto">Quiet (ducks under voice)</option></select></label>
               <label>Audio polish<select name="audio_polish"><option value="false">Off</option><option value="true">Clean voice + loudness</option></select></label>
+              <label>Speech loudness<select name="loudness"><option value="-14">-14 LUFS (Reels/Shorts, loud)</option><option value="-16">-16 LUFS (standard)</option><option value="-18">-18 LUFS (calm)</option></select></label>
+              <label>Music duck under voice (dB)<input name="duck_db" type="number" step="1" min="0" max="30" /></label>
             </div>
             <div class="row">
               <button id="saveBrief" class="btn primary">Save brief &amp; settings</button>
@@ -123,6 +125,7 @@
         <input id="globalCmd" placeholder="Command for the whole video — e.g. format 9:16 · remove silences · highlight #22C55E · make it punchier" />
         <button id="globalSend" class="btn primary">Send</button>
         <button id="undoBtn" class="btn ghost" title="Undo last change">Undo</button>
+        <button id="sbBtn" class="btn claude" style="display:none" title="Beat-by-beat edit plan – approve before rendering">Storyboard</button>
         <button id="previewBtn" class="btn">Render preview</button>
         <button id="finalBtn" class="btn primary">Export final</button>
       </div>

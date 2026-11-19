@@ -6,6 +6,7 @@
   python studio_cli.py set <pid> <scene> key=value ...   set raw scene fields (in, out, keep, speed, text, ...)
   python studio_cli.py done <pid> <cmd_id> "reply"       mark a Claude command done with a reply
   python studio_cli.py captions <pid>             every distinct word -> what the captions show (Hinglish review)
+  python studio_cli.py storyboard build <pid> [creative.json] | show <pid> | apply <pid>   beat-by-beat review
   python studio_cli.py analyze <pid> | render <pid> preview|final
 """
 from __future__ import annotations
@@ -151,6 +152,22 @@ def main(argv):
         cmd(rest[0], rest[1], rest[2])
     elif op == "captions":
         caption_words(rest[0])
+    elif op == "storyboard":  # storyboard build <pid> [creative.json] | storyboard show <pid> | storyboard apply <pid>
+        import storyboard
+        sub, pid = rest[0], rest[1]
+        if sub == "build":
+            creative = json.loads(open(rest[2], encoding="utf-8").read()) if len(rest) > 2 else {}
+            sb = storyboard.build(pid, creative)
+            print(f"{len(sb['beats'])} beats, {sb['dur_before']}s -> {sb['dur_after']}s  ->  {storyboard.html_path(pid)}")
+        elif sub == "show":
+            sb = core.read_json(storyboard.sb_path(pid), {})
+            for b in sb.get("beats", []):
+                print(f"Beat {b['no']} [{b['status']}] {b['dur_before']}s->{b['dur_after']}s  notes: {b['notes']!r}")
+                for it in b["items"]:
+                    print(f"   [{'x' if b['items_on'].get(it['id']) else ' '}] {it['label']}")
+        elif sub == "apply":
+            for line in storyboard.apply(pid):
+                print(line)
     elif op == "set":
         set_fields(rest[0], rest[1], rest[2:])
     elif op == "done":

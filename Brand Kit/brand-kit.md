@@ -1,6 +1,6 @@
 # Brand Kit — "Clean Split" editing profile
 
-Status: **APPROVED 2026-11-19** · for: Hindi finance reels (9:16) · machine-readable twin: `brand-kit.json`
+Status: **APPROVED 2026-11-19**, audio/pause numbers updated by Prompt 3 the same day · for: Hindi finance reels (9:16) · machine-readable twin: `brand-kit.json`
 (new projects start from it; existing projects: **Apply Brand Kit** button in tab 2, undoable)
 
 ---
@@ -27,13 +27,13 @@ I measured it with 112 sampled frames, shot detection in each half of the screen
 | Background | Green screen is **replaced with warm off-white `#F4F1EC`** with a faint vignette. Detected automatically from the frame edges. |
 | Font | **Poppins** (free, OFL license). Bundled in `_engines/studio/fonts/`, so every PC has it. Covers English and Hindi script. |
 | Top panel | **Cards made by Claude**: title / number / chart on navy `#0F1B2D`, with keywords in orange. A card pops in when it changes, then pushes in slowly (4 %) so the panel never sits still. |
-| Music | **Quiet background music.** It is set to −30 LUFS and **ducks ~10 dB under your voice**, with a 1 s fade in and 1.5 s fade out. It uses your own track if one is in `Brand Kit/music/`; otherwise an original generated soft chord pad. |
+| Music | **Quiet background music.** It is set 12 LU under your voice and **ducks −18 dB under dialogue**, with a 1 s fade in and 1.5 s fade out. It uses your own track if one is in `Brand Kit/music/`; otherwise an original generated soft chord pad. |
 
 Fixed parts of the look:
 - **9:16, 1080×1920, 30 fps.** The top panel is 44 %, with a 4 px **orange `#F97316` seam** (your signature).
 - **Speaker framing:** eyes at ~2/3 of the frame height. Adjust with `face up` / `face down`.
-- **Pause removal:** silences of 0.30 s or more are cut. Language is set to Hindi for transcription.
-- **Audio polish:** high-pass at 80 Hz, light de-noise and compression, then **−16 LUFS** (measured two-pass) with true peak ≤ −1.5 dB.
+- **Pause removal:** pauses longer than **0.35 s** are shortened to ~0.24 s (natural breath). Language is set to Hindi for transcription.
+- **Audio polish:** high-pass at 80 Hz, light de-noise and compression, then **−14 LUFS** (measured two-pass, then checked on the final mix and corrected) with peaks ≤ −1 dB.
 - **Colour:** light brightness/contrast lift on the speaker.
 
 ## 3. How to use it
@@ -42,6 +42,7 @@ Fixed parts of the look:
 |---|---|
 | Scene box | `card: title bajaj *IPO* listing aaj` (`*word*` = orange) · `card: number 2x+ \| listing gain` · `card: chart 10,12,11,15 \| Nifty 5 days` · `card off` (empty panel) · `card: same` (keep the previous card) |
 | Whole-video box | `layout split` / `layout full` · `headline: ...` (card for scenes without their own) · `music on` / `music off` · `audio polish` · `background off` / `background on` · `face up` / `face down` |
+| Storyboard | Before rendering, Claude plans the edit beat by beat (cuts, punch-ins, cards); you approve/reject each beat at Scenes tab → **Storyboard**. |
 | Claude inbox | "make the cards" → Claude writes one card per idea, using only facts from your speech or data you give. Charts only use real numbers. |
 
 ## 4. Not built yet

@@ -77,6 +77,11 @@
         card off                               empty top panel
         remove silences      cut pauses everywhere
 
+     STORYBOARD (when Claude has planned the edit): click the orange
+     "Storyboard" button. Each beat shows the planned frame, cuts,
+     zooms and cards. Tick/untick items, click Approve or Reject, write
+     notes, then "Send feedback to Claude". Nothing is rendered before.
+
      Made a mistake?  Click  "Undo".
      Want to see the result?  Click  "Render preview".
      Happy with it?  Click  "Export final".

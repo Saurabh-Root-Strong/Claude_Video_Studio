@@ -80,6 +80,8 @@ DEFAULT_SETTINGS = {
     # final mix
     "audio_polish": False,         # high-pass + denoise + compression + loudness -16 LUFS
     "music": "off",                # off | auto (Brand Kit/music, else a generated soft pad) | file in Brand Kit/music
+    "loudness": -16,               # final speech loudness, LUFS (audio_polish)
+    "duck_db": 10,                 # how far music drops under dialogue, dB
 }
 
 _lock = threading.RLock()
@@ -417,6 +419,10 @@ def clean_setting(key: str, value):
         if key == "caption_font":  # commas/braces would corrupt the subtitle style line
             v = re.sub(r"[,{}\\\r\n]", "", str(value)).strip()[:60]
             return True, v or "Arial"
+        if key == "loudness":
+            return True, round(max(-24.0, min(float(value), -10.0)), 1)
+        if key == "duck_db":
+            return True, round(max(0.0, min(float(value), 30.0)), 1)
         if key == "split_ratio":
             return True, round(max(0.25, min(float(value), 0.60)), 3)
         if key == "face_y":

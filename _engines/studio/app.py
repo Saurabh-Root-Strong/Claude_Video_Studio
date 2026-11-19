@@ -18,6 +18,7 @@ import commands
 import core
 import hinglish
 import pipeline
+import storyboard
 
 HERE = Path(__file__).parent
 PORT = int(os.environ.get("CVE_PORT", "8070"))
@@ -153,6 +154,9 @@ def _decorate(data: dict) -> dict:
                       "kept": sum(1 for s in data["scenes"] if s.get("keep", True)), "count": len(data["scenes"])}
     data["inbox"] = sum(1 for c in data.get("commands", []) if c["status"] == "claude")
     data["undo_depth"] = core.history_depth(data["id"])
+    sb = core.read_json(storyboard.sb_path(data["id"]), None)
+    data["storyboard"] = {"status": sb.get("status"), "beats": len(sb.get("beats", [])),
+                          "reviewed": sum(1 for b in sb.get("beats", []) if b["status"] != "pending")} if sb else None
     return data
 
 
@@ -427,6 +431,54 @@ def api_first_cut(pid):
                               "status": "claude", "reply": "", "by": None, "created": core.now_iso()})
     core.mutate(pid, fn)
     return jsonify(ok=True)
+
+
+# ----------------------------------------------------------------- storyboard review (plan before render)
+
+@app.get("/storyboard/<pid>")
+def storyboard_page(pid):
+    _exists(pid)
+    p = storyboard.html_path(pid)
+    if not p.exists():
+        abort(404, "no storyboard yet – ask Claude to plan the edit")
+    return send_file(p, mimetype="text/html", max_age=0)
+
+
+@app.get("/api/projects/<pid>/storyboard")
+def api_storyboard(pid):
+    _exists(pid)
+    sb = core.read_json(storyboard.sb_path(pid), None)
+    return (jsonify(storyboard.with_stale(pid, sb)), 200) if sb else (jsonify(error="no storyboard yet"), 404)
+
+
+@app.post("/api/projects/<pid>/storyboard/submit")
+def api_storyboard_submit(pid):
+    _exists(pid)
+    sb = core.read_json(storyboard.sb_path(pid), None)
+    if not sb:
+        return jsonify(error="no storyboard yet"), 404
+    ok = sum(1 for b in sb["beats"] if b["status"] == "approved")
+    bad = sum(1 for b in sb["beats"] if b["status"] == "rejected")
+
+    def fn(d):
+        d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "kind": "storyboard",
+                              "text": f"STORYBOARD FEEDBACK – {ok} approved, {bad} rejected, "
+                                      f"{len(sb['beats']) - ok - bad} pending. Apply approved beats, rework rejected "
+                                      f"ones from the notes, then render.",
+                              "status": "claude", "reply": "", "by": None, "created": core.now_iso()})
+    core.mutate(pid, fn)
+    return jsonify(ok=True)
+
+
+@app.post("/api/projects/<pid>/storyboard/<sid>")
+def api_storyboard_review(pid, sid):
+    _exists(pid)
+    body = request.json or {}
+    try:
+        b = storyboard.set_review(pid, sid, body.get("status"), body.get("notes"), body.get("items_on"))
+    except ValueError as e:
+        return jsonify(error=str(e)), 409 if "applied" in str(e) else 404
+    return jsonify(b)
 
 
 @app.post("/api/projects/<pid>/command/<cid>/cancel")

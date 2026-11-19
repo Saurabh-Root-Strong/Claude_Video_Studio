@@ -86,4 +86,7 @@ _engines/README.md        engine notes and test results
 - HyperFrames: run `init` with `--skip-skills`. Set `HYPERFRAMES_NO_TELEMETRY=1` if you don't want usage data sent.
 
 ## Brand Kit
-`Brand Kit/brand-kit.md` is the approved editing profile ("Clean Split": cards on top, speaker on a keyed off-white background below, captions on an orange seam, ducked music, -16 LUFS). `brand-kit.json` holds its settings: new projects start from it, and **Apply Brand Kit** (tab 2) applies it to an existing project. Poppins (OFL) is bundled in `_engines/studio/fonts/`.
+`Brand Kit/brand-kit.md` is the approved editing profile ("Clean Split": cards on top, speaker on a keyed off-white background below, captions on an orange seam, ducked music, -14 LUFS). `brand-kit.json` holds its settings: new projects start from it, and **Apply Brand Kit** (tab 2) applies it to an existing project. Poppins (OFL) is bundled in `_engines/studio/fonts/`.
+
+## Storyboard review
+Before rendering, Claude can plan the edit beat by beat (`studio_cli.py storyboard build <pid> <plan.json>`): dead-air trims, pause shortening, filler/false-start cuts (word timings verified), punch-in zooms on hooks, cards and B-roll slots. The review dashboard (Scenes tab → **Storyboard**, or `/storyboard/<pid>`; also saved as `Storyboards/<pid>/storyboard.html`) shows each beat as a planned frame with a timeline and per-item switches, plus Approve / Reject / Notes. *Send feedback to Claude* puts it in the inbox; `storyboard apply <pid>` applies approved beats once (undoable).

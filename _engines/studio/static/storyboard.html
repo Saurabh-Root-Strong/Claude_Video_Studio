@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storyboard Review</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#2a2f3a;--txt:#e7e9ee;--muted:#8b93a3;--acc:#f97316;--ok:#22c55e;--bad:#ef4444;--navy:#0f1b2d;--off:#f4f1ec}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 "Segoe UI",system-ui,sans-serif}
+header{position:sticky;top:0;z-index:5;background:#12151bf2;backdrop-filter:blur(6px);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+h1{font-size:17px;margin:0 12px 0 0}
+.chip{border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:12px;color:var(--muted)}
+.chip b{color:var(--txt)}
+.spacer{flex:1}
+button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--line);background:#20242d;color:var(--txt);padding:7px 12px}
+button:hover{border-color:#3b4250}
+button.pri{background:var(--acc);border-color:var(--acc);color:#111;font-weight:600}
+button.ok.on{background:var(--ok);border-color:var(--ok);color:#06210f;font-weight:600}
+button.bad.on{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:600}
+main{max-width:1180px;margin:0 auto;padding:18px 20px 80px}
+.summary{color:var(--muted);margin:0 0 16px}
+.prog{height:6px;background:#222733;border-radius:6px;overflow:hidden;margin:6px 0 18px}
+.prog i{display:block;height:100%;background:var(--ok)}
+.beat{display:grid;grid-template-columns:150px 1fr;gap:18px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:16px}
+.beat.approved{border-color:#1f6b3a}.beat.rejected{border-color:#7a2626;opacity:.82}
+.mock{width:150px;aspect-ratio:9/16;border-radius:12px;overflow:hidden;position:relative;background:var(--off);box-shadow:0 0 0 1px #000}
+.mock .top{position:absolute;inset:0 0 56% 0;background:var(--navy);display:flex;align-items:center;justify-content:center;text-align:center;padding:6px;font:700 12px/1.15 Poppins,"Segoe UI",sans-serif;color:#fff}
+.mock .top .num{font-size:30px;color:var(--acc);display:block;line-height:1}
+.mock .top small{display:block;font-weight:400;font-size:9px;margin-top:4px}
+.mock .top em{color:var(--acc);font-style:normal}
+.mock .seam{position:absolute;left:0;right:0;top:44%;height:2px;background:var(--acc)}
+.mock img{position:absolute;left:0;right:0;bottom:0;top:44%;width:100%;height:56%;object-fit:cover;object-position:50% 20%}
+.mock .cap{position:absolute;left:4%;right:4%;top:44%;transform:translateY(-50%);text-align:center;font:700 9px Poppins,"Segoe UI",sans-serif;color:#fff;text-shadow:0 0 2px #000,0 0 2px #000}
+.mock .cap em{color:var(--acc);font-style:normal}
+.mock .safe{position:absolute;left:4%;right:14%;top:11%;bottom:22%;border:1px dashed #22c55e99;pointer-events:none}
+.mock .zoom{position:absolute;right:4px;bottom:4px;background:#000a;color:var(--acc);font-size:10px;padding:1px 5px;border-radius:5px}
+.bh{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline}
+.bh h2{margin:0;font-size:16px}
+.bh .t{color:var(--muted);font-size:12px}
+.role{color:var(--acc);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.line{font-size:15px;margin:8px 0 10px}
+.line .w{border-radius:4px;padding:0 1px}
+.line .w.cut{background:#ef444433;text-decoration:line-through;color:#ffb4b4}
+.line .w.pun{background:#f9731633;color:#ffd2b0}
+.tl{position:relative;height:22px;background:#222733;border-radius:6px;margin:4px 0 12px;overflow:hidden}
+.tl span{position:absolute;top:0;bottom:0}
+.tl .sp{background:#3b4a63}.tl .pa{background:repeating-linear-gradient(45deg,#555 0 3px,#333 3px 6px)}
+.tl .cu{background:#ef4444cc}.tl .pu{background:transparent;border:2px solid var(--acc);border-radius:4px}
+.tl .tr{background:#ef444466}
+.legend{font-size:11px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap;margin:-6px 0 10px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.items{list-style:none;padding:0;margin:0 0 12px;display:grid;gap:6px}
+.items li{display:flex;gap:8px;align-items:flex-start;background:#1c2029;border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+.items li.off{opacity:.5}
+.items .ty{font-size:10px;text-transform:uppercase;letter-spacing:.05em;border-radius:4px;padding:1px 6px;margin-top:2px;white-space:nowrap}
+.ty.cut,.ty.trim{background:#ef444433;color:#ffb4b4}.ty.pause{background:#33394a;color:#c8cfdc}
+.ty.punch{background:#f9731633;color:#ffd2b0}.ty.card{background:#1e3a5f;color:#bcd7ff}.ty.broll{background:#3b2f5c;color:#d6c8ff}
+.items input{margin-top:3px;accent-color:var(--acc)}
+.acts{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+textarea{width:100%;min-height:44px;resize:vertical;background:#11141a;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;margin-top:8px}
+.dur{font-size:12px;color:var(--muted)}
+.dur b{color:var(--txt)}
+video{width:100%;max-width:420px;border-radius:8px;margin-top:8px;display:none;background:#000}
+.flag{font-size:11px;border-radius:5px;padding:1px 7px}.flag.ok{background:#14532d;color:#bbf7d0}.flag.warn{background:#713f12;color:#fde68a}
+.beat.locked input,.beat.locked .acts button[data-act=approved],.beat.locked .acts button[data-act=rejected],.beat.locked textarea{pointer-events:none;opacity:.55}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#20242d;border:1px solid var(--line);padding:9px 16px;border-radius:9px;display:none}
+.offline{background:#3b2f00;color:#ffe08a;padding:8px 20px;font-size:13px;display:none}
+@media (max-width:640px){.beat{grid-template-columns:1fr}.mock{width:130px}}
+</style>
+</head>
+<body>
+<div class="offline" id="offline">Opened from disk: choices are kept in this browser only. For saving to the project, open it from the studio (Scenes tab → Storyboard), or use “Copy feedback”.</div>
+<header>
+  <h1 id="title">Storyboard</h1>
+  <span class="chip" id="durChip"></span>
+  <span class="chip" id="cntChip"></span>
+  <span class="chip" id="setChip"></span>
+  <span class="spacer"></span>
+  <button id="allOk">Approve all pending</button>
+  <button id="copyBtn">Copy feedback</button>
+  <button class="pri" id="sendBtn">Send feedback to Claude</button>
+</header>
+<main>
+  <p class="summary" id="summary"></p>
+  <div class="prog"><i id="prog"></i></div>
+  <div class="legend">
+    <span><i style="background:#3b4a63"></i>speech kept</span><span><i style="background:#555"></i>pause (shortened)</span>
+    <span><i style="background:#ef4444"></i>cut</span><span><i style="border:2px solid #f97316"></i>punch-in zoom</span>
+    <span><i style="border:1px dashed #22c55e"></i>vertical safe zone (in the mock-up)</span>
+  </div>
+  <div id="beats"></div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const EMBED = /*__EMBEDDED__*/null;
+const m = location.pathname.match(/^\/storyboard\/([a-z0-9-]+)/);
+const LIVE = !!m && location.protocol.startsWith("http");
+const PID = m ? m[1] : (EMBED && EMBED.pid);
+let SB = null;
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const fmt = (t) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`;
+function toast(t) { const e = $("#toast"); e.textContent = t; e.style.display = "block"; clearTimeout(toast.h); toast.h = setTimeout(() => (e.style.display = "none"), 2600); }
+const LS = "cve.sb." + PID;
+function kw(text) { return esc(text).replace(/\*(.+?)\*/g, "<em>$1</em>"); }
+
+async function load() {
+  if (LIVE) {
+    const r = await fetch(`/api/projects/${PID}/storyboard`);
+    if (!r.ok) { document.body.innerHTML = `<p style="padding:30px">No storyboard yet for this project.</p>`; return; }
+    SB = await r.json();
+  } else {
+    $("#offline").style.display = "block";
+    SB = EMBED;
+    try { const saved = JSON.parse(localStorage.getItem(LS) || "null"); if (saved) for (const b of SB.beats) Object.assign(b, saved[b.scene] || {}); } catch {}
+  }
+  render();
+}
+function persistLocal() {
+  try { const o = {}; for (const b of SB.beats) o[b.scene] = { status: b.status, notes: b.notes, items_on: b.items_on }; localStorage.setItem(LS, JSON.stringify(o)); } catch {}
+}
+async function save(b, patch) {
+  Object.assign(b, patch);
+  if (patch.items_on) b.items_on = { ...b.items_on, ...patch.items_on };
+  if (LIVE) {
+    const r = await fetch(`/api/projects/${PID}/storyboard/${b.scene}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+    if (r.ok) { const nb = await r.json(); Object.assign(b, nb); SB.dur_after = SB.beats.reduce((a, x) => a + (x.dur_after || 0), 0); }
+    else { let msg = "Could not save – is the studio still running?"; try { msg = (await r.json()).error || msg; } catch {} toast(msg); await load(); return; }
+  } else persistLocal();
+  render();
+}
+function mock(b) {
+  const on = b.items_on;
+  const card = b.items.find((i) => i.type === "card" && on[i.id]);
+  const punch = b.items.find((i) => i.type === "punch" && on[i.id]);
+  let top = "";
+  if (card) {
+    const c = card.card;
+    top = c.kind === "number" ? `<div><span class="num">${esc(c.value)}</span><small>${esc(c.label || "")}</small></div>`
+      : c.kind === "chart" ? `<div>📈<small>${esc(c.label || "chart")}</small></div>` : c.kind === "title" ? `<div>${kw(c.text)}</div>` : "";
+  } else top = `<div style="color:#6b7790;font-weight:400;font-size:10px">(previous card continues)</div>`;
+  const w = b.words.slice(0, 4).map((x, i) => (i === 1 ? `<em>${esc(x.t)}</em>` : esc(x.t))).join(" ");
+  const thumb = b.thumb ? `<img src="${LIVE ? `/media/${PID}/thumbs/${encodeURIComponent(b.thumb)}` : `work/thumbs/${encodeURIComponent(b.thumb)}`}" alt="">` : "";
+  return `<div class="mock" title="Planned frame: card on top, you below, caption on the seam. Dashed = safe zone (clear of Reels/Shorts buttons).">
+    <div class="top">${top}</div>${thumb}<div class="seam"></div><div class="cap">${w}</div><div class="safe"></div>
+    ${punch ? `<span class="zoom">${punch.zoom}× punch</span>` : ""}</div>`;
+}
+function timeline(b) {
+  const span = b.out - b.in || 1, pct = (t) => (((t - b.in) / span) * 100).toFixed(2) + "%";
+  const wpx = (a, z) => `left:${pct(a)};width:${(((z - a) / span) * 100).toFixed(2)}%`;
+  let h = "";
+  for (const x of b.words) h += `<span class="sp" style="${wpx(x.s, x.e)}" title="${esc(x.t)}"></span>`;
+  for (const it of b.items) {
+    if (!b.items_on[it.id]) continue;
+    if (it.type === "pause") h += `<span class="pa" style="${wpx(it.s, it.e)}" title="${esc(it.label)}"></span>`;
+    if (it.type === "cut") h += `<span class="cu" style="${wpx(it.s, it.e)}" title="${esc(it.label)}"></span>`;
+    if (it.type === "trim") h += it.edge === "in" ? `<span class="tr" style="${wpx(b.in, it.to)}"></span>` : `<span class="tr" style="${wpx(it.to, b.out)}"></span>`;
+    if (it.type === "punch") h += `<span class="pu" style="${wpx(it.s, it.e)}" title="${esc(it.label)}"></span>`;
+  }
+  return `<div class="tl">${h}</div>`;
+}
+function line(b) {
+  const on = b.items_on;
+  const cuts = b.items.filter((i) => i.type === "cut" && on[i.id]), pun = b.items.filter((i) => i.type === "punch" && on[i.id]);
+  return b.words.map((x) => {
+    const mid = (x.s + x.e) / 2;
+    const c = cuts.some((i) => mid >= i.s && mid <= i.e) ? "cut" : pun.some((i) => mid >= i.s && mid <= i.e) ? "pun" : "";
+    return `<span class="w ${c}">${esc(x.t)}</span>`;
+  }).join(" ") || `<span style="color:var(--muted)">(no speech)</span>`;
+}
+function render() {
+  $("#title").textContent = `Storyboard · ${SB.name}`;
+  const after = SB.beats.reduce((a, x) => a + (x.status === "rejected" ? x.dur_before : x.dur_after || 0), 0);
+  $("#durChip").innerHTML = `length <b>${fmt(SB.dur_before)}</b> → <b>${fmt(after)}</b>`;
+  const n = SB.beats.length || 1, ok = SB.beats.filter((b) => b.status === "approved").length, bad = SB.beats.filter((b) => b.status === "rejected").length;
+  $("#cntChip").innerHTML = `<b>${ok}</b> approved · <b>${bad}</b> rejected · <b>${n - ok - bad}</b> pending`;
+  const s = SB.settings || {};
+  $("#setChip").innerHTML = `speech <b>${s.loudness} LUFS</b> · music duck <b>−${s.duck_db} dB</b> · pauses > <b>${s.silence_min}s</b> · captions <b>${esc(s.caption_script)}</b>`;
+  $("#summary").textContent = SB.summary || "";
+  $("#prog").style.width = `${((ok + bad) / n) * 100}%`;
+  if (!SB.beats.length) { $("#beats").innerHTML = `<p style="color:var(--muted)">No scenes in this project yet – analyze footage first.</p>`; return; }
+  $("#beats").innerHTML = SB.beats.map((b) => `
+    <section class="beat ${b.status} ${b.applied || b.stale ? "locked" : ""}" data-id="${b.scene}">
+      <div>${mock(b)}<div class="dur" style="margin-top:8px">${fmt(b.in)}–${fmt(b.out)}<br><b>${b.dur_before}s → ${b.status === "rejected" ? b.dur_before : b.dur_after}s</b></div></div>
+      <div>
+        <div class="bh"><h2>Beat ${b.no}</h2>${b.role ? `<span class="role">${esc(b.role)}</span>` : ""}<span class="t">${esc(b.src)}</span>${b.applied ? `<span class="flag ok">✓ applied to the edit</span>` : ""}${b.stale ? `<span class="flag warn">⚠ this scene changed since planning – Claude must rebuild this beat</span>` : ""}</div>
+        <div class="line">${line(b)}</div>
+        ${timeline(b)}
+        <ul class="items">${b.items.map((it) => `
+          <li class="${b.items_on[it.id] ? "" : "off"}">
+            <input type="checkbox" data-item="${esc(it.id)}" ${b.items_on[it.id] ? "checked" : ""} ${it.type === "pause" ? 'disabled title="Pauses follow the whole-video setting"' : ""}>
+            <span class="ty ${it.type}">${it.type === "pause" ? "dead air" : it.type}</span><span>${esc(it.label)}</span></li>`).join("") || "<li>No changes planned.</li>"}</ul>
+        <div class="acts">
+          <button class="ok ${b.status === "approved" ? "on" : ""}" data-act="approved">✓ Approve</button>
+          <button class="bad ${b.status === "rejected" ? "on" : ""}" data-act="rejected">✕ Reject</button>
+          ${b.proxy && LIVE ? `<button data-act="play">▶ Play original</button>` : ""}
+        </div>
+        <textarea placeholder="Notes for Claude (e.g. keep the second 'to dosto', different card text, zoom later)…" data-notes>${esc(b.notes)}</textarea>
+        <video data-v preload="none" controls></video>
+      </div>
+    </section>`).join("");
+  for (const sec of document.querySelectorAll(".beat")) {
+    const b = SB.beats.find((x) => x.scene === sec.dataset.id);
+    sec.querySelectorAll("[data-act]").forEach((btn) => (btn.onclick = () => {
+      const a = btn.dataset.act;
+      if (a === "play") { const v = sec.querySelector("video"); v.style.display = "block"; v.src = `/media/${PID}/proxy/${encodeURIComponent(b.proxy)}#t=${b.in},${b.out}`; v.play(); return; }
+      save(b, { status: b.status === a ? "pending" : a });
+    }));
+    sec.querySelectorAll("[data-item]").forEach((cb) => (cb.onchange = () => save(b, { items_on: { [cb.dataset.item]: cb.checked } })));
+    const ta = sec.querySelector("[data-notes]");
+    ta.onchange = () => save(b, { notes: ta.value });
+  }
+}
+function feedbackText() {
+  return SB.beats.map((b) => `Beat ${b.no}: ${b.status.toUpperCase()}` +
+    b.items.filter((i) => i.type !== "pause").map((i) => `\n  [${b.items_on[i.id] ? "x" : " "}] ${i.label}`).join("") +
+    (b.notes ? `\n  Notes: ${b.notes}` : "")).join("\n");
+}
+$("#allOk").onclick = async () => { for (const b of SB.beats) if (b.status === "pending") await save(b, { status: "approved" }); toast("All pending beats approved."); };
+$("#copyBtn").onclick = async () => { try { await navigator.clipboard.writeText(feedbackText()); toast("Feedback copied – paste it to Claude."); } catch { toast("Copy failed"); } };
+$("#sendBtn").onclick = async () => {
+  if (!LIVE) { $("#copyBtn").click(); return; }
+  const pend = SB.beats.filter((b) => b.status === "pending").length;
+  if (pend && !confirm(`${pend} beat(s) still pending – pending beats are NOT applied. Send anyway?`)) return;
+  const r = await fetch(`/api/projects/${PID}/storyboard/submit`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  toast(r.ok ? "Sent. In VS Code say: process studio inbox" : "Could not send.");
+};
+load();
+</script>
+</body>
+</html>

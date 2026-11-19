@@ -154,6 +154,52 @@ try:
     sc4 = core.scene_by_id(core.load(pid), scenes[3]["id"])
     check("reset trim restores full length", sc4["out"] == sc4["orig_out"])
 
+    # ---------------------------------------------------------------- storyboard: plan -> review -> apply
+    import storyboard
+    d = core.load(pid)
+    s0 = d["scenes"][0]
+    mid = (s0["in"] + s0["out"]) / 2
+    sbd = storyboard.build(pid, {"1": {"card": {"kind": "title", "text": "test *card*"},
+                                       "punch": [{"s": round(mid - 0.6, 2), "e": round(mid + 0.6, 2), "zoom": 1.1,
+                                                  "text": "x"}]}})
+    page = client.get(f"/storyboard/{pid}")
+    sid0 = sbd["beats"][0]["scene"]
+    r = post(f"/api/projects/{pid}/storyboard/{sid0}", {"status": "approved", "notes": "ok"})
+    n_before = len(core.load(pid)["scenes"])
+    storyboard.apply(pid)
+    d = core.load(pid)
+    z = [s for s in d["scenes"] if s.get("zoom") == 1.1]
+    check("storyboard: dashboard served, review saved, approved punch-in = split + zoom, card set",
+          page.status_code == 200 and b"Storyboard" in page.data and r.get_json()["status"] == "approved" and
+          len(d["scenes"]) == n_before + 2 and len(z) == 1 and abs(z[0]["in"] - (mid - 0.6)) < 0.01 and
+          d["scenes"][0].get("card", {}).get("text") == "test *card*")
+    again = storyboard.apply(pid)
+    r409 = post(f"/api/projects/{pid}/storyboard/{sid0}", {"status": "rejected"})
+    check("storyboard apply runs ONCE per beat (no double split); applied beat is locked",
+          len(core.load(pid)["scenes"]) == n_before + 2 and "nothing to apply" in again[0] and r409.status_code == 409)
+    post(f"/api/projects/{pid}/undo")
+    sbu = client.get(f"/api/projects/{pid}/storyboard").get_json()
+    check("storyboard apply is undoable – and after undo the beat can be applied again",
+          len(core.load(pid)["scenes"]) == n_before and sbu["beats"][0]["applied"] is False and
+          "applied" in storyboard.apply(pid)[0])
+    post(f"/api/projects/{pid}/undo")
+    sb2 = storyboard.build(pid, {"1": {"card": {"kind": "title", "text": "CHANGED *card*"}}})
+    check("reworked beat loses its old approval (user must see the new version)", sb2["beats"][0]["status"] == "pending"
+          and sb2["beats"][0]["notes"] == "ok")
+    # word cuts: partial cut shortens, a cut covering the whole scene removes it (not "keep everything")
+    s0 = core.load(pid)["scenes"][0]
+    part = pipeline.kept_ranges(dict(s0, cuts=[[s0["in"] + 0.5, s0["in"] + 1.0]], remove_silence=False), [], {})
+    full = pipeline.kept_ranges(dict(s0, cuts=[[s0["in"] - 1, s0["out"] + 1]], remove_silence=False), [], {})
+    check("word cuts: partial cut removes 0.5 s; whole-scene cut leaves nothing",
+          abs(sum(b - a for a, b in part) - (s0["out"] - s0["in"] - 0.5)) < 0.01 and full == [])
+    # projects analysed before pauses were stored down to 0.2 s get re-detected once
+    src0 = core.load(pid)["sources"][0]["file"]
+    (core.work_dir(pid) / f"{src0}.{pipeline.SILENCE_V}").unlink(missing_ok=True)
+    core._atomic_write(core.work_file(pid, src0, "silences.json"), [[1.0, 1.5]])
+    sil2 = pipeline.load_silences(pid, src0)
+    check("legacy pause data upgraded once (finer pauses detected, marker written)",
+          sil2 != [[1.0, 1.5]] and (core.work_dir(pid) / f"{src0}.{pipeline.SILENCE_V}").exists())
+
     # ---------------------------------------------------------------- settings validation
     r = post(f"/api/projects/{pid}/brief", {"settings": {"caption_font": "Arial, Bold{x}"}})
     check("caption font sanitised (no comma/brace)", r.status_code == 200 and
@@ -260,6 +306,7 @@ try:
     core.BRAND.mkdir(exist_ok=True)
     (core.BRAND / "brand-kit.json").write_text(json.dumps({"settings": {
         "layout": "split", "format": "9:16", "music": "auto", "audio_polish": True, "caption_font": "Poppins",
+        "loudness": -14, "duck_db": 18,
         "bogus_key": 1, "silence_min": "not a number"}}), encoding="utf-8")
     p3 = post("/api/projects", {"name": "Split Test"}).get_json()["id"]
     st3 = core.load(p3)["settings"]
@@ -297,7 +344,37 @@ try:
         lo = subprocess.run([core.FFMPEG, "-hide_banner", "-i", str(o3), "-af", "ebur128=framelog=quiet", "-f", "null", "-"],
                             capture_output=True, text=True, encoding="utf-8", errors="replace").stderr
         lufs = float(_re.findall(r"I:\s+(-?[\d.]+) LUFS", lo)[-1])
-        check("final loudness -16 LUFS (+-1)", -17.0 <= lufs <= -15.0, f"{lufs} LUFS")
+        check("final loudness -14 LUFS (+-0.6, measured + corrected)", -14.6 <= lufs <= -13.4, f"{lufs} LUFS")
+        # damaged music file must not cost the render; duck 0 = no ducking (was silently 10)
+        (core.BRAND / "music").mkdir(exist_ok=True)
+        (core.BRAND / "music" / "broken.mp3").write_bytes(b"not really an mp3" * 50)
+        post(f"/api/projects/{p3}/brief", {"settings": {"music": "broken.mp3", "duck_db": 0}})
+        post(f"/api/projects/{p3}/render", {"kind": "preview"})
+        jb = wait_job(p3, "preview")
+        check("broken music file -> render still succeeds, without music, and says so",
+              jb["status"] == "done" and any("could not be mixed" in x for x in jb.get("log", [])), jb.get("error") or "")
+        check("duck_db 0 is kept as 0 (no '0 or default' bug)", core.load(p3)["settings"]["duck_db"] == 0)
+        (core.BRAND / "music" / "broken.mp3").unlink()
+        post(f"/api/projects/{p3}/brief", {"settings": {"music": "auto", "duck_db": 18}})
+        # duck depth: ducked music alone vs the voice, music RMS in speech vs in pauses
+        import math, struct, wave
+        pad = pipeline.generated_pad()
+        g = (f"[0:a]aresample=48000,loudnorm=I=-14:TP=-1,asplit=2[vo][key];[1:a]aformat=sample_fmts=fltp:"
+             f"sample_rates=48000:channel_layouts=stereo,volume={-26 - pipeline.music_lufs(pad):.2f}dB[m];"
+             f"[m][key]{pipeline.duck_filter(-14, 18)}[md]")
+        subprocess.run([core.FFMPEG, "-v", "error", "-y", "-i", str(FIX / "recap_test.mp4"), "-stream_loop", "-1",
+                        "-i", str(pad), "-filter_complex", g, "-map", "[md]", "-ac", "1", "-ar", "16000", "-t", "20",
+                        str(ROOT / "md.wav"), "-map", "[vo]", "-ac", "1", "-ar", "16000", "-t", "20",
+                        str(ROOT / "vo.wav")], check=True)
+        rd = lambda p: (lambda w: struct.unpack(f"<{w.getnframes()}h", w.readframes(w.getnframes())))(wave.open(str(p)))  # noqa: E731
+        md, vo = rd(ROOT / "md.wav"), rd(ROOT / "vo.wav")
+        sp, gp = [], []
+        for i in range(0, min(len(md), len(vo)) - 1600, 1600):
+            v = math.sqrt(sum(a * a for a in vo[i:i + 1600]) / 1600) + 1e-9
+            m = math.sqrt(sum(a * a for a in md[i:i + 1600]) / 1600) + 1e-9
+            (sp if 20 * math.log10(v / 32768) > -35 else gp).append(20 * math.log10(m / 32768))
+        depth = sorted(gp)[len(gp) // 2] - sorted(sp)[len(sp) // 2]
+        check("music ducks ~18 dB under dialogue (+-2.5)", 15.5 <= depth <= 20.5, f"{depth:.1f} dB")
         fd = abs(sdur(o3, "a:0") - sdur(o3, "v:0")) * 1000
         check("split export A/V lengths match (<=60 ms)", fd <= 60, f"{fd:.0f} ms")
 

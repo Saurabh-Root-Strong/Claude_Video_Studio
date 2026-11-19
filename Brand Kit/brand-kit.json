@@ -11,7 +11,7 @@
     "caption_font": "Poppins",
     "language": "hi",
     "remove_silence": true,
-    "silence_min": 0.3,
+    "silence_min": 0.35,
     "layout": "split",
     "split_ratio": 0.44,
     "bg_mode": "auto",
@@ -19,6 +19,9 @@
     "panel_color": "#0F1B2D",
     "grade": true,
     "audio_polish": true,
-    "music": "auto"
-  }
+    "music": "auto",
+    "loudness": -14,
+    "duck_db": 18
+  },
+  "updated": "2026-11-19 (Prompt 3: -14 LUFS, duck -18 dB, pauses > 0.35 s)"
 }
