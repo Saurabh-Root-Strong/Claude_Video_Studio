@@ -88,8 +88,11 @@ def _worker():
             core.set_job(pid, status="done", progress=msg, finished=core.now_iso())
         except Exception as e:  # report every failure to the UI rather than dying silently
             traceback.print_exc()
-            core.job_log(pid, f"ERROR: {e}")
-            core.set_job(pid, status="error", error=str(e), progress="Failed", finished=core.now_iso())
+            try:
+                core.job_log(pid, f"ERROR: {e}")
+                core.set_job(pid, status="error", error=str(e), progress="Failed", finished=core.now_iso())
+            except Exception:  # project deleted/unreadable – reporting must never kill the worker thread
+                traceback.print_exc()
         finally:
             _jobs.task_done()
 
@@ -112,6 +115,16 @@ def enqueue(pid: str, kind: str, **args):
 
 # ----------------------------------------------------------------- helpers
 
+def _cap_commands(d: dict, keep: int = 400) -> None:
+    """History is polled every 2 s – keep it bounded. Never drop anything still waiting for Claude."""
+    cmds = d.get("commands", [])
+    if len(cmds) > keep:
+        pending = [c for c in cmds if c["status"] == "claude"]
+        rest = [c for c in cmds if c["status"] != "claude"][-(keep - len(pending)):]
+        ids = {c["id"] for c in pending + rest}
+        d["commands"] = [c for c in cmds if c["id"] in ids]
+
+
 def _exists(pid: str):
     if not core.valid_pid(pid):
         abort(404, "project not found")
@@ -119,16 +132,14 @@ def _exists(pid: str):
 
 def _decorate(data: dict) -> dict:
     """Add derived display fields (estimated durations, numbering)."""
-    wd = core.work_dir(data["id"])
     sil_cache: dict[str, list] = {}
     total_orig = total_est = 0.0
     for i, sc in enumerate(data["scenes"], 1):
-        stem = Path(sc["src"]).stem
-        if stem not in sil_cache:
-            sil_cache[stem] = core.read_json(wd / f"{stem}.silences.json", []) or []
+        if sc["src"] not in sil_cache:
+            sil_cache[sc["src"]] = core.read_json(core.work_file(data["id"], sc["src"], "silences.json"), []) or []
         sc["no"] = i
         sc["dur"] = round(sc["out"] - sc["in"], 2)
-        sc["est"] = pipeline.estimated_duration(sc, sil_cache[stem], data["settings"])
+        sc["est"] = pipeline.estimated_duration(sc, sil_cache[sc["src"]], data["settings"])
         total_orig += sc["dur"]
         total_est += sc["est"]
     data["totals"] = {"orig": round(total_orig, 1), "est": round(total_est, 1),
@@ -144,10 +155,9 @@ def _refresh_scene_meta(pid: str, data: dict, scene_ids: set[str], new_thumbs: s
     for sc in data["scenes"]:
         if sc["id"] not in scene_ids:
             continue
-        stem = Path(sc["src"]).stem
-        if stem not in words_cache:
-            words_cache[stem] = core.read_json(wd / f"{stem}.words.json", []) or []
-        sc["transcript"] = " ".join(w["w"] for w in pipeline.words_in(words_cache[stem], sc["in"], sc["out"]))
+        if sc["src"] not in words_cache:
+            words_cache[sc["src"]] = core.read_json(core.work_file(pid, sc["src"], "words.json"), []) or []
+        sc["transcript"] = " ".join(w["w"] for w in pipeline.words_in(words_cache[sc["src"]], sc["in"], sc["out"]))
         if sc["id"] in new_thumbs:
             try:
                 pipeline.thumbnail(core.raw_dir(pid) / sc["src"], sc["in"] + (sc["out"] - sc["in"]) / 2,
@@ -218,17 +228,22 @@ def api_upload(pid):
     if not files:
         return jsonify(error="No files received."), 400
     folder = core.raw_dir(pid) if kind == "source" else core.refs_dir(pid)
-    saved = []
+    saved, skipped = [], []
     for f in files:
         name = core.safe_filename(f.filename or "upload")
         ext = Path(name).suffix.lower()
         if kind == "source" and ext not in core.VIDEO_EXT:
+            skipped.append(name)
             continue
         dest = core.unique_path(folder, name)
-        f.save(dest)
+        try:
+            f.save(dest)
+        except OSError as e:  # disk full / permission – don't leave a half-written file behind
+            dest.unlink(missing_ok=True)
+            return jsonify(error=f"Could not save {name}: {e.strerror or e}. Is the disk full?"), 507
         saved.append(dest.name)
     if not saved:
-        return jsonify(error="No supported files (footage must be a video file)."), 400
+        return jsonify(error=f"No supported files – footage must be a video ({', '.join(sorted(core.VIDEO_EXT))})."), 400
 
     def fn(d):
         for n in saved:
@@ -246,7 +261,7 @@ def api_upload(pid):
                 pass
     else:
         enqueue(pid, "ref_analyze", files=saved)
-    return jsonify(saved=saved)
+    return jsonify(saved=saved, skipped=skipped)
 
 
 @app.post("/api/projects/<pid>/source/remove")
@@ -291,16 +306,22 @@ def api_ref_url(pid):
 def api_brief(pid):
     _exists(pid)
     body = request.json or {}
+    rejected = []
 
     def fn(d):
         if "brief" in body:
-            d["brief"] = body["brief"]
-        if "name" in body and body["name"].strip():
-            d["name"] = body["name"].strip()
+            d["brief"] = str(body["brief"])[:20000]
+        if "name" in body and str(body["name"]).strip():
+            d["name"] = str(body["name"]).strip()[:120]
         for k, v in (body.get("settings") or {}).items():
-            if k in core.DEFAULT_SETTINGS:
-                d["settings"][k] = v
+            ok, clean = core.clean_setting(k, v)
+            if ok:
+                d["settings"][k] = clean
+            elif k in core.DEFAULT_SETTINGS:
+                rejected.append(k)
     core.mutate(pid, fn)
+    if rejected:
+        return jsonify(ok=False, error=f"Not saved (invalid value): {', '.join(rejected)}"), 400
     return jsonify(ok=True)
 
 
@@ -360,6 +381,7 @@ def api_command(pid):
             d["commands"].append({"id": core.new_id("cmd"), "scene": sid, "scene_no": no,
                                   "text": "; ".join(unhandled), "status": "claude", "reply": "",
                                   "by": None, "created": core.now_iso()})
+        _cap_commands(d)
         return {"replies": replies, "queued": unhandled}
     _, result = core.mutate(pid, fn)
     if result.get("error"):
@@ -443,16 +465,26 @@ def api_open(pid):
 
 
 if __name__ == "__main__":
-    import socket
     for d in (core.RAW, core.REFS, core.STORY, core.EXPORTS, core.BRAND):
         d.mkdir(parents=True, exist_ok=True)
+    import urllib.request
     url = f"http://127.0.0.1:{PORT}"
-    with socket.socket() as s:
-        busy = s.connect_ex(("127.0.0.1", PORT)) == 0
-    if busy:  # already running (double-clicked twice) – just show it
-        print(f"CVE Studio is already running – opening {url}")
-        webbrowser.open(url)
-        raise SystemExit(0)
+    if core.server_alive(PORT):
+        try:  # is it US (double-clicked twice) or some other program on the port?
+            with urllib.request.urlopen(f"{url}/api/projects", timeout=3) as r:
+                ours = r.headers.get_content_type() == "application/json"
+        except Exception:
+            ours = False
+        if ours:
+            print(f"CVE Studio is already running – opening {url}")
+            webbrowser.open(url)
+            raise SystemExit(0)
+        print(f"ERROR: another program is using port {PORT}. Close it, or start the studio on another port:\n"
+              f"  set CVE_PORT=8071  then run Start Studio.bat again.")
+        raise SystemExit(1)
+    n = core.reset_stale_jobs()
+    if n:
+        print(f"Reset {n} job(s) interrupted when the studio was last closed.")
     if os.environ.get("CVE_NO_BROWSER") != "1":
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
     app.run(host="127.0.0.1", port=PORT, debug=False, threaded=True)

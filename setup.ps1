@@ -109,6 +109,13 @@ function Find-Python {
 Write-Host "Claude Video Studio setup  ($Root)" -ForegroundColor White
 Refresh-Path
 
+# fail early with a clear message instead of a cryptic error halfway through a 2.5 GB download
+$needGB = 6; if ($SkipMotion) { $needGB = 4 }
+$drive = (Get-Item $Root).PSDrive
+$freeGB = [math]::Round($drive.Free / 1GB, 1)
+if ($freeGB -lt $needGB) { throw "Only $freeGB GB free on drive $($drive.Name): - setup needs about $needGB GB. Free some space and run Setup.bat again." }
+if ($Root -match '[&%!^]') { Warn "The folder path contains & % ! or ^ - batch files may misbehave. A simple path like D:\Claude_Video_Editor is safest." }
+
 # ---------------------------------------------------------------- 1. system tools
 Step '1/7  System tools (FFmpeg, yt-dlp)'
 Winget-Install 'Gyan.FFmpeg' 'ffmpeg'

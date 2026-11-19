@@ -59,9 +59,8 @@ def show(pid):
     for i, r in enumerate(d["references"], 1):
         sheet = core.work_dir(pid) / "refs" / r["sheet"] if r.get("sheet") else ""
         print(f"R{i}: {r.get('file') or r.get('url')} kind={r.get('kind')} avg_shot={r.get('avg_shot')} sheet={sheet}")
-    wd = core.work_dir(pid)
     for i, s in enumerate(d["scenes"], 1):
-        sil = core.read_json(wd / f"{s['src'].rsplit('.', 1)[0]}.silences.json", []) or []
+        sil = core.read_json(core.work_file(pid, s["src"], "silences.json"), []) or []
         est = pipeline.estimated_duration(s, sil, d["settings"])
         flags = [] if s["keep"] else ["CUT"]
         for k, dv in (("speed", 1.0), ("zoom", 1.0), ("volume", 1.0)):
@@ -102,7 +101,7 @@ def set_fields(pid, ref, pairs):
                 sc[k] = json.loads(v)
             except json.JSONDecodeError:
                 sc[k] = v
-        words = core.read_json(core.work_dir(pid) / f"{sc['src'].rsplit('.', 1)[0]}.words.json", []) or []
+        words = core.read_json(core.work_file(pid, sc["src"], "words.json"), []) or []
         sc["transcript"] = " ".join(w["w"] for w in pipeline.words_in(words, sc["in"], sc["out"]))
         return sc
     _, sc = core.mutate(pid, fn)
@@ -137,8 +136,9 @@ def main(argv):
         done(rest[0], rest[1], rest[2])
     elif op in ("analyze", "render"):
         pid = rest[0]
-        if core.job_busy(core.load(pid)):
+        if core.job_busy(core.load(pid)) and core.server_alive():
             raise SystemExit("The studio is already running a job for this project – wait for it to finish.")
+        # busy but no server listening = stale flag from a closed studio window; safe to proceed
         kind = "analyze" if op == "analyze" else (rest[1] if len(rest) > 1 else "preview")
         core.set_job(pid, kind=kind, status="running", progress=f"Claude: {kind}", log=[], error=None, pending=[])
         try:

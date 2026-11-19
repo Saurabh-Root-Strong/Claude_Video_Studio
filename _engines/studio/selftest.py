@@ -69,6 +69,18 @@ try:
     hb = pipeline.build_scenes(18.0, [], hw, hs)
     check("no-punctuation speech splits at ~0.5 s pauses", len(hb) == 5, str(hb))
 
+    # ---------------------------------------------------------------- captions never overlap (one line at a time)
+    import re as _re
+    fast = [{"w": f"w{i}", "s": 1 + i * 0.12, "e": 1 + i * 0.12 + 0.3} for i in range(12)]  # compressed, overlapping
+    sc_ = {"id": "t", "in": 0.0, "out": 4.0, "speed": 1.0}
+    ass = ROOT / "t.ass"
+    pipeline.write_ass(ass, sc_, fast, [(0.0, 4.0)], dict(core.DEFAULT_SETTINGS), 1080, 1920)
+    ts = [tuple(_re.findall(r"Dialogue: 0,([\d:.]+),([\d:.]+)", l)[0]) for l in ass.read_text("utf-8-sig").splitlines()
+          if l.startswith("Dialogue")]
+    sec = lambda t: int(t.split(":")[0]) * 3600 + int(t.split(":")[1]) * 60 + float(t.split(":")[2])  # noqa: E731
+    overl = sum(1 for k in range(len(ts) - 1) if sec(ts[k][1]) > sec(ts[k + 1][0]) + 1e-6)
+    check("caption events never overlap (no stacked double lines)", overl == 0 and len(ts) >= 10, f"{overl} overlaps")
+
     # ---------------------------------------------------------------- project + upload + analyze
     r = post("/api/projects", {"name": "Self Test"})
     pid = r.get_json()["id"]
@@ -109,7 +121,29 @@ try:
     r = post(f"/api/projects/{pid}/command", {"scene": s1, "text": "add a glitch transition"}).get_json()
     check("unknown command goes to Claude inbox", r["queued"] == ["add a glitch transition"])
     post(f"/api/projects/{pid}/command", {"scene": None, "text": "remove silences"})
-    post(f"/api/projects/{pid}/command", {"scene": scenes[1]["id"], "text": "text: 100% up; speed 1.2"})
+    post(f"/api/projects/{pid}/command", {"scene": scenes[1]["id"], "text": "text: 100% up; Sensex flat"})
+    check("text: keeps its ';' (not split into commands)",
+          core.scene_by_id(core.load(pid), scenes[1]["id"])["text"] == "100% up; Sensex flat")
+    post(f"/api/projects/{pid}/command", {"scene": scenes[1]["id"], "text": "speed 1.2"})
+    post(f"/api/projects/{pid}/command", {"scene": scenes[3]["id"], "text": "trim end 1"})
+    post(f"/api/projects/{pid}/command", {"scene": scenes[3]["id"], "text": "reset trim"})
+    sc4 = core.scene_by_id(core.load(pid), scenes[3]["id"])
+    check("reset trim restores full length", sc4["out"] == sc4["orig_out"])
+
+    # ---------------------------------------------------------------- settings validation
+    r = post(f"/api/projects/{pid}/brief", {"settings": {"caption_font": "Arial, Bold{x}"}})
+    check("caption font sanitised (no comma/brace)", r.status_code == 200 and
+          core.load(pid)["settings"]["caption_font"] == "Arial Boldx")
+    r = post(f"/api/projects/{pid}/brief", {"settings": {"caption_words": "abc", "highlight_color": "red"}})
+    st = core.load(pid)["settings"]
+    check("invalid settings rejected, not stored", r.status_code == 400 and st["caption_words"] == 4
+          and st["highlight_color"] == "#F97316")
+
+    # ---------------------------------------------------------------- worker survives a vanished project
+    ghost = post("/api/projects", {"name": "Ghost"}).get_json()["id"]
+    shutil.rmtree(core.STORY / ghost)
+    appmod._jobs.put((ghost, "analyze", {}))
+    time.sleep(2)
 
     # ---------------------------------------------------------------- render + A/V sync
     post(f"/api/projects/{pid}/render", {"kind": "final"})
@@ -127,6 +161,54 @@ try:
           f"max {max(diffs):.0f} ms over {len(diffs)} segments")
     fd = abs(sdur(out, "a:0") - sdur(out, "v:0")) * 1000
     check("final export A/V lengths match (<=40 ms)", fd <= 40, f"{fd:.0f} ms")
+    check("worker thread survived a job on a deleted project", j["status"] == "done")
+    wdp = core.work_dir(pid)
+    keep = set()
+    for k in ("preview", "final"):
+        f = wdp / f"segs_{k}.txt"
+        if f.exists():
+            keep.update(x for x in f.read_text(encoding="utf-8").splitlines() if x)
+    on_disk = {p.name for p in (wdp / "segs").glob("seg_*.mp4")}
+    check("segment cache pruned to latest preview + final", on_disk <= keep, f"{len(on_disk)} files, {len(keep)} in use")
+    check("no half-written .part files left in Exports", not list(core.EXPORTS.glob("*.part.mp4")))
+
+    # ---------------------------------------------------------------- GPU encoder failure -> whole render on CPU
+    real_run = pipeline.run
+
+    def nvenc_broken(cmd, *a, **k):
+        if "h264_nvenc" in [str(c) for c in cmd]:
+            raise pipeline.PipelineError("simulated: NVENC unavailable")
+        return real_run(cmd, *a, **k)
+    pipeline.run = nvenc_broken
+    try:
+        post(f"/api/projects/{pid}/command", {"scene": scenes[0]["id"], "text": "zoom 1.1"})  # force fresh segments
+        post(f"/api/projects/{pid}/render", {"kind": "preview"})
+        j = wait_job(pid, "preview")
+    finally:
+        pipeline.run = real_run
+    log = "\n".join(j.get("log", []))
+    check("NVENC failure -> every segment re-rendered on CPU (no mixed encoders)",
+          j["status"] == "done" and "re-rendering on the CPU" in log, j.get("error") or "")
+
+    # ---------------------------------------------------------------- stale job after a closed studio
+    core.set_job(pid, status="running", kind="final", pending=["preview"])
+    core.reset_stale_jobs()
+    j = core.load(pid)["job"]
+    check("stale 'running' job reset at startup", j["status"] == "error" and not j["pending"], j.get("progress"))
+
+    # ---------------------------------------------------------------- same name, different extension
+    p2 = post("/api/projects", {"name": "Stem Clash"}).get_json()["id"]
+    for src_name, up_name in (("recap_test.mp4", "clip.mp4"), ("phone_rot.mp4", "clip.mov")):
+        with open(FIX / src_name, "rb") as f:
+            client.post(f"/api/projects/{p2}/upload?kind=source", data={"files": (f, up_name)},
+                        content_type="multipart/form-data")
+    post(f"/api/projects/{p2}/analyze")
+    wait_job(p2, "analyze")
+    w_mp4 = core.read_json(core.work_file(p2, "clip.mp4", "words.json"), [])
+    w_mov = core.read_json(core.work_file(p2, "clip.mov", "words.json"), [])
+    check("clip.mp4 and clip.mov keep separate transcripts", len(w_mp4) > 20 and w_mov == [] and
+          core.work_file(p2, "clip.mp4", "words.json") != core.work_file(p2, "clip.mov", "words.json"),
+          f"mp4 {len(w_mp4)} words, mov {len(w_mov)} words")
 
     # ---------------------------------------------------------------- security
     check("foreign Host header blocked", client.get("/api/projects", headers={"Host": "evil.com"}).status_code == 403)

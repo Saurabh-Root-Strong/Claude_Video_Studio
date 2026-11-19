@@ -72,7 +72,7 @@ def extract_audio(src: Path, wav: Path) -> None:
     run([FFMPEG, "-y", "-v", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav])
 
 
-def transcribe(wav: Path, out_prefix: Path, language: str = "auto") -> list[dict]:
+def transcribe(wav: Path, out_prefix: Path, language: str = "auto", duration: float = 0.0) -> list[dict]:
     """whisper.cpp word-level transcription -> [{"w": text, "s": sec, "e": sec}]."""
     base = ["-m", core.WHISPER_MODEL, "-f", wav, "-l", language or "auto",
             "-ml", "1", "-sow", "-ojf", "-of", out_prefix]
@@ -80,16 +80,18 @@ def transcribe(wav: Path, out_prefix: Path, language: str = "auto") -> list[dict
     if vad.exists():  # VAD keeps word timings from drifting after pauses
         base += ["--vad", "-vm", vad]
     last_err = None
+    # CPU whisper on long footage can run ~2-3x real time; never cap a 2-hour podcast at 1 hour
+    timeout = int(max(3600, duration * 4))
     for exe in (core.WHISPER_GPU, core.WHISPER_CPU):
         if not Path(exe).exists():
             continue
         try:
-            run([exe, *base], timeout=60 * 60)
+            run([exe, *base], timeout=timeout)
             break
-        except PipelineError as e:
-            last_err = e
+        except (PipelineError, subprocess.TimeoutExpired) as e:
+            last_err = PipelineError(str(e))
     else:
-        raise last_err or PipelineError("whisper-cli not found")
+        raise last_err or PipelineError("whisper-cli not found – run Setup.bat")
     return parse_whisper_json(Path(f"{out_prefix}.json").read_bytes())
 
 
@@ -301,33 +303,39 @@ def analyze_project(pid: str, reanalyze: bool = False) -> None:
 
 def _analyze_one(pid: str, src: dict, tag: str, lang: str, wd: Path) -> None:
         path = core.raw_dir(pid) / src["file"]
-        stem = Path(src["file"]).stem
+        key = src["file"]  # FULL name: clip.mp4 and clip.mov must not share work files
+        if not path.is_file():
+            raise PipelineError("the file is missing from the Raw Footage folder")
         core.job_log(pid, f"{tag}: probing")
         meta = probe(path)
         if not meta["has_video"]:
             core.job_log(pid, f"{tag}: no video stream – skipped")
             return
+        if meta["duration"] <= 0.1:
+            raise PipelineError("could not read the video length (file damaged or still being copied?)")
         core.set_job(pid, progress=f"{tag}: making preview copy")
-        make_proxy(path, wd / "proxy" / f"{stem}.mp4", meta["has_audio"])
-        meta["proxy"] = f"{stem}.mp4" if (wd / "proxy" / f"{stem}.mp4").exists() else None
+        make_proxy(path, wd / "proxy" / f"{key}.proxy.mp4", meta["has_audio"])
+        meta["proxy"] = f"{key}.proxy.mp4" if (wd / "proxy" / f"{key}.proxy.mp4").exists() else None
 
         words: list[dict] = []
         silences: list[list[float]] = []
         if meta["has_audio"]:
             core.set_job(pid, progress=f"{tag}: transcribing")
-            core.job_log(pid, f"{tag}: transcribing with Whisper (GPU)")
-            wav = wd / f"{stem}.16k.wav"
-            extract_audio(path, wav)
-            silences = detect_silences(path)
-            words = fix_word_times(transcribe(wav, wd / f"{stem}.whisper", lang), silences)
+            core.job_log(pid, f"{tag}: transcribing with Whisper")
+            wav = wd / f"{key}.16k.wav"
+            try:
+                extract_audio(path, wav)
+                silences = detect_silences(path)
+                words = fix_word_times(transcribe(wav, wd / f"{key}.whisper", lang, meta["duration"]), silences)
+            finally:
+                wav.unlink(missing_ok=True)  # 16 kHz WAV is ~115 MB/hour – never leave it behind on failure
             core.job_log(pid, f"{tag}: {len(words)} words")
-            wav.unlink(missing_ok=True)
         core.set_job(pid, progress=f"{tag}: detecting scenes")
         cuts = detect_cuts(path)
         core.job_log(pid, f"{tag}: {len(cuts)} visual cuts")
-        with open(wd / f"{stem}.words.json", "w", encoding="utf-8") as f:
+        with open(wd / f"{key}.words.json", "w", encoding="utf-8") as f:
             json.dump(words, f, ensure_ascii=False)
-        with open(wd / f"{stem}.silences.json", "w", encoding="utf-8") as f:
+        with open(wd / f"{key}.silences.json", "w", encoding="utf-8") as f:
             json.dump(silences, f)
 
         ranges = build_scenes(meta["duration"], cuts, words, silences)
@@ -353,6 +361,8 @@ def _analyze_one(pid: str, src: dict, tag: str, lang: str, wd: Path) -> None:
             s["words"] = len(words)
             # replace this source's scenes, keep position of other sources' scenes
             others = [x for x in d["scenes"] if x["src"] != src_file]
+            if len(others) != len(d["scenes"]):
+                core.snapshot(pid, d)  # re-analysis replaces edited scenes – make it undoable
             order = [x["file"] for x in d["sources"]]
             merged = others + new_scenes
             merged.sort(key=lambda x: (order.index(x["src"]) if x["src"] in order else 999, x["orig_in"]))
@@ -528,6 +538,7 @@ def write_ass(path: Path, scene: dict, words: list[dict], ranges, settings: dict
         f"{max(2, round(fs * 0.09))},{max(1, round(fs * 0.04))},{align},{round(w * 0.06)},{round(w * 0.06)},{mv},1",
         "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
+    events = []
     for ch in chunks:
         for i, m in enumerate(ch):
             start = m["s"]
@@ -535,7 +546,15 @@ def write_ass(path: Path, scene: dict, words: list[dict], ranges, settings: dict
             parts = []
             for j, other in enumerate(ch):
                 parts.append(f"{{\\c{hi}}}{other['w']}{{\\c{base}}}" if j == i else other["w"])
-            lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(max(end, start + 0.05))},Cap,,0,0,0,,{' '.join(parts)}")
+            events.append([start, max(end, start + 0.05), " ".join(parts)])
+    # One caption on screen at a time: overlapping events get STACKED by libass (two lines at once – seen on real
+    # fast Hindi speech where whisper compresses word times). Clamp every event to end when the next begins.
+    events.sort(key=lambda e: e[0])
+    for k in range(len(events) - 1):
+        events[k][1] = min(events[k][1], events[k + 1][0])
+    for start, end, text in events:
+        if end - start >= 0.02:
+            lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Cap,,0,0,0,,{text}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
     return True
 
@@ -556,6 +575,10 @@ def _atempo_chain(speed: float) -> list[str]:
 
 def _seg_hash(*parts) -> str:
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+class NvencFailed(PipelineError):
+    pass
 
 
 def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h: int,
@@ -580,7 +603,7 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     # the source file itself and the logo file – so re-analysis or a replaced logo never reuses a stale segment
     key = _seg_hash({k: v for k, v in scene.items() if k not in ("notes", "transcript", "thumb")}, relevant, caps,
                     w, h, fps, preview, words_in(words, scene["in"], scene["out"]), st.st_size, st.st_mtime,
-                    logo_sig, 4)
+                    logo_sig, "nvenc" if nvenc else "x264", 6)  # bump when caption/render logic changes
     out = seg_dir / f"seg_{key}.mp4"
     if out.exists() and out.stat().st_size > 1000:
         return out
@@ -668,13 +691,32 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
            "-frames:v", str(n_frames), "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name]
     try:
         run(cmd, cwd=wd)  # cwd=wd so subtitle/text/font files are referenced without Windows drive-colon escaping
-    except PipelineError:
+    except PipelineError as e:
+        (wd / out.name).unlink(missing_ok=True)
         if nvenc:
-            return render_segment(pid, data, scene, words, silences, w, h, preview, nvenc=False)
+            # don't fall back for THIS segment only: mixing NVENC and x264 streams in one stream-copy concat
+            # can glitch at the joins. render_project re-renders every segment with x264 instead.
+            raise NvencFailed(str(e)) from e
         raise
     # ffmpeg wrote into wd (cwd) — move into segs/
     shutil.move(str(wd / out.name), out)
     return out
+
+
+def _prune_segments(wd: Path, kind: str, used: list[Path]) -> None:
+    """Keep only segments used by the latest preview and the latest final render (cache otherwise grows forever)."""
+    (wd / f"segs_{kind}.txt").write_text("\n".join(p.name for p in used), encoding="utf-8")
+    keep = set()
+    for k in ("preview", "final"):
+        f = wd / f"segs_{k}.txt"
+        if f.exists():
+            keep.update(x for x in f.read_text(encoding="utf-8").splitlines() if x)
+    for p in (wd / "segs").glob("seg_*.mp4"):
+        if p.name not in keep:
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
 
 def render_project(pid: str, preview: bool) -> Path:
@@ -682,18 +724,29 @@ def render_project(pid: str, preview: bool) -> Path:
     scenes = [s for s in data["scenes"] if s.get("keep", True)]
     if not scenes:
         raise PipelineError("No scenes are kept – nothing to render.")
+    missing = sorted({s["src"] for s in scenes if not (core.raw_dir(pid) / s["src"]).is_file()})
+    if missing:
+        raise PipelineError(f"Source video missing from Raw Footage: {', '.join(missing)}")
     w, h = target_size(data, preview)
     wd = core.work_dir(pid)
     cache: dict[str, tuple[list, list]] = {}
-    segs = []
-    for i, sc in enumerate(scenes, 1):
-        stem = Path(sc["src"]).stem
-        if stem not in cache:
-            cache[stem] = (core.read_json(wd / f"{stem}.words.json", []) or [],
-                           core.read_json(wd / f"{stem}.silences.json", []) or [])
-        words, sil = cache[stem]
-        core.set_job(pid, progress=f"Rendering scene {i}/{len(scenes)}")
-        segs.append(render_segment(pid, data, sc, words, sil, w, h, preview))
+
+    def render_all(nvenc: bool) -> list[Path]:
+        segs = []
+        for i, sc in enumerate(scenes, 1):
+            if sc["src"] not in cache:
+                cache[sc["src"]] = (core.read_json(core.work_file(pid, sc["src"], "words.json"), []) or [],
+                                    core.read_json(core.work_file(pid, sc["src"], "silences.json"), []) or [])
+            words, sil = cache[sc["src"]]
+            core.set_job(pid, progress=f"Rendering scene {i}/{len(scenes)}")
+            segs.append(render_segment(pid, data, sc, words, sil, w, h, preview, nvenc=nvenc))
+        return segs
+
+    try:
+        segs = render_all(nvenc=True)
+    except NvencFailed as e:
+        core.job_log(pid, f"GPU encoder failed ({str(e).splitlines()[0][:120]}) – re-rendering on the CPU")
+        segs = render_all(nvenc=False)
 
     lst = wd / "concat.txt"
     lst.write_text("".join(f"file 'segs/{p.name}'\n" for p in segs), encoding="utf-8")
@@ -709,9 +762,12 @@ def render_project(pid: str, preview: bool) -> Path:
         core.EXPORTS.mkdir(exist_ok=True)
         n = 1 + len([r for r in data.get("renders", []) if r.get("kind") == "final"])
         out = core.unique_path(core.EXPORTS, f"{data['id']}_v{n}.mp4")
+    tmp_out = out.with_name(out.stem + ".part.mp4")
     run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
-         "-movflags", "+faststart", out], cwd=wd)
+         "-movflags", "+faststart", tmp_out], cwd=wd)
+    os.replace(tmp_out, out)  # never leave a half-written file in Exports
     dur = probe(out)["duration"]
+    _prune_segments(wd, "preview" if preview else "final", segs)
 
     def fn(d):
         d.setdefault("renders", []).append({"kind": "preview" if preview else "final", "file": out.name,

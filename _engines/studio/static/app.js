@@ -45,7 +45,7 @@ async function createProject(name) {
 }
 $("#newProjectBtn").onclick = () => { const n = prompt("Project name"); if (n) createProject(n.trim()).catch((e) => toast(e.message, true)); };
 $("#emptyCreate").onclick = () => createProject($("#emptyName").value.trim()).catch((e) => toast(e.message, true));
-$("#projectSelect").onchange = (e) => { PID = e.target.value; store.set("cve.pid", PID); lastVersion = -1; selected = null; briefDirty = false; refresh(true); };
+$("#projectSelect").onchange = (e) => { PID = e.target.value; store.set("cve.pid", PID); lastVersion = -1; lastSig = {}; selected = null; briefDirty = false; refresh(true); };
 
 /* ---------------- tabs ---------------- */
 function switchTab(name) {
@@ -68,8 +68,23 @@ async function refresh(force = false) {
 }
 setInterval(() => refresh(false), 2000);
 
+let lastSig = {};
+function changed(key, value) {
+  // job progress bumps the project version every few seconds during renders; redrawing lists that didn't change
+  // replaces the DOM under the cursor and swallows clicks – only redraw a section when ITS data changed
+  const sig = JSON.stringify(value);
+  if (lastSig[key] === sig) return false;
+  lastSig[key] = sig; return true;
+}
 function renderAll() {
-  renderJob(); renderSources(); renderRefs(); renderBrief(); renderScenes(); renderDetail(); renderRenders(); renderInbox();
+  renderJob();
+  if (changed("src", P.sources)) renderSources();
+  if (changed("refs", P.references)) renderRefs();
+  renderBrief();
+  if (changed("scenes", [P.scenes, P.settings, P.commands.filter((c) => c.status === "claude").map((c) => c.scene), selected])) renderScenes();
+  if (changed("detail", [curScene(), P.commands.length, P.commands.map((c) => c.status).join()])) renderDetail();
+  if (changed("renders", P.renders)) renderRenders();
+  if (changed("inbox", P.commands.map((c) => c.id + c.status + c.reply).join())) renderInbox();
 }
 
 /* ---------------- job ---------------- */
@@ -130,7 +145,8 @@ function upload(files, kind, zone) {
     x.onload = () => {
       bar.classList.add("hidden");
       let j = {}; try { j = JSON.parse(x.responseText); } catch {}
-      if (x.status >= 400) toast(j.error || "Upload failed", true); else toast(`Uploaded ${j.saved.length} file(s).`);
+      if (x.status >= 400) toast(j.error || "Upload failed", true);
+      else toast(`Uploaded ${j.saved.length} file(s).` + (j.skipped && j.skipped.length ? ` Skipped (not a video): ${j.skipped.join(", ")}` : ""), !!(j.skipped && j.skipped.length));
       refresh(true); resolve();
     };
     x.onerror = () => { bar.classList.add("hidden"); toast("Upload failed", true); resolve(); };
@@ -169,7 +185,7 @@ $("#refDownload").onclick = () => addRefUrl(true);
 
 async function loadBrandKit() {
   const files = await api("/api/brandkit").catch(() => []);
-  $("#logoSelect").innerHTML = `<option value="">None</option>` + files.filter((f) => /\.(png|jpe?g|webp|svg)$/i.test(f)).map((f) => `<option>${esc(f)}</option>`).join("");
+  $("#logoSelect").innerHTML = `<option value="">None</option>` + files.filter((f) => /\.(png|jpe?g|webp)$/i.test(f)).map((f) => `<option>${esc(f)}</option>`).join("");
 }
 function renderBrief() {
   if (!briefDirty) {

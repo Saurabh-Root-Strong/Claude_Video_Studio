@@ -49,6 +49,9 @@ def _scene_cmd(sc: dict, t: str, data: dict) -> str | None:
                 return "!Trim too large – the scene would be shorter than 0.3 s."
             sc["out"] = round(sc["out"] - x, 3)
         return f"Trimmed {x:g}s from the {'start' if m.group(1) in ('start','begin','beginning','front','head') else 'end'}."
+    if t in ("reset trim", "untrim", "undo trim", "full length", "restore length"):
+        sc["in"], sc["out"] = sc.get("orig_in", sc["in"]), sc.get("orig_out", sc["out"])
+        return "Trim removed – scene back to its full length."
     m = re.fullmatch(r"(?:speed|playback) (?:to )?([\d.,]+)\s*x?", t) or re.fullmatch(r"([\d.,]+)\s*x( speed)?", t)
     if m:
         x = _num(m.group(1))
@@ -187,7 +190,10 @@ GLOBAL_TO_ALL = re.compile(r"(speed .*|[\d.,]+\s*x.*|slow ?mo.*|slow motion|norm
 def apply(data: dict, scene_id: str | None, text: str) -> tuple[list[str], list[str], bool]:
     """Apply a command string. Returns (replies, unhandled_parts, changed)."""
     replies, unhandled, changed = [], [], False
-    parts = [p.strip() for p in re.split(r"[;\n]+", text) if p.strip()]
+    if re.match(r"\s*text\s*[:\-]", text, flags=re.I):
+        parts = [text.strip()]  # a title may itself contain ';' – don't split it into commands
+    else:
+        parts = [p.strip() for p in re.split(r"[;\n]+", text) if p.strip()]
     sc = core.scene_by_id(data, scene_id) if scene_id else None
     for raw in parts:
         t = re.sub(r"\s+", " ", raw.lower().strip().rstrip(".!"))

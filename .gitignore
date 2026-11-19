@@ -2,6 +2,7 @@
 # Footage, exports, project data, engines/models and downloads can never be committed by accident.
 /*
 !/.gitignore
+!/.gitattributes
 !/README.md
 !/CLAUDE.md
 !/HOW TO USE.txt

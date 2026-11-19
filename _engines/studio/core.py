@@ -202,9 +202,18 @@ def new_project(name: str) -> dict:
 
 
 def load(pid: str) -> dict:
-    with _lock:
-        with open(_pfile(pid), "r", encoding="utf-8") as f:
-            data = json.load(f)
+    # On Windows, opening the file in the instant another process os.replace()s it raises PermissionError,
+    # so retry briefly instead of failing a page load or a job.
+    for attempt in range(20):
+        try:
+            with _lock:
+                with open(_pfile(pid), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            break
+        except (PermissionError, json.JSONDecodeError):
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
     # forward-fill new settings keys
     for k, v in DEFAULT_SETTINGS.items():
         data.setdefault("settings", {}).setdefault(k, v)
@@ -305,6 +314,46 @@ def job_busy(data: dict) -> bool:
     return j.get("status") in ("running", "queued")
 
 
+def server_alive(port: int | None = None) -> bool:
+    import socket
+    port = port or int(os.environ.get("CVE_PORT", "8070"))
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def reset_stale_jobs() -> int:
+    """At server start nothing can be running: a 'running'/'queued' job means the studio was closed mid-job.
+    Without this the project stays 'busy' forever (buttons disabled, CLI refuses)."""
+    n = 0
+    for p in list_projects():
+        def fn(d):
+            j = d.get("job") or {}
+            if j.get("status") in ("running", "queued") or j.get("pending"):
+                j.update(status="error", error="Interrupted – the studio was closed while this was running. "
+                                                "Start it again.", progress="Interrupted", pending=[])
+                d["job"] = j
+                return True
+            return False
+        try:
+            _, changed = mutate(p["id"], fn)
+            n += bool(changed)
+        except Exception:
+            continue
+    return n
+
+
+def work_file(pid: str, src_file: str, suffix: str) -> Path:
+    """Per-source work file, keyed by the FULL file name (clip.mp4 and clip.mov must not share files).
+    Falls back to the pre-audit stem-based name so existing projects keep working."""
+    wd = project_dir(pid) / "work"
+    new = wd / f"{src_file}.{suffix}"
+    if new.exists():
+        return new
+    legacy = wd / f"{Path(src_file).stem}.{suffix}"
+    return legacy if legacy.exists() else new
+
+
 def job_log(pid: str, line: str) -> None:
     def fn(d):
         job = d.get("job") or {}
@@ -313,6 +362,44 @@ def job_log(pid: str, line: str) -> None:
         del log[:-60]
         d["job"] = job
     mutate(pid, fn)
+
+
+_ENUMS = {"format": {"original", "16:9", "9:16", "1:1"}, "fit": {"crop", "pad"},
+          "caption_position": {"bottom", "center", "top"}, "caption_case": {"normal", "upper"},
+          "logo_position": {"top-right", "top-left", "bottom-right", "bottom-left"}}
+_HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def clean_setting(key: str, value):
+    """Validate/coerce one setting. Returns (ok, value). Bad input is rejected, never stored (it would break renders)."""
+    try:
+        if key in _ENUMS:
+            return (value in _ENUMS[key]), value
+        if key in ("captions", "remove_silence"):
+            return True, value in (True, "true", "1", 1, "on")
+        if key in ("caption_color", "highlight_color"):
+            return bool(_HEX.match(str(value))), str(value).upper()
+        if key == "caption_words":
+            return True, max(1, min(int(value), 8))
+        if key == "silence_min":
+            return True, max(0.2, min(float(value), 3.0))
+        if key == "fps":
+            v = int(value)
+            return v in (24, 25, 30, 50, 60), v
+        if key == "caption_font":  # commas/braces would corrupt the subtitle style line
+            v = re.sub(r"[,{}\\\r\n]", "", str(value)).strip()[:60]
+            return True, v or "Arial"
+        if key == "language":
+            v = str(value).strip().lower()
+            return bool(re.fullmatch(r"auto|[a-z]{2,3}", v)), v
+        if key == "logo":
+            if value in (None, "", "none"):
+                return True, None
+            v = Path(str(value)).name
+            return (BRAND / v).is_file() and Path(v).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}, v
+    except (TypeError, ValueError):
+        return False, value
+    return False, value
 
 
 def source_by_file(data: dict, file: str) -> dict | None:
