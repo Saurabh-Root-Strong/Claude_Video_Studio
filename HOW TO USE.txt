@@ -35,6 +35,10 @@
      Write what you want (e.g. "60-second Instagram reel, fast cuts").
      Choose format (9:16 for Reels/Shorts, 16:9 for YouTube),
      caption colours, logo. Click "Save brief & settings".
+     "Caption script": Hindi (हिंदी) or Hinglish (English letters).
+     For Hindi videos also set "Language" to Hindi before analyzing.
+     "Apply Brand Kit" = your approved look (Brand Kit\brand-kit.md).
+     New projects start with it automatically.
 
   TAB 3  SCENES  (the main editor)
      Click a scene to play it. Type a command in the box and press Enter,
@@ -55,7 +59,22 @@
      Commands for the WHOLE video (top box):
         format 9:16          vertical video for Reels / Shorts
         captions upper       CAPITAL LETTER captions
+        captions hinglish    Hindi captions in English letters (aap kaise ho)
+        captions hindi       Hindi captions in Hindi script (आप कैसे हो)
+        spell daval as double   fix one wrong caption word everywhere
+                                (type the word as you SEE it on the page)
         highlight #22C55E    change caption highlight colour
+        layout split         cards on top, you below (Brand Kit look)
+        headline: bajaj *IPO* aaj   card for scenes without their own
+        music on / music off quiet background music under your voice
+                             (your own track: put it in Brand Kit\music)
+        face up / face down  move yourself up/down in the frame
+
+     Commands for ONE scene (split layout, top panel):
+        card: title bajaj *IPO* listing aaj    (*word* = orange)
+        card: number 2x+ | listing gain
+        card: chart 10,12,11,15 | Nifty 5 days
+        card off                               empty top panel
         remove silences      cut pauses everywhere
 
      Made a mistake?  Click  "Undo".

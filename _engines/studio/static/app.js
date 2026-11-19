@@ -45,7 +45,7 @@ async function createProject(name) {
 }
 $("#newProjectBtn").onclick = () => { const n = prompt("Project name"); if (n) createProject(n.trim()).catch((e) => toast(e.message, true)); };
 $("#emptyCreate").onclick = () => createProject($("#emptyName").value.trim()).catch((e) => toast(e.message, true));
-$("#projectSelect").onchange = (e) => { PID = e.target.value; store.set("cve.pid", PID); lastVersion = -1; lastSig = {}; selected = null; briefDirty = false; refresh(true); };
+$("#projectSelect").onchange = (e) => { PID = e.target.value; store.set("cve.pid", PID); lastVersion = -1; lastSig = {}; selected = null; briefDirty = false; lastRenderFile = null; refresh(true); };
 
 /* ---------------- tabs ---------------- */
 function switchTab(name) {
@@ -83,7 +83,13 @@ function renderAll() {
   renderBrief();
   if (changed("scenes", [P.scenes, P.settings, P.commands.filter((c) => c.status === "claude").map((c) => c.scene), selected])) renderScenes();
   if (changed("detail", [curScene(), P.commands.length, P.commands.map((c) => c.status).join()])) renderDetail();
-  if (changed("renders", P.renders)) renderRenders();
+  if (changed("renders", P.renders)) {
+    renderRenders();
+    // a render just finished while the page was open -> show it in the player
+    const newest = latestPreview();
+    if (newest && lastRenderFile !== null && newest.file !== lastRenderFile) showRendered();
+    lastRenderFile = newest ? newest.file : "";
+  }
   if (changed("inbox", P.commands.map((c) => c.id + c.status + c.reply).join())) renderInbox();
 }
 
@@ -203,9 +209,10 @@ function collectSettings() {
   const s = {};
   for (const el of $$("#settingsForm [name]")) {
     let v = el.value;
-    if (["captions", "remove_silence"].includes(el.name)) v = v === "true";
+    if (["captions", "remove_silence", "audio_polish"].includes(el.name)) v = v === "true";
     else if (["caption_words"].includes(el.name)) v = parseInt(v || "4", 10);
     else if (["silence_min"].includes(el.name)) v = parseFloat(v || "0.6");
+    else if (["face_y"].includes(el.name)) v = parseFloat(v || "0.27");
     else if (el.name === "logo") v = v || null;
     s[el.name] = v;
   }
@@ -216,6 +223,13 @@ async function saveBrief() {
   briefDirty = false; await refresh(true);
 }
 $("#saveBrief").onclick = () => saveBrief().then(() => toast("Saved.")).catch((e) => toast(e.message, true));
+$("#brandBtn").onclick = async () => {
+  try {
+    const r = await api(`/api/projects/${PID}/apply_brand`, { method: "POST" });
+    briefDirty = false; await refresh(true);
+    toast(`Brand Kit applied (${r.applied.length} settings). Undo to revert.`);
+  } catch (e) { toast(e.message, true); }
+};
 $("#firstCutBtn").onclick = async () => {
   try {
     await saveBrief();
@@ -235,6 +249,7 @@ function sceneBadges(s) {
   else if (s.volume !== undefined && s.volume !== 1) b.push(`<span class="badge">vol ${Math.round(s.volume * 100)}%</span>`);
   if (s.zoom && s.zoom > 1) b.push(`<span class="badge acc">zoom ${s.zoom}x</span>`);
   if (s.text) b.push(`<span class="badge acc">text</span>`);
+  if (s.card && s.card.kind !== "none") b.push(`<span class="badge acc">${esc(s.card.kind)} card</span>`);
   if (s.captions === false) b.push(`<span class="badge">no captions</span>`);
   if (s.remove_silence === true || (s.remove_silence === null && P.settings.remove_silence)) b.push(`<span class="badge">jump cuts</span>`);
   if (s.in !== s.orig_in || s.out !== s.orig_out) b.push(`<span class="badge">trimmed</span>`);
@@ -254,7 +269,7 @@ function renderScenes() {
       <span class="no">${s.no}</span>
       <div class="info">
         <div class="times">${fmt(s.in)}–${fmt(s.out)} · ${s.dur}s${s.keep && Math.abs(s.est - s.dur) > 0.05 ? ` → ${s.est}s` : ""} ${sceneBadges(s)}</div>
-        <div class="txt">${esc(s.transcript) || `<span class="muted">(no speech)</span>`}</div>
+        <div class="txt">${esc(s.caption_view ?? s.transcript) || `<span class="muted">(no speech)</span>`}</div>
       </div>
       <div class="acts">
         <button data-act="up" title="Move up">▲</button><button data-act="down" title="Move down">▼</button>
@@ -271,7 +286,8 @@ function renderScenes() {
       selectScene(card.dataset.id);
     };
   });
-  if (!selected && P.scenes.length) selectScene(P.scenes[0].id, false);
+  // re-analysis replaces scene ids: a stale selection must fall back to scene 1, not "Select a scene."
+  if ((!selected || !P.scenes.some((x) => x.id === selected)) && P.scenes.length) selectScene(P.scenes[0].id, false);
 }
 function curScene() { return P?.scenes.find((s) => s.id === selected); }
 function selectScene(id, play = true) {
@@ -285,7 +301,10 @@ function renderDetail() {
   el.innerHTML = `
     <div class="title"><h2>Scene ${s.no}</h2><span class="muted">${esc(s.src)} · ${fmt(s.in)}–${fmt(s.out)} (${s.dur}s${s.keep ? ` → ${s.est}s` : ""})</span> ${sceneBadges(s)}</div>
     <div class="transcript">${esc(s.transcript) || `<span class="muted">(no speech in this scene)</span>`}</div>
-    ${s.text ? `<div class="props"><span class="badge acc">Text: ${esc(s.text)} (${esc(s.text_pos)})</span></div>` : ""}`;
+    ${s.caption_view !== undefined && s.caption_view !== s.transcript ? `<div class="transcript capview"><span class="muted">Captions:</span> ${esc(s.caption_view)}
+      <div class="muted small">Wrong word? Type in the box below:  spell ${esc((s.caption_view.split(" ").find(Boolean)) || "word")} as ...</div></div>` : ""}
+    ${s.text ? `<div class="props"><span class="badge acc">Text: ${esc(s.text)} (${esc(s.text_pos)})</span></div>` : ""}
+    ${s.card ? `<div class="props"><span class="badge acc">Top card: ${esc(s.card.kind === "title" ? s.card.text : s.card.kind === "number" ? `${s.card.value} ${s.card.label || ""}` : s.card.kind === "chart" ? `chart · ${s.card.label || ""}` : "empty")}</span></div>` : ""}`;
   const hist = P.commands.filter((c) => c.scene === s.id).slice(-12).reverse();
   $("#sceneHistory").innerHTML = hist.map(cmdHtml).join("");
   bindCancel($("#sceneHistory"));
@@ -321,7 +340,9 @@ $("#finalBtn").onclick = () => api(`/api/projects/${PID}/render`, { method: "POS
 /* ---------------- player ---------------- */
 const player = $("#player");
 let curSrcUrl = "";
-function latestPreview() { return [...(P?.renders || [])].reverse().find((r) => r.kind === "preview"); }
+// newest render of EITHER kind: after "Export final" the player must show that, not an older preview
+function latestPreview() { const r = P?.renders || []; return r.length ? r[r.length - 1] : null; }
+function renderUrl(r) { return r.kind === "final" ? media("exports", r.file) : media("work", r.file); }
 function previewOffset(id) {
   let t = 0; for (const s of P.scenes) { if (s.id === id) return t; if (s.keep) t += s.est; } return 0;
 }
@@ -330,9 +351,9 @@ function loadPlayer(play) {
   let url, start;
   if (playerMode === "preview") {
     const pv = latestPreview();
-    if (!pv) { $("#playerInfo").textContent = "No preview rendered yet — click Render preview."; return; }
-    url = media("work", pv.file); start = s.keep ? previewOffset(s.id) : 0;
-    $("#playerInfo").textContent = `Preview ${esc(pv.size)} · ${fmt(pv.duration)} · ${pv.created.slice(11, 16)}${s.keep ? "" : " · this scene is cut"}`;
+    if (!pv) { $("#playerInfo").textContent = "Nothing rendered yet — click Render preview."; return; }
+    url = renderUrl(pv); start = s.keep ? previewOffset(s.id) : 0;
+    $("#playerInfo").textContent = `${pv.kind === "final" ? "Final export" : "Preview"} ${esc(pv.file)} · ${fmt(pv.duration)} · ${pv.created.slice(11, 16)}${s.keep ? "" : " · this scene is cut"}`;
     player.playbackRate = 1; player.muted = false;
   } else {
     const src = P.sources.find((x) => x.file === s.src);
@@ -351,6 +372,12 @@ player.addEventListener("timeupdate", () => {
     if ($("#loopScene").checked) player.currentTime = s.in; else player.pause();
   }
 });
+let lastRenderFile = null;  // null = page just loaded (don't auto-switch on the first poll)
+function showRendered() {
+  playerMode = "preview";
+  $$(".seg button").forEach((x) => x.classList.toggle("active", x.dataset.mode === "preview"));
+  curSrcUrl = ""; loadPlayer(false);
+}
 $$(".seg button").forEach((b) => (b.onclick = () => {
   playerMode = b.dataset.mode; $$(".seg button").forEach((x) => x.classList.toggle("active", x === b)); curSrcUrl = ""; loadPlayer(true);
 }));

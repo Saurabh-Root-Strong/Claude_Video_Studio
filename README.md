@@ -13,13 +13,14 @@ Everything runs on your own PC. No cloud rendering, no API key.
 | Step | What happens |
 |---|---|
 | **Footage** | Drop videos. *Analyze* transcribes every word with timestamps (whisper.cpp on the GPU, works for Hindi + English), detects camera cuts and pauses, and splits the video into scenes. It also makes a light 540p copy for smooth playback. |
-| **References & Brief** | Drop sample videos or images, or paste links (downloaded with yt-dlp). Each video reference gets a contact sheet and its pacing (average shot length). Set the style: format (16:9 / 9:16 / 1:1), word-highlight captions, colours, silence removal, logo. |
+| **References & Brief** | Drop sample videos or images, or paste links (downloaded with yt-dlp). Each video reference gets a contact sheet and its pacing (average shot length). Set the style: format (16:9 / 9:16 / 1:1), word-highlight captions (Hindi script or Hinglish – Hindi in English letters), colours, silence removal, logo. |
 | **Scenes** | Thumbnails, timings and the words spoken in each scene. Click a scene to loop it. Type commands per scene or for the whole video. Undo, render preview, export final. |
 | **Exports** | Final renders go to `Exports/`. Only changed scenes are re-rendered. |
 
 ### Instant commands
+- **Scene (split layout):** `card: title bajaj *IPO* aaj` · `card: number 2x+ | listing gain` · `card: chart 10,12,15 | label` · `card off`
 - **Scene:** `cut` · `keep` · `trim start 1.5` · `trim end 2` · `split at 3.2` · `speed 1.5` · `slow mo` · `mute` · `volume 50%` · `zoom 1.3` · `captions off` · `remove silences` · `text: Your title` · `text top|center|bottom`
-- **Whole video:** `format 9:16` · `fit pad` · `captions upper` · `captions top` · `highlight #22C55E` · `words 3` · `remove silences` · `logo logo.png` · `speed 1.1`
+- **Whole video:** `format 9:16` · `fit pad` · `captions upper` · `captions top` · `captions hinglish` / `captions hindi` · `spell daval as double` · `layout split` · `headline: ...` · `music on` · `face up` · `highlight #22C55E` · `words 3` · `remove silences` · `logo logo.png` · `speed 1.1`
 
 Anything else ("tighten this to 30 seconds", "animated title like reference 1") is queued for Claude.
 In Claude Code, say **`process studio inbox`**. Claude follows [`_engines/studio/CLAUDE.md`](_engines/studio/CLAUDE.md),
@@ -83,3 +84,6 @@ _engines/README.md        engine notes and test results
 - The inbox is processed when you ask Claude. There is no push notification.
 - The server binds to `127.0.0.1` only. One heavy job runs at a time (designed for an 8 GB RAM laptop).
 - HyperFrames: run `init` with `--skip-skills`. Set `HYPERFRAMES_NO_TELEMETRY=1` if you don't want usage data sent.
+
+## Brand Kit
+`Brand Kit/brand-kit.md` is the approved editing profile ("Clean Split": cards on top, speaker on a keyed off-white background below, captions on an orange seam, ducked music, -16 LUFS). `brand-kit.json` holds its settings: new projects start from it, and **Apply Brand Kit** (tab 2) applies it to an existing project. Poppins (OFL) is bundled in `_engines/studio/fonts/`.

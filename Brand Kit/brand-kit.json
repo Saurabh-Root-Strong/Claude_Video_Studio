@@ -1,0 +1,24 @@
+{
+  "name": "Clean Split",
+  "approved": "2026-11-19",
+  "doc": "brand-kit.md",
+  "settings": {
+    "format": "9:16",
+    "fit": "crop",
+    "fps": 30,
+    "captions": true,
+    "caption_script": "hinglish",
+    "caption_font": "Poppins",
+    "language": "hi",
+    "remove_silence": true,
+    "silence_min": 0.3,
+    "layout": "split",
+    "split_ratio": 0.44,
+    "bg_mode": "auto",
+    "bg_color": "#F4F1EC",
+    "panel_color": "#0F1B2D",
+    "grade": true,
+    "audio_polish": true,
+    "music": "auto"
+  }
+}

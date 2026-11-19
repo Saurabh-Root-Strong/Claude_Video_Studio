@@ -9,6 +9,11 @@
 !/Start Studio.bat
 !/Setup.bat
 !/setup.ps1
+# approved editing profile (text only; logos/music in Brand Kit stay local)
+!/Brand Kit/
+/Brand Kit/*
+!/Brand Kit/brand-kit.md
+!/Brand Kit/brand-kit.json
 !/_engines/
 
 /_engines/*
@@ -18,6 +23,7 @@
 !/_engines/studio/
 /_engines/studio/.venv/
 /_engines/studio/__pycache__/
+/_engines/studio/cache/
 /_engines/studio/**/*.pyc
 
 # Remotion project (sources only)

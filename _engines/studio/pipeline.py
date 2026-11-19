@@ -10,7 +10,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import cards
 import core
+import hinglish
 from core import FFMPEG, FFPROBE, YTDLP
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -171,6 +173,92 @@ def detect_silences(src: Path, noise_db: int = -35, min_dur: float = 0.4) -> lis
     return sil
 
 
+def suspect_windows(words: list[dict], silences: list[list[float]], duration: float) -> list[tuple[float, float]]:
+    """Stretches where whisper.cpp likely HALLUCINATED (seen on real Hindi footage: a sentence said once came out
+    twice, every word squeezed to exactly 0.08 s). Signals: (a) >= 6 consecutive words with identical tiny
+    durations, (b) a 4+ word sequence immediately repeated. Returns padded time windows to re-transcribe."""
+    hits: list[tuple[int, int]] = []
+    n = len(words)
+    i = 0
+    while i < n:  # (a) uniform tiny durations
+        j = i
+        d0 = words[i]["e"] - words[i]["s"]
+        while j + 1 < n and d0 <= 0.12 and abs((words[j + 1]["e"] - words[j + 1]["s"]) - d0) < 0.006:
+            j += 1
+        if j - i + 1 >= 6:
+            hits.append((i, j))
+        i = j + 1
+    keys = [hinglish.norm_key(w["w"]) for w in words]
+    for size in range(12, 3, -1):  # (b) immediate repeats, longest first
+        for i in range(0, n - 2 * size + 1):
+            if keys[i:i + size] == keys[i + size:i + 2 * size] and any(keys[i:i + size]):
+                hits.append((i, i + 2 * size - 1))
+    wins = []
+    for i, j in hits:
+        a, b = words[i]["s"], words[j]["e"]
+        before = [e for s, e in silences if e <= a + 0.05 and a - e <= 4.0]
+        after = [s for s, e in silences if s >= b - 0.05 and s - b <= 4.0]
+        a = max(before) if before else a - 0.3
+        b = min(after) if after else b + 0.3
+        wins.append((max(0.0, a), min(duration or b, b)))
+    wins.sort()
+    merged: list[list[float]] = []
+    for a, b in wins:
+        if merged and a <= merged[-1][1] + 0.2:
+            merged[-1][1] = max(merged[-1][1], b)
+        elif b - a <= 60:
+            merged.append([a, b])
+    return [(round(a, 3), round(b, 3)) for a, b in merged]
+
+
+def repair_transcript(wav: Path, words: list[dict], silences: list[list[float]], language: str, duration: float,
+                      work: Path, log=lambda m: None) -> list[dict]:
+    """Re-transcribe each suspect window on its own (whisper behaves on short clips) and splice the result in."""
+    for k, (a, b) in enumerate(suspect_windows(words, silences, duration)):
+        clip = work / f"repair_{k}.wav"
+        # pad the clip with the surrounding pause (+ 0.6 s of digital silence): a clip ending right where speech
+        # stops makes whisper squeeze its last words onto one timestamp
+        ca = max(0.0, a - 0.3)
+        try:
+            run([FFMPEG, "-y", "-v", "error", "-ss", f"{ca:.3f}", "-to", f"{min(duration or b + 0.4, b + 0.4):.3f}",
+                 "-i", wav, "-af", "apad=pad_dur=0.6", clip])
+            new = transcribe(clip, work / f"repair_{k}", language, b - ca + 1.0)
+        except (PipelineError, subprocess.TimeoutExpired, OSError) as e:
+            log(f"re-transcribe {a:.1f}-{b:.1f}s failed ({str(e)[:80]}) – kept original words")
+            continue
+        finally:
+            clip.unlink(missing_ok=True)
+            for ext in (".json",):
+                (work / f"repair_{k}{ext}").unlink(missing_ok=True)
+        # the clip edges are pause, so everything whisper hears in [ca, cb] belongs to this window – replace the
+        # old words over that whole span (a narrower span left one stale word mixed in at the edge)
+        cb = b + 0.4
+        new = [{**w, "s": round(w["s"] + ca, 3), "e": round(w["e"] + ca, 3)} for w in new]
+        new = [w for w in new if ca <= (w["s"] + w["e"]) / 2 <= cb]
+        inside = lambda w: ca <= (w["s"] + w["e"]) / 2 <= cb  # noqa: E731
+        old_n = sum(1 for w in words if inside(w))
+        # accept only plausible text: not empty, not itself glitchy, and not a collapse (a duplicate halves the
+        # count; 20 words -> 1 means the clip was wrong, not the transcript)
+        if not new or suspect_windows(new, silences, duration) or len(new) < 0.35 * old_n:
+            log(f"re-transcribe {a:.1f}-{b:.1f}s gave no better text – kept original words")
+            continue
+        new = [{**w, "_r": 1} for w in new]
+        merged = sorted([w for w in words if not inside(w)] + new, key=lambda w: w["s"])
+        # seam: the same word heard by both passes (new clip's last word + old word right after the pause)
+        out = []
+        for w in merged:
+            if out and hinglish.norm_key(out[-1]["w"]) == hinglish.norm_key(w["w"]) and \
+                    w["s"] - out[-1]["s"] < 0.8 and ("_r" in out[-1]) != ("_r" in w):
+                if "_r" in out[-1]:
+                    continue  # keep the new one (already in out), drop the old duplicate
+                out[-1] = w
+                continue
+            out.append(w)
+        words = [{k: v for k, v in w.items() if k != "_r"} for w in out]
+        log(f"fixed a whisper glitch at {a:.1f}-{b:.1f}s ({old_n} words -> {len(new)})")
+    return words
+
+
 def fix_word_times(words: list[dict], silences: list[list[float]]) -> list[dict]:
     """Whisper stretches words across pauses. Pull starts out of silences, clip ends into them, keep order."""
     sil = [(a, b) for a, b in silences if b - a >= 0.3]
@@ -327,6 +415,10 @@ def _analyze_one(pid: str, src: dict, tag: str, lang: str, wd: Path) -> None:
                 extract_audio(path, wav)
                 silences = detect_silences(path)
                 words = fix_word_times(transcribe(wav, wd / f"{key}.whisper", lang, meta["duration"]), silences)
+                # detect glitches on the timing-FIXED words: raw whisper times of a glitch are squeezed together,
+                # only after fix_word_times do they sit where the speech really is
+                words = fix_word_times(repair_transcript(wav, words, silences, lang, meta["duration"], wd,
+                                                         log=lambda m: core.job_log(pid, f"{tag}: {m}")), silences)
             finally:
                 wav.unlink(missing_ok=True)  # 16 kHz WAV is ~115 MB/hour – never leave it behind on failure
             core.job_log(pid, f"{tag}: {len(words)} words")
@@ -490,20 +582,25 @@ def _map_time(rel: float, ranges: list[tuple[float, float]], speed: float) -> fl
     return None
 
 
-def write_ass(path: Path, scene: dict, words: list[dict], ranges, settings: dict, w: int, h: int) -> bool:
+def write_ass(path: Path, scene: dict, words: list[dict], ranges, settings: dict, w: int, h: int,
+              seam_y: int | None = None, extra: list[str] | None = None) -> bool:
+    """Word-highlight captions (+ optional extra events, e.g. split-layout cards). seam_y = centre captions there."""
     speed = float(scene.get("speed") or 1.0)
-    sw = [x for x in words_in(words, scene["in"], scene["out"])]
+    sw = [x for x in words_in(words, scene["in"], scene["out"])] if words else []
     mapped = []
     for x in sw:
         s = _map_time(x["s"] - scene["in"], ranges, speed)
         e = _map_time(min(x["e"], scene["out"]) - scene["in"], ranges, speed)
         if s is None or e is None or e - s < 0.02:
             continue
-        txt = x["w"].replace("{", "(").replace("}", ")").replace("\\", "/")
+        txt = hinglish.caption_word(x["w"], settings)  # Hindi script as spoken, or Hinglish; plus user spellings
+        txt = txt.replace("{", "(").replace("}", ")").replace("\\", "/").strip()
+        if not txt:  # "spell X as -" style removals: drop the word, keep the others' timing
+            continue
         if settings.get("caption_case") == "upper":
             txt = txt.upper()
         mapped.append({"w": txt, "s": s, "e": e, "end_punct": x["w"].rstrip().endswith((".", "?", "!", ",", "।"))})
-    if not mapped:
+    if not mapped and not extra:
         return False
 
     max_words = int(settings.get("caption_words", 4) or 4)
@@ -536,8 +633,11 @@ def write_ass(path: Path, scene: dict, words: list[dict], ranges, settings: dict
         "MarginR, MarginV, Encoding",
         f"Style: Cap,{font},{fs},{base},{base},&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,"
         f"{max(2, round(fs * 0.09))},{max(1, round(fs * 0.04))},{align},{round(w * 0.06)},{round(w * 0.06)},{mv},1",
+        f"Style: Card,{font},{fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1",
         "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
+    lines += extra or []
+    at = f"{{\\an5\\pos({w // 2},{seam_y})}}" if seam_y else ""
     events = []
     for ch in chunks:
         for i, m in enumerate(ch):
@@ -554,7 +654,7 @@ def write_ass(path: Path, scene: dict, words: list[dict], ranges, settings: dict
         events[k][1] = min(events[k][1], events[k + 1][0])
     for start, end, text in events:
         if end - start >= 0.02:
-            lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Cap,,0,0,0,,{text}")
+            lines.append(f"Dialogue: 3,{_ass_time(start)},{_ass_time(end)},Cap,,0,0,0,,{at}{text}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
     return True
 
@@ -581,6 +681,57 @@ class NvencFailed(PipelineError):
     pass
 
 
+FONTS_DIR = Path(__file__).resolve().parent / "fonts"
+
+
+def _ensure_fonts(wd: Path) -> None:
+    """libass gets fontsdir=fonts (relative: cwd is the work dir, avoids Windows drive-colon escaping)."""
+    dst = wd / "fonts"
+    dst.mkdir(exist_ok=True)
+    for f in FONTS_DIR.glob("*.ttf"):
+        t = dst / f.name
+        if not t.exists() or t.stat().st_size != f.stat().st_size:
+            shutil.copy(f, t)
+
+
+def split_heights(h: int, settings: dict) -> tuple[int, int]:
+    ratio = min(max(float(settings.get("split_ratio", 0.44) or 0.44), 0.25), 0.60)
+    top = int(h * ratio) // 2 * 2
+    return top, h - top
+
+
+def green_key(pid: str, src_file: str) -> str | None:
+    """Green-screen colour (hex RRGGBB) sampled from the frame border, or None if the background isn't green.
+    Cached per source file (work/<file>.key.json); a replaced source (size/mtime change) is re-sampled."""
+    src = core.raw_dir(pid) / src_file
+    st = src.stat()
+    cache = core.work_dir(pid) / f"{src_file}.key.json"
+    c = core.read_json(cache, None)
+    if isinstance(c, dict) and c.get("sig") == [st.st_size, st.st_mtime]:
+        return c.get("key")
+    dur = (probe(src).get("duration") or 2.0)
+    samples = []
+    for t in (dur * 0.2, dur * 0.5, dur * 0.8):
+        r = subprocess.run([FFMPEG, "-v", "error", "-ss", f"{t:.2f}", "-i", str(src), "-frames:v", "1",
+                            "-vf", "scale=16:28", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                           capture_output=True, timeout=60, creationflags=NO_WINDOW)
+        b = r.stdout
+        if len(b) < 16 * 28 * 3:
+            continue
+        W, H = 16, 28
+        px = lambda x, y: b[(y * W + x) * 3:(y * W + x) * 3 + 3]  # noqa: E731
+        # left/right edge columns in the upper 60 % + the top row: background, rarely the person
+        samples += [px(x, y) for y in range(int(H * 0.6)) for x in (0, 1, W - 2, W - 1)] + [px(x, 0) for x in range(W)]
+    key = None
+    if samples:
+        med = [sorted(p[i] for p in samples)[len(samples) // 2] for i in range(3)]
+        greenish = sum(1 for p in samples if p[1] > p[0] * 1.2 and p[1] > p[2] * 1.2 and p[1] > 70) / len(samples)
+        if greenish > 0.6:
+            key = "%02X%02X%02X" % tuple(med)
+    core._atomic_write(cache, {"sig": [st.st_size, st.st_mtime], "key": key})
+    return key
+
+
 def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h: int,
                    preview: bool, nvenc: bool = True) -> Path:
     settings = data["settings"]
@@ -594,16 +745,21 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
         caps = settings.get("captions", True)
     relevant = {k: settings.get(k) for k in ("fit", "caption_font", "caption_color", "highlight_color",
                                               "caption_position", "caption_case", "caption_words",
-                                              "silence_min", "logo", "logo_position", "remove_silence")}
+                                              "caption_script", "caption_fixes",
+                                              "silence_min", "logo", "logo_position", "remove_silence",
+                                              "layout", "split_ratio", "bg_mode", "bg_color", "panel_color",
+                                              "face_y", "grade")}
     src_path = core.raw_dir(pid) / scene["src"]
     st = src_path.stat()
     logo_p = core.BRAND / settings["logo"] if settings.get("logo") else None
     logo_sig = logo_p.stat().st_mtime if logo_p and logo_p.exists() else None
+    split = settings.get("layout") == "split" and h >= w
+    gkey = green_key(pid, scene["src"]) if split and settings.get("bg_mode", "auto") == "auto" else None
     # cache key covers everything that changes the pixels/audio: scene edits, style, the words in range,
     # the source file itself and the logo file – so re-analysis or a replaced logo never reuses a stale segment
     key = _seg_hash({k: v for k, v in scene.items() if k not in ("notes", "transcript", "thumb")}, relevant, caps,
                     w, h, fps, preview, words_in(words, scene["in"], scene["out"]), st.st_size, st.st_mtime,
-                    logo_sig, "nvenc" if nvenc else "x264", 6)  # bump when caption/render logic changes
+                    logo_sig, "nvenc" if nvenc else "x264", gkey, 8)  # bump when caption/card/render logic changes
     out = seg_dir / f"seg_{key}.mp4"
     if out.exists() and out.stat().st_size > 1000:
         return out
@@ -624,19 +780,51 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     if abs(speed - 1.0) > 1e-3:
         v.append(f"setpts=PTS/{speed:.4f}")
     z = float(scene.get("zoom") or 1.0)
-    if z > 1.001:
-        v.append(f"crop=trunc(iw/{z:.3f}/2)*2:trunc(ih/{z:.3f}/2)*2")
-    if settings.get("fit") == "pad":
-        v.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black")
+    pre = []  # graph parts that must come BEFORE the main [0:v] chain's consumers (split layout)
+    top_h = 0
+    if split:
+        top_h, bot_h = split_heights(h, settings)
+        sw0, sh0 = (src or {}).get("width") or 1080, (src or {}).get("height") or 1920
+        f = max(w / sw0, bot_h / sh0) * z  # cover the panel, punch-in = extra scale
+        S_w, S_h = int(sw0 * f) // 2 * 2, int(sh0 * f) // 2 * 2
+        cx = max(0, (S_w - w) // 2)
+        cy = int(min(max(0.0, float(settings.get("face_y", 0.27)) * S_h - 0.42 * bot_h), S_h - bot_h)) // 2 * 2
+        if settings.get("grade", True):
+            v.append("eq=brightness=0.03:contrast=1.04")
+        if gkey:
+            v += ["format=yuva444p", f"chromakey=0x{gkey}:0.08:0.03", "despill=type=green:mix=0.6:expand=0"]
+        v += [f"scale={S_w}:{S_h}", f"crop={w}:{bot_h}:{cx}:{cy}"]
+        bg = (settings.get("bg_color") or "#F4F1EC").lstrip("#")
+        panel = (settings.get("panel_color") or "#0F1B2D").lstrip("#")
+        seam = (settings.get("highlight_color") or "#F97316").lstrip("#")
+        t = max(2, round(h * 0.0021)) // 2 * 2
+        if gkey:
+            pre.append(f"color=c=0x{bg}:s={w}x{bot_h}:r={fps},format=yuv420p,vignette=angle=PI/14[bg]")  # faint: PI/7 turned off-white grey
+        pre.append(f"color=c=0x{panel}:s={w}x{top_h}:r={fps},format=yuv420p[top]")
+        speaker_tail = (f"[bg][sp]overlay=0:0:shortest=1[bot];" if gkey else "") + \
+                       f"[top][{'bot' if gkey else 'sp'}]vstack=inputs=2:shortest=1," \
+                       f"drawbox=x=0:y={top_h - t // 2}:w={w}:h={t}:color=0x{seam}:t=fill,setsar=1"
     else:
-        v.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}")
-    v.append("setsar=1")
+        if z > 1.001:
+            v.append(f"crop=trunc(iw/{z:.3f}/2)*2:trunc(ih/{z:.3f}/2)*2")
+        if settings.get("fit") == "pad":
+            v.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black")
+        else:
+            v.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}")
+        v.append("setsar=1")
 
     sid = scene["id"]
-    if caps and words:
+    post = []  # filters applied to the composed frame
+    _ensure_fonts(wd)
+    extra = []
+    if split:
+        extra = cards.events(scene.get("_card"), w, top_h, out_dur, bool(scene.get("_card_new")),
+                             settings.get("highlight_color") or "#F97316", "Poppins", _ass_time)
+    if (caps and words) or extra:
         ass = wd / f"cap_{sid}.ass"
-        if write_ass(ass, scene, words, ranges, settings, w, h):
-            v.append(f"subtitles=cap_{sid}.ass")
+        if write_ass(ass, scene, words if caps else [], ranges, settings, w, h,
+                     seam_y=top_h if split else None, extra=extra):
+            post.append(f"subtitles=cap_{sid}.ass:fontsdir=fonts")
     if (scene.get("text") or "").strip():
         (wd / f"txt_{sid}.txt").write_text(scene["text"].strip(), encoding="utf-8")
         font = wd / "title_font.ttf"
@@ -647,11 +835,14 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
                     break
         y = {"top": "h*0.08", "center": "(h-text_h)/2", "bottom": "h*0.80-text_h"}.get(scene.get("text_pos", "top"), "h*0.08")
         fs = round(min(w, h) * 0.065)
-        v.append(f"drawtext=fontfile=title_font.ttf:textfile=txt_{sid}.txt:expansion=none:fontsize={fs}:fontcolor=white:"
-                 f"box=1:boxcolor=black@0.55:boxborderw={round(fs * 0.35)}:x=(w-text_w)/2:y={y}")
+        post.append(f"drawtext=fontfile=title_font.ttf:textfile=txt_{sid}.txt:expansion=none:fontsize={fs}:fontcolor=white:"
+                    f"box=1:boxcolor=black@0.55:boxborderw={round(fs * 0.35)}:x=(w-text_w)/2:y={y}")
 
     inputs = ["-ss", f"{scene['in']:.3f}", "-t", f"{dur:.3f}", "-i", core.raw_dir(pid) / scene["src"]]
-    graph = [f"[0:v]{','.join(v)}[v0]"]
+    if split:
+        graph = pre + [f"[0:v]{','.join(v)}[sp]", f"{speaker_tail}{(',' + ','.join(post)) if post else ''}[v0]"]
+    else:
+        graph = [f"[0:v]{','.join(v + post)}[v0]"]
     vlabel = "v0"
     logo = settings.get("logo")
     in_idx = 1
@@ -719,6 +910,113 @@ def _prune_segments(wd: Path, kind: str, used: list[Path]) -> None:
                 pass
 
 
+def with_effective_cards(scenes: list[dict], settings: dict) -> list[dict]:
+    """Split layout: each scene shows its own card, else the previous one (no re-animation), else the headline.
+    Returns copies with _card/_card_new (part of each segment's cache key)."""
+    if settings.get("layout") != "split":
+        return scenes
+    head = (settings.get("headline") or "").strip()
+    shown = {"kind": "title", "text": head} if head else None
+    out, first = [], True
+    for sc in scenes:
+        c = sc.get("card")
+        eff = c if cards.valid(c) else shown
+        new = bool(eff) and (first or eff != shown)
+        out.append(dict(sc, _card=eff, _card_new=new))
+        shown, first = eff, False
+    return out
+
+
+MUSIC_EXT = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
+
+
+def music_file(pid: str, settings: dict) -> Path | None:
+    """settings.music: 'off' | 'auto' (first track in Brand Kit/music, else a generated soft pad) | file name."""
+    m = settings.get("music") or "off"
+    if m == "off":
+        return None
+    folder = core.BRAND / "music"
+    if m != "auto":
+        p = folder / Path(m).name
+        if p.is_file():
+            return p
+    tracks = sorted(p for p in folder.glob("*") if p.suffix.lower() in MUSIC_EXT) if folder.is_dir() else []
+    return tracks[0] if tracks else generated_pad()
+
+
+def generated_pad() -> Path:
+    """A 32 s loopable soft ambient chord pad (Am-F-C-G), synthesised once – original, no licence questions."""
+    out = core.ENGINES / "studio" / "cache" / "pad_v1.m4a"
+    if out.exists() and out.stat().st_size > 10000:
+        return out
+    out.parent.mkdir(exist_ok=True)
+    chords = [(220.0, 261.63, 329.63), (174.61, 220.0, 261.63), (261.63, 329.63, 392.0), (196.0, 246.94, 293.66)]
+    tone = lambda f: f"(sin(2*PI*{f}*t)+0.3*sin(4*PI*{f}*t)+0.12*sin(6*PI*{f}*t))"  # noqa: E731
+    body = "+".join(f"eq(floor(mod(t,32)/8),{k})*({'+'.join(tone(f) for f in ch)})" for k, ch in enumerate(chords))
+    expr = f"0.06*pow(sin(PI*mod(t,8)/8),0.7)*({body})"  # each chord swells in/out: no clicks at changes
+    tmp = out.with_name("pad_v1.part.m4a")
+    run([FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", f"aevalsrc='{expr}|{expr}':s=48000:d=32",  # quoted: commas!
+         "-af", "lowpass=f=1400,aecho=0.8:0.6:90|170:0.25|0.15", "-c:a", "aac", "-b:a", "160k", tmp])
+    os.replace(tmp, out)
+    return out
+
+
+def music_lufs(path: Path) -> float:
+    """Integrated loudness of a music file, cached by path + size + mtime (cache/music_lufs.json)."""
+    cache_f = core.ENGINES / "studio" / "cache" / "music_lufs.json"
+    cache_f.parent.mkdir(exist_ok=True)
+    st = path.stat()
+    k = f"{path}|{st.st_size}|{st.st_mtime}"
+    c = core.read_json(cache_f, {}) or {}
+    if k in c:
+        return float(c[k])
+    out = run([FFMPEG, "-hide_banner", "-i", path, "-vn", "-af", "ebur128=framelog=quiet", "-f", "null", "-"],
+              timeout=600)
+    found = re.findall(r"I:\s+(-?[\d.]+) LUFS", out)
+    val = float(found[-1]) if found else -20.0
+    if val < -70:  # silent file
+        val = -20.0
+    c[k] = val
+    core._atomic_write(cache_f, c)
+    return val
+
+
+def finish_audio(src: Path, dst: Path, dur: float, music: Path | None, polish: bool) -> None:
+    """Final mix over the joined video (video stream copied): voice clean-up + -16 LUFS, optional ducked music."""
+    voice = "aresample=48000"
+    if polish:
+        clean = "highpass=f=80,afftdn=nf=-25,acompressor=threshold=0.1:ratio=3:attack=5:release=120:makeup=1.5"
+        # two-pass loudnorm: one-pass (dynamic) overshoots on short reels (measured -14.3 instead of -16)
+        meas = run([FFMPEG, "-hide_banner", "-i", src, "-vn", "-af",
+                    f"{clean},loudnorm=I=-16:TP=-1.5:LRA=7:print_format=json", "-f", "null", "-"],
+                   timeout=max(600, int(dur * 2)))
+        try:
+            m = json.loads(meas[meas.rindex("{"):meas.rindex("}") + 1])
+            ln = (f"loudnorm=I=-16:TP=-1.5:LRA=7:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
+                  f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:offset={m['target_offset']}:"
+                  f"linear=true")
+        except (ValueError, KeyError):
+            ln = "loudnorm=I=-16:TP=-1.5:LRA=7"
+        if "-inf" in ln:  # silent track: nothing to normalise
+            ln = "anull"
+        voice += f",{clean},{ln},aresample=48000"
+    inputs = ["-i", src]
+    if music:
+        inputs += ["-stream_loop", "-1", "-i", music]
+        fade = max(0.0, dur - 1.5)
+        gain = -30.0 - music_lufs(music)  # fixed gain to -30 LUFS (loudnorm on a looped stream pumped it up 1.5 LU)
+        graph = (f"[0:a]{voice},asplit=2[vo][key];"
+                 f"[1:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                 f"volume={gain:.2f}dB,afade=t=in:d=1,afade=t=out:st={fade:.2f}:d=1.5[m];"
+                 f"[m][key]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=450[md];"  # ~10 dB under speech
+                 f"[vo][md]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.84:level=false[a]")  # level=true (default) auto-gains up to 0 dB
+    else:
+        graph = f"[0:a]{voice}[a]"
+    run([FFMPEG, "-y", "-v", "error", *inputs, "-filter_complex", graph, "-map", "0:v", "-map", "[a]",
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", f"{dur:.3f}", "-movflags", "+faststart", dst],
+        timeout=max(600, int(dur * 3)))
+
+
 def render_project(pid: str, preview: bool) -> Path:
     data = core.load(pid)
     scenes = [s for s in data["scenes"] if s.get("keep", True)]
@@ -730,6 +1028,7 @@ def render_project(pid: str, preview: bool) -> Path:
     w, h = target_size(data, preview)
     wd = core.work_dir(pid)
     cache: dict[str, tuple[list, list]] = {}
+    scenes = with_effective_cards(scenes, data["settings"])
 
     def render_all(nvenc: bool) -> list[Path]:
         segs = []
@@ -763,8 +1062,21 @@ def render_project(pid: str, preview: bool) -> Path:
         n = 1 + len([r for r in data.get("renders", []) if r.get("kind") == "final"])
         out = core.unique_path(core.EXPORTS, f"{data['id']}_v{n}.mp4")
     tmp_out = out.with_name(out.stem + ".part.mp4")
-    run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
-         "-movflags", "+faststart", tmp_out], cwd=wd)
+    st = data["settings"]
+    music = music_file(pid, st)
+    polish = bool(st.get("audio_polish", False))
+    if music or polish:
+        joined = wd / "joined.part.mp4"
+        try:
+            run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
+                 joined.name], cwd=wd)
+            core.set_job(pid, progress="Mixing audio" + (" + music" if music else ""))
+            finish_audio(joined, tmp_out, probe(joined)["duration"], music, polish)
+        finally:
+            joined.unlink(missing_ok=True)
+    else:
+        run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
+             "-movflags", "+faststart", tmp_out], cwd=wd)
     os.replace(tmp_out, out)  # never leave a half-written file in Exports
     dur = probe(out)["duration"]
     _prune_segments(wd, "preview" if preview else "final", segs)

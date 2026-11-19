@@ -124,6 +124,7 @@ main { padding: 18px; max-width: 1600px; margin: 0 auto; }
 .detail .title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 .detail .title h2 { font-size: 18px; }
 .detail .transcript { color: #c9cdd5; line-height: 1.55; font-size: 14px; }
+.detail .transcript.capview { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line, #2a2f3a); }
 .detail .props { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
 
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 10px; }

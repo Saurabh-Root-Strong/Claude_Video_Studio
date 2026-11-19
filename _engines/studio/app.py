@@ -16,6 +16,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 import commands
 import core
+import hinglish
 import pipeline
 
 HERE = Path(__file__).parent
@@ -140,6 +141,12 @@ def _decorate(data: dict) -> dict:
         sc["no"] = i
         sc["dur"] = round(sc["out"] - sc["in"], 2)
         sc["est"] = pipeline.estimated_duration(sc, sil_cache[sc["src"]], data["settings"])
+        # what the captions will actually say (Hinglish and/or user spellings), so the page matches the video
+        st = data["settings"]
+        if st.get("caption_script") == "hinglish" or st.get("caption_fixes"):
+            sc["caption_view"] = hinglish.caption_text((sc.get("transcript") or "").split(), st)
+        else:
+            sc.pop("caption_view", None)
         total_orig += sc["dur"]
         total_est += sc["est"]
     data["totals"] = {"orig": round(total_orig, 1), "est": round(total_est, 1),
@@ -323,6 +330,27 @@ def api_brief(pid):
     if rejected:
         return jsonify(ok=False, error=f"Not saved (invalid value): {', '.join(rejected)}"), 400
     return jsonify(ok=True)
+
+
+@app.post("/api/projects/<pid>/apply_brand")
+def api_apply_brand(pid):
+    """Overlay the approved Brand Kit (Brand Kit/brand-kit.json "settings") on this project. Undoable."""
+    _exists(pid)
+    kit = core.read_json(core.BRAND / "brand-kit.json", None)
+    if not isinstance(kit, dict) or not isinstance(kit.get("settings"), dict):
+        return jsonify(error="No Brand Kit yet (Brand Kit/brand-kit.json missing or invalid)."), 400
+    applied = []
+
+    def fn(d):
+        core.snapshot(pid, d)
+        for k, v in kit["settings"].items():
+            if k in core.DEFAULT_SETTINGS:
+                ok, clean = core.clean_setting(k, v)
+                if ok:
+                    d["settings"][k] = clean
+                    applied.append(k)
+    core.mutate(pid, fn)
+    return jsonify(ok=True, applied=applied)
 
 
 @app.post("/api/projects/<pid>/analyze")

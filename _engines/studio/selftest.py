@@ -69,17 +69,41 @@ try:
     hb = pipeline.build_scenes(18.0, [], hw, hs)
     check("no-punctuation speech splits at ~0.5 s pauses", len(hb) == 5, str(hb))
 
+    # ---------------------------------------------------------------- whisper glitch detection (fake repeats)
+    said = "aage kya hoga agar aap lene ki soch rahe hain".split()
+    good = [{"w": x, "s": 1 + i * 0.3, "e": 1.25 + i * 0.3} for i, x in enumerate(said)]
+    glitch = good[:2] + [{"w": x, "s": 2 + i * 0.08, "e": 2.08 + i * 0.08} for i, x in enumerate(said * 2)]
+    sw = pipeline.suspect_windows(glitch, [[0.5, 1.9], [5.0, 5.6]], 10.0)
+    check("whisper glitch (sentence repeated, 0.08 s words) detected; normal speech not flagged",
+          pipeline.suspect_windows(good, [], 10.0) == [] and sw == [(1.9, 5.0)], str(sw))
+
     # ---------------------------------------------------------------- captions never overlap (one line at a time)
     import re as _re
     fast = [{"w": f"w{i}", "s": 1 + i * 0.12, "e": 1 + i * 0.12 + 0.3} for i in range(12)]  # compressed, overlapping
     sc_ = {"id": "t", "in": 0.0, "out": 4.0, "speed": 1.0}
     ass = ROOT / "t.ass"
     pipeline.write_ass(ass, sc_, fast, [(0.0, 4.0)], dict(core.DEFAULT_SETTINGS), 1080, 1920)
-    ts = [tuple(_re.findall(r"Dialogue: 0,([\d:.]+),([\d:.]+)", l)[0]) for l in ass.read_text("utf-8-sig").splitlines()
+    ts = [tuple(_re.findall(r"Dialogue: \d,([\d:.]+),([\d:.]+)", l)[0]) for l in ass.read_text("utf-8-sig").splitlines()
           if l.startswith("Dialogue")]
     sec = lambda t: int(t.split(":")[0]) * 3600 + int(t.split(":")[1]) * 60 + float(t.split(":")[2])  # noqa: E731
     overl = sum(1 for k in range(len(ts) - 1) if sec(ts[k][1]) > sec(ts[k + 1][0]) + 1e-6)
     check("caption events never overlap (no stacked double lines)", overl == 0 and len(ts) >= 10, f"{overl} overlaps")
+
+    # ---------------------------------------------------------------- Hinglish captions (Hindi in English letters)
+    import hinglish
+    cases = {"करना": "karna", "सकता": "sakta", "आपके": "aapke", "लगभग": "lagbhag", "पास": "paas", "अच्छा": "achha",
+             "में": "mein", "ज़िंदगी": "zindagi", "जाएगा": "jayega", "हुआ": "hua", "सवाल": "sawal", "है।": "hai.",
+             "लग-बगा": "lag-baga", "IPO": "IPO", "मार्केट": "market", "२०२६": "2026", "दोस्तो,": "dosto,"}
+    bad = {k: hinglish.to_hinglish(k) for k, v in cases.items() if hinglish.to_hinglish(k) != v}
+    check("Hinglish transliteration (schwa drop, dictionary, punctuation)", not bad, str(bad))
+    hs_ = dict(core.DEFAULT_SETTINGS, caption_script="hinglish", caption_fixes={"ekspektet": "expected"})
+    hw_ = [{"w": w, "s": 0.2 + i * 0.4, "e": 0.5 + i * 0.4} for i, w in enumerate(["आप", "एक्सपेक्टेट", "करना"])]
+    pipeline.write_ass(ass, sc_, hw_, [(0.0, 4.0)], hs_, 1080, 1920)
+    body = ass.read_text("utf-8-sig")
+    check("Hinglish captions render in English letters + spell fix by shown word",
+          "aap" in body and "expected" in body and "karna" in body and not hinglish.DEVA.search(body))
+    pipeline.write_ass(ass, sc_, hw_, [(0.0, 4.0)], dict(hs_, caption_script="original", caption_fixes={}), 1080, 1920)
+    check("Hindi script captions unchanged when script = original", "करना" in ass.read_text("utf-8-sig"))
 
     # ---------------------------------------------------------------- project + upload + analyze
     r = post("/api/projects", {"name": "Self Test"})
@@ -138,6 +162,18 @@ try:
     st = core.load(pid)["settings"]
     check("invalid settings rejected, not stored", r.status_code == 400 and st["caption_words"] == 4
           and st["highlight_color"] == "#F97316")
+    r1 = post(f"/api/projects/{pid}/command", {"scene": s1, "text": "captions hinglish; spell Market as MARKET"})
+    r2 = post(f"/api/projects/{pid}/brief", {"settings": {"caption_fixes": ["not", "a", "dict"]}})
+    r3 = post(f"/api/projects/{pid}/command", {"scene": None, "text": "fix audio to be louder"}).get_json()
+    st = core.load(pid)["settings"]
+    check("caption script + spell commands (from a scene box) stored; bad fixes rejected",
+          st["caption_script"] == "hinglish" and st["caption_fixes"] == {"market": "MARKET"}
+          and r2.status_code == 400 and r3["queued"] == ["fix audio to be louder"], str(r1.get_json()))
+    view = client.get(f"/api/projects/{pid}").get_json()["scenes"][0]
+    check("page shows what the captions will say", "caption_view" in view, view.get("caption_view", "")[:60])
+    post(f"/api/projects/{pid}/command", {"scene": None, "text": "captions hindi; clear spellings"})
+    st = core.load(pid)["settings"]
+    check("back to Hindi script + spellings cleared", st["caption_script"] == "original" and st["caption_fixes"] == {})
 
     # ---------------------------------------------------------------- worker survives a vanished project
     ghost = post("/api/projects", {"name": "Ghost"}).get_json()["id"]
@@ -210,6 +246,61 @@ try:
           core.work_file(p2, "clip.mp4", "words.json") != core.work_file(p2, "clip.mov", "words.json"),
           f"mp4 {len(w_mp4)} words, mov {len(w_mov)} words")
 
+    # ---------------------------------------------------------------- Brand Kit split layout: green screen, cards, music
+    import cards
+    pc = [cards.parse("title bajaj *IPO* aaj"), cards.parse("number 2x+ | listing gain"),
+          cards.parse("chart 10, 12, 11.5, 15 | Nifty"), cards.parse("off"), cards.parse("chart 5")]
+    check("card commands parse (title/number/chart/off; 1-point chart refused)",
+          [c and c["kind"] for c in pc] == ["title", "number", "chart", "none", None] and pc[2]["points"][2] == 11.5)
+    green = ROOT / "green.mp4"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-i", str(FIX / "recap_test.mp4"), "-f", "lavfi", "-i",
+                    "color=c=0x4CBF4C:s=720x1280:r=30", "-filter_complex",
+                    "[0:v]scale=440:-2[p];[1:v][p]overlay=(W-w)/2:H-h-80:shortest=1[v]", "-map", "[v]", "-map", "0:a",
+                    "-t", "12", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(green)], check=True)
+    core.BRAND.mkdir(exist_ok=True)
+    (core.BRAND / "brand-kit.json").write_text(json.dumps({"settings": {
+        "layout": "split", "format": "9:16", "music": "auto", "audio_polish": True, "caption_font": "Poppins",
+        "bogus_key": 1, "silence_min": "not a number"}}), encoding="utf-8")
+    p3 = post("/api/projects", {"name": "Split Test"}).get_json()["id"]
+    st3 = core.load(p3)["settings"]
+    check("new project starts from the Brand Kit (bad/unknown keys ignored)",
+          st3["layout"] == "split" and st3["music"] == "auto" and st3["silence_min"] == 0.6 and "bogus_key" not in st3)
+    with open(green, "rb") as f:
+        client.post(f"/api/projects/{p3}/upload?kind=source", data={"files": (f, "green.mp4")},
+                    content_type="multipart/form-data")
+    post(f"/api/projects/{p3}/analyze")
+    wait_job(p3, "analyze")
+    check("green screen detected", pipeline.green_key(p3, "green.mp4") is not None and
+          pipeline.green_key(pid, core.load(pid)["sources"][0]["file"]) is None)
+    d3 = core.load(p3)
+    post(f"/api/projects/{p3}/command", {"scene": None, "text": "headline: test *card*"})
+    r = post(f"/api/projects/{p3}/command", {"scene": d3["scenes"][-1]["id"], "text": "card: number 2x | gain"}).get_json()
+    post(f"/api/projects/{p3}/command", {"scene": None, "text": "layout full"})
+    r2 = post(f"/api/projects/{p3}/apply_brand").get_json()
+    check("card command + Apply Brand Kit (undoable)", core.load(p3)["scenes"][-1].get("card", {}).get("value") == "2x"
+          and core.load(p3)["settings"]["layout"] == "split" and "layout" in r2["applied"], str(r))
+    post(f"/api/projects/{p3}/render", {"kind": "final"})
+    j = wait_job(p3, "final")
+    check("split layout + ducked music + loudness renders", j["status"] == "done", j.get("error") or "")
+    if j["status"] == "done":
+        o3 = core.EXPORTS / core.load(p3)["renders"][-1]["file"]
+        top_h, _ = pipeline.split_heights(1920, core.load(p3)["settings"])
+
+        def px(x, y, t=1.0):
+            b = subprocess.run([core.FFMPEG, "-v", "error", "-ss", str(t), "-i", str(o3), "-frames:v", "1", "-vf",
+                                f"format=rgb24,crop=1:1:{x}:{y}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
+            return tuple(b[:3])
+        seam, top, bg = px(30, top_h), px(30, 30), px(30, top_h + 120)
+        check("seam is brand orange, top panel navy, green replaced by off-white",
+              seam[0] > 200 and seam[2] < 90 and top[2] > top[0] and max(top) < 70 and min(bg) > 185 and
+              not (bg[1] > bg[0] + 20), f"seam {seam} top {top} bg {bg}")
+        lo = subprocess.run([core.FFMPEG, "-hide_banner", "-i", str(o3), "-af", "ebur128=framelog=quiet", "-f", "null", "-"],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace").stderr
+        lufs = float(_re.findall(r"I:\s+(-?[\d.]+) LUFS", lo)[-1])
+        check("final loudness -16 LUFS (+-1)", -17.0 <= lufs <= -15.0, f"{lufs} LUFS")
+        fd = abs(sdur(o3, "a:0") - sdur(o3, "v:0")) * 1000
+        check("split export A/V lengths match (<=60 ms)", fd <= 60, f"{fd:.0f} ms")
+
     # ---------------------------------------------------------------- security
     check("foreign Host header blocked", client.get("/api/projects", headers={"Host": "evil.com"}).status_code == 403)
     check("cross-site POST blocked",
@@ -230,6 +321,10 @@ try:
         p.wait()
     n = core.load(pid)["counter"]
     check("4 writers x 40 updates, none lost (cross-process lock)", n == 160, f"counter={n}")
+except Exception:  # sys.exit in `finally` would otherwise swallow the traceback and report "all passed"
+    import traceback
+    traceback.print_exc()
+    check("self-test ran to the end (crashed – see traceback above)", False)
 finally:
     ok = sum(1 for _, k, _ in results if k)
     print(f"\n{ok}/{len(results)} checks passed.  temp root: {ROOT}")

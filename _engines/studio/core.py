@@ -61,11 +61,25 @@ DEFAULT_SETTINGS = {
     "caption_position": "bottom",  # bottom | center | top
     "caption_case": "normal",      # normal | upper
     "caption_words": 4,
+    "caption_script": "original",  # original (as transcribed, e.g. Hindi script) | hinglish (Hindi in English letters)
+    "caption_fixes": {},           # word -> replacement, from the "spell X as Y" command
     "remove_silence": False,
     "silence_min": 0.6,
     "logo": None,               # file name inside Brand Kit
     "logo_position": "top-right",
     "language": "auto",
+    # split layout (Brand Kit "Clean Split"): cards on top, speaker below, captions on the seam
+    "layout": "full",              # full | split
+    "split_ratio": 0.44,           # top panel share of the height
+    "headline": "",                # default title card when a scene has no card of its own
+    "bg_mode": "auto",             # auto = replace a detected green screen with bg_color | off
+    "bg_color": "#F4F1EC",
+    "panel_color": "#0F1B2D",
+    "face_y": 0.27,                # where the speaker's eyes are in the source (0 top .. 1 bottom), for framing
+    "grade": True,                 # light brightness/contrast lift on the speaker
+    # final mix
+    "audio_polish": False,         # high-pass + denoise + compression + loudness -16 LUFS
+    "music": "off",                # off | auto (Brand Kit/music, else a generated soft pad) | file in Brand Kit/music
 }
 
 _lock = threading.RLock()
@@ -189,7 +203,7 @@ def new_project(name: str) -> dict:
         "created": now_iso(),
         "version": 0,
         "brief": "",
-        "settings": copy.deepcopy(DEFAULT_SETTINGS),
+        "settings": brand_settings(),
         "sources": [],
         "references": [],
         "scenes": [],
@@ -199,6 +213,19 @@ def new_project(name: str) -> dict:
     }
     save(pid, data)
     return data
+
+
+def brand_settings() -> dict:
+    """Defaults for a NEW project: built-in defaults overlaid with the approved Brand Kit (Brand Kit/brand-kit.json,
+    key "settings"). Invalid or unknown keys in that file are ignored, never stored."""
+    s = copy.deepcopy(DEFAULT_SETTINGS)
+    kit = read_json(BRAND / "brand-kit.json", {}) or {}
+    for k, v in (kit.get("settings") or {}).items() if isinstance(kit, dict) else []:
+        if k in DEFAULT_SETTINGS:
+            ok, val = clean_setting(k, v)
+            if ok:
+                s[k] = val
+    return s
 
 
 def load(pid: str) -> dict:
@@ -366,6 +393,7 @@ def job_log(pid: str, line: str) -> None:
 
 _ENUMS = {"format": {"original", "16:9", "9:16", "1:1"}, "fit": {"crop", "pad"},
           "caption_position": {"bottom", "center", "top"}, "caption_case": {"normal", "upper"},
+          "caption_script": {"original", "hinglish"}, "layout": {"full", "split"}, "bg_mode": {"auto", "off"},
           "logo_position": {"top-right", "top-left", "bottom-right", "bottom-left"}}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
@@ -375,9 +403,9 @@ def clean_setting(key: str, value):
     try:
         if key in _ENUMS:
             return (value in _ENUMS[key]), value
-        if key in ("captions", "remove_silence"):
+        if key in ("captions", "remove_silence", "grade", "audio_polish"):
             return True, value in (True, "true", "1", 1, "on")
-        if key in ("caption_color", "highlight_color"):
+        if key in ("caption_color", "highlight_color", "bg_color", "panel_color"):
             return bool(_HEX.match(str(value))), str(value).upper()
         if key == "caption_words":
             return True, max(1, min(int(value), 8))
@@ -389,6 +417,29 @@ def clean_setting(key: str, value):
         if key == "caption_font":  # commas/braces would corrupt the subtitle style line
             v = re.sub(r"[,{}\\\r\n]", "", str(value)).strip()[:60]
             return True, v or "Arial"
+        if key == "split_ratio":
+            return True, round(max(0.25, min(float(value), 0.60)), 3)
+        if key == "face_y":
+            return True, round(max(0.0, min(float(value), 1.0)), 3)
+        if key == "headline":
+            return True, re.sub(r"[{}\\\r\n]", " ", str(value or "")).strip()[:100]
+        if key == "music":
+            v = str(value or "off").strip()
+            if v in ("off", "auto", "none", ""):
+                return True, "auto" if v == "auto" else "off"
+            v = Path(v).name
+            return (BRAND / "music" / v).is_file(), v
+        if key == "caption_fixes":
+            if not isinstance(value, dict) or len(value) > 1000:
+                return False, value
+            from hinglish import norm_key  # local import: hinglish has no deps, core must not import pipeline
+            out = {}
+            for k, v in value.items():
+                k2, v2 = norm_key(str(k)), re.sub(r"[{}\\\r\n]", "", str(v)).strip()[:80]
+                if not k2:
+                    return False, value
+                out[k2] = v2
+            return True, out
         if key == "language":
             v = str(value).strip().lower()
             return bool(re.fullmatch(r"auto|[a-z]{2,3}", v)), v

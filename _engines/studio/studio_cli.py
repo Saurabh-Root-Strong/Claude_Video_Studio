@@ -5,6 +5,7 @@
   python studio_cli.py cmd <pid> <scene|-> "text" apply an instant command (scene no. or id, '-' = whole video)
   python studio_cli.py set <pid> <scene> key=value ...   set raw scene fields (in, out, keep, speed, text, ...)
   python studio_cli.py done <pid> <cmd_id> "reply"       mark a Claude command done with a reply
+  python studio_cli.py captions <pid>             every distinct word -> what the captions show (Hinglish review)
   python studio_cli.py analyze <pid> | render <pid> preview|final
 """
 from __future__ import annotations
@@ -73,6 +74,24 @@ def show(pid):
         print(f"{i:>3} {s['id']} {s['in']:7.2f}-{s['out']:7.2f} ({s['out'] - s['in']:.1f}s→{est}s) {' '.join(flags)} | {s['transcript'][:110]}")
 
 
+def caption_words(pid):
+    """Every distinct spoken word with what the captions show for it now – for reviewing Hinglish/spellings.
+    Fix with:  cmd <pid> - "spell <word> as <correct>; spell <word2> as <correct2>"  (one call, ';'-separated)."""
+    import hinglish
+    d = core.load(pid)
+    st = d["settings"]
+    print(f"caption_script={st.get('caption_script')}  saved spellings={len(st.get('caption_fixes') or {})}")
+    seen, rows = set(), []
+    for src in d["sources"]:
+        for w in core.read_json(core.work_file(pid, src["file"], "words.json"), []) or []:
+            k = hinglish.norm_key(w["w"])
+            if k and k not in seen:
+                seen.add(k)
+                rows.append((w["w"].strip(), hinglish.caption_word(w["w"], st).strip(), w["s"]))
+    for orig, shown, s in rows:
+        print(f"{s:7.2f}s  {orig:<22} -> {shown}")
+
+
 def cmd(pid, ref, text):
     def fn(d):
         sid = _scene(d, ref)
@@ -130,6 +149,8 @@ def main(argv):
         show(rest[0])
     elif op == "cmd":
         cmd(rest[0], rest[1], rest[2])
+    elif op == "captions":
+        caption_words(rest[0])
     elif op == "set":
         set_fields(rest[0], rest[1], rest[2:])
     elif op == "done":

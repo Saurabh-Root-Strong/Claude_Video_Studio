@@ -184,6 +184,109 @@ def _global_cmd(data: dict, t: str) -> str | None:
     return None
 
 
+def _card_cmd(data: dict, sc: dict, raw: str) -> str:
+    """card: title bajaj *IPO* aaj | card: number 2x+ | listing gain | card: chart 1,2,3 | label | card off"""
+    import cards
+    body = re.sub(r"^(?:no card|card)\s*[:\-]?\s*", "", raw, flags=re.I)
+    if re.fullmatch(r"no card", raw.strip(), flags=re.I) or body.lower() in ("off", "none", "clear", "remove"):
+        sc["card"] = {"kind": "none"}
+        msg = "Empty top panel for this scene."
+    elif body.lower() in ("inherit", "auto", "same", "reset"):
+        sc.pop("card", None)
+        msg = "This scene keeps showing the previous card."
+    else:
+        c = cards.parse(body)
+        if not c:
+            return "! Card needs content, e.g.  card: title bajaj *IPO* aaj   ·   card: number 2x | listing gain"
+        sc["card"] = c
+        msg = {"title": f'Title card: "{c.get("text")}".', "number": f'Number card: {c.get("value")} {c.get("label", "")}.',
+               "chart": f'Chart card ({len(c.get("points", []))} points).', "none": "Empty top panel."}[c["kind"]]
+    if data["settings"].get("layout") != "split":
+        msg += " (Cards show in the split layout – say: layout split)"
+    return msg
+
+
+def _layout_cmd(data: dict, raw: str, t: str) -> str | None:
+    st = data["settings"]
+    if t in ("layout split", "split screen", "split layout"):  # not bare "split": that's the scene split command
+        st["layout"] = "split"
+        if st.get("format") == "original":
+            st["format"] = "9:16"
+        return "Split layout: cards on top, you below, captions on the seam (format 9:16)."
+    if t in ("layout full", "full screen", "full layout", "no split"):
+        st["layout"] = "full"
+        return "Full-screen layout."
+    m = re.fullmatch(r"headline\s*[:\-]?\s*(.*)", raw, flags=re.I | re.S)
+    if m:
+        st["headline"] = re.sub(r"[{}\\\r\n]", " ", m.group(1)).strip()[:100]
+        return f'Headline card: "{st["headline"]}".' if st["headline"] else "Headline removed."
+    if t in ("music on", "add music", "music", "quiet music", "background music", "music auto"):
+        st["music"] = "auto"
+        return "Quiet background music on (ducks under your voice). Own track? Put it in Brand Kit\\music."
+    if t in ("music off", "no music", "remove music"):
+        st["music"] = "off"
+        return "Music off."
+    if t in ("audio polish", "audio polish on", "clean audio", "polish audio", "loudness on"):
+        st["audio_polish"] = True
+        return "Voice clean-up + loudness -16 LUFS on."
+    if t in ("audio polish off", "raw audio", "loudness off"):
+        st["audio_polish"] = False
+        return "Audio polish off."
+    if t in ("background off", "green screen off", "keep background", "no background"):
+        st["bg_mode"] = "off"
+        return "Green screen kept as filmed."
+    if t in ("background on", "green screen on", "remove green screen", "replace background", "background auto"):
+        st["bg_mode"] = "auto"
+        return "Green screen replaced with the off-white background."
+    m = re.fullmatch(r"face (up|down|higher|lower)(?: ([\d.]+))?", t)
+    if m:
+        step = float(m.group(2) or 0.04)
+        d = step if m.group(1) in ("up", "higher") else -step
+        st["face_y"] = round(max(0.0, min(1.0, float(st.get("face_y", 0.27)) + d)), 3)
+        return f"Speaker framing moved {m.group(1)} (face_y {st['face_y']})."
+    return None
+
+
+def _caption_lang_cmd(data: dict, raw: str, t: str) -> str | None:
+    """Caption script (Hindi / Hinglish) and per-word spellings. Spellings apply to the whole video."""
+    st = data["settings"]
+    m = re.fullmatch(r"(?:captions?|subtitles?)(?: in| script| language)? (hinglish|roman|english letters|latin)", t)
+    if m:
+        st["caption_script"] = "hinglish"
+        return "Captions in Hinglish (Hindi in English letters). Wrong word? spell <word> as <correct>"
+    m = re.fullmatch(r"(?:captions?|subtitles?)(?: in| script| language)? (hindi|devanagari|original|as spoken|हिंदी|हिन्दी)", t)
+    if m:
+        st["caption_script"] = "original"
+        return "Captions in Hindi script / as spoken."
+    if t in ("clear spellings", "reset spellings", "remove spellings"):
+        n = len(st.get("caption_fixes") or {})
+        st["caption_fixes"] = {}
+        return f"Removed {n} caption spelling(s)."
+    # only "spell": "fix audio to be louder" must stay a request for Claude, not become a spelling
+    m = re.fullmatch(r"spell\s+(\S+)\s+(?:as|=|->|→)\s*(.*)", raw, flags=re.I | re.S)
+    if m:
+        from hinglish import norm_key
+        key, val = norm_key(m.group(1)), m.group(2).strip().strip("\"'")
+        if not key:
+            return "! Which word? e.g.  spell daval as double"
+        val = re.sub(r"[{}\\\r\n]", "", val)[:80]
+        if val.lower() in ("-", "nothing", "blank", "remove", "hide"):
+            val = ""
+        fixes = dict(st.get("caption_fixes") or {})
+        fixes[key] = val
+        st["caption_fixes"] = fixes
+        return f'Captions: "{m.group(1)}" → "{val}" everywhere.' if val else f'Captions: "{m.group(1)}" hidden everywhere.'
+    m = re.fullmatch(r"(?:unspell|unfix|reset spelling(?: of)?)\s+(\S+)", raw, flags=re.I)
+    if m:
+        from hinglish import norm_key
+        fixes = dict(st.get("caption_fixes") or {})
+        if fixes.pop(norm_key(m.group(1)), None) is None:
+            return f'! No spelling saved for "{m.group(1)}".'
+        st["caption_fixes"] = fixes
+        return f'Spelling for "{m.group(1)}" removed.'
+    return None
+
+
 GLOBAL_TO_ALL = re.compile(r"(speed .*|[\d.,]+\s*x.*|slow ?mo.*|slow motion|normal speed|mute|unmute|volume .*|zoom .*|no zoom|punch in)")
 
 
@@ -197,8 +300,14 @@ def apply(data: dict, scene_id: str | None, text: str) -> tuple[list[str], list[
     sc = core.scene_by_id(data, scene_id) if scene_id else None
     for raw in parts:
         t = re.sub(r"\s+", " ", raw.lower().strip().rstrip(".!"))
-        reply = None
-        if sc is not None:
+        reply = _caption_lang_cmd(data, raw.strip(), t)  # works from the scene box and the whole-video box
+        if reply is None:
+            reply = _layout_cmd(data, raw.strip(), t)
+        if reply is not None:
+            pass
+        elif sc is not None and re.match(r"(card[:\-\s]|no card$)", t):
+            reply = _card_cmd(data, sc, raw.strip())
+        elif sc is not None:
             m = re.fullmatch(r"text[:\-]?\s+(.+)", raw.strip(), flags=re.I | re.S)
             if m and not re.fullmatch(r"(top|center|centre|middle|bottom|off|position .*)", m.group(1).strip().lower()):
                 sc["text"] = m.group(1).strip()
