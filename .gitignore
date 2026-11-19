@@ -1,0 +1,47 @@
+# WHITELIST: ignore everything, then allow only code/docs.
+# Footage, exports, project data, engines/models and downloads can never be committed by accident.
+/*
+!/.gitignore
+!/README.md
+!/Start Studio.bat
+!/_engines/
+
+/_engines/*
+!/_engines/README.md
+
+# studio app (code, tests, UI)
+!/_engines/studio/
+/_engines/studio/.venv/
+/_engines/studio/__pycache__/
+/_engines/studio/**/*.pyc
+
+# Remotion project (sources only)
+!/_engines/remotion/
+/_engines/remotion/node_modules/
+/_engines/remotion/out/
+
+# HyperFrames project (sources only; vendor-generated AGENTS.md/CLAUDE.md and state excluded)
+!/_engines/hyperframes/
+/_engines/hyperframes/node_modules/
+/_engines/hyperframes/card-test/AGENTS.md
+/_engines/hyperframes/card-test/CLAUDE.md
+/_engines/hyperframes/card-test/.hyperframes/
+/_engines/hyperframes/card-test/renders/
+
+# resumable download helper
+!/_engines/_downloads/
+/_engines/_downloads/*
+!/_engines/_downloads/resume_dl.ps1
+
+# never: media / binaries anywhere in allowed folders
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.wav
+*.mp3
+*.bin
+*.zip
+*.whl
+*.exe
+*.dll

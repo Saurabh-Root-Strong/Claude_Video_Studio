@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CVE Studio</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span>CVE Studio</div>
+    <select id="projectSelect" title="Project"></select>
+    <button id="newProjectBtn" class="btn ghost">+ New project</button>
+    <div class="spacer"></div>
+    <div id="jobPill" class="pill hidden"></div>
+    <button id="inboxBtn" class="pill inbox hidden" title="Commands waiting for Claude"></button>
+  </header>
+
+  <div id="empty" class="empty hidden">
+    <h1>Start a project</h1>
+    <p>Upload footage, add references and a brief, then edit scene by scene.</p>
+    <div class="row center">
+      <input id="emptyName" placeholder="Project name, e.g. Nifty weekly recap" />
+      <button id="emptyCreate" class="btn primary">Create</button>
+    </div>
+  </div>
+
+  <nav id="tabs" class="tabs hidden">
+    <button data-tab="footage" class="active"><b>1</b> Footage</button>
+    <button data-tab="refs"><b>2</b> References &amp; Brief</button>
+    <button data-tab="scenes"><b>3</b> Scenes</button>
+    <button data-tab="exports"><b>4</b> Exports</button>
+  </nav>
+
+  <main id="app" class="hidden">
+    <!-- 1 FOOTAGE -->
+    <section id="tab-footage" class="tab active">
+      <div class="drop" id="dropSource" data-kind="source">
+        <strong>Drop raw footage here</strong>
+        <span>or click to choose · MP4, MOV, MKV, WEBM…</span>
+        <input type="file" id="fileSource" multiple accept="video/*" hidden />
+        <div class="progress hidden"><div></div></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Footage</h3><button class="btn ghost small" data-open="raw">Open folder</button></div>
+        <div id="sourceList" class="list"></div>
+      </div>
+      <div class="row">
+        <button id="analyzeBtn" class="btn primary">Analyze footage</button>
+        <label class="check"><input type="checkbox" id="reanalyze" /> Re-analyze everything (replaces scenes)</label>
+      </div>
+      <p class="hint">Analysis transcribes speech word by word (Whisper on your GPU), finds visual cuts and sentence breaks, and splits the video into scenes.</p>
+      <div class="card"><div class="card-head"><h3>Activity</h3></div><pre id="jobLog" class="log"></pre></div>
+    </section>
+
+    <!-- 2 REFERENCES & BRIEF -->
+    <section id="tab-refs" class="tab">
+      <div class="cols">
+        <div>
+          <div class="drop" id="dropRef" data-kind="reference">
+            <strong>Drop reference samples here</strong>
+            <span>videos, images, music, logos you want me to match</span>
+            <input type="file" id="fileRef" multiple hidden />
+            <div class="progress hidden"><div></div></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>Reference link</h3></div>
+            <div class="row">
+              <input id="refUrl" placeholder="https://www.youtube.com/watch?v=…" />
+              <button id="refSaveLink" class="btn ghost">Save link</button>
+              <button id="refDownload" class="btn">Download</button>
+            </div>
+            <p class="hint">Download uses yt-dlp. Only download material you have the right to use.</p>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>References</h3><button class="btn ghost small" data-open="refs">Open folder</button></div>
+            <div id="refList" class="refgrid"></div>
+          </div>
+        </div>
+        <div>
+          <div class="card">
+            <div class="card-head"><h3>Brief</h3><span id="briefState" class="muted small"></span></div>
+            <textarea id="brief" rows="8" placeholder="What is this video? Who is it for? Style, pacing, length, platform, what to cut, what to highlight…&#10;e.g. 60-second Instagram reel from my market recap. Fast cuts like reference 1, orange word-highlight captions, cut all ums and pauses, title card at start."></textarea>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>Style settings</h3></div>
+            <div class="form" id="settingsForm">
+              <label>Format<select name="format"><option value="original">Original</option><option value="16:9">16:9 YouTube</option><option value="9:16">9:16 Reels / Shorts</option><option value="1:1">1:1 Square</option></select></label>
+              <label>Fit<select name="fit"><option value="crop">Crop to fill</option><option value="pad">Fit with bars</option></select></label>
+              <label>Captions<select name="captions"><option value="true">On</option><option value="false">Off</option></select></label>
+              <label>Caption position<select name="caption_position"><option>bottom</option><option>center</option><option>top</option></select></label>
+              <label>Caption case<select name="caption_case"><option value="normal">Normal</option><option value="upper">UPPERCASE</option></select></label>
+              <label>Words per caption<input name="caption_words" type="number" min="1" max="8" /></label>
+              <label>Caption colour<input name="caption_color" type="color" /></label>
+              <label>Highlight colour<input name="highlight_color" type="color" /></label>
+              <label>Caption font<input name="caption_font" placeholder="Arial" /></label>
+              <label>Remove silences<select name="remove_silence"><option value="false">No</option><option value="true">Yes (jump cuts)</option></select></label>
+              <label>Min silence (s)<input name="silence_min" type="number" step="0.1" min="0.2" max="3" /></label>
+              <label>Language<select name="language"><option value="auto">Auto detect</option><option value="en">English</option><option value="hi">Hindi</option></select></label>
+              <label>Logo (Brand Kit)<select name="logo" id="logoSelect"></select></label>
+              <label>Logo position<select name="logo_position"><option>top-right</option><option>top-left</option><option>bottom-right</option><option>bottom-left</option></select></label>
+            </div>
+            <div class="row">
+              <button id="saveBrief" class="btn primary">Save brief &amp; settings</button>
+              <button id="firstCutBtn" class="btn claude">Ask Claude for the first cut</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3 SCENES -->
+    <section id="tab-scenes" class="tab">
+      <div class="toolbar">
+        <input id="globalCmd" placeholder="Command for the whole video — e.g. format 9:16 · remove silences · highlight #22C55E · make it punchier" />
+        <button id="globalSend" class="btn primary">Send</button>
+        <button id="undoBtn" class="btn ghost" title="Undo last change">Undo</button>
+        <button id="previewBtn" class="btn">Render preview</button>
+        <button id="finalBtn" class="btn primary">Export final</button>
+      </div>
+      <div id="totals" class="totals"></div>
+      <div class="editor">
+        <div class="left">
+          <div class="player-wrap">
+            <video id="player" controls preload="metadata"></video>
+            <div class="player-bar">
+              <div class="seg">
+                <button data-mode="source" class="active">Source scene</button>
+                <button data-mode="preview">Rendered preview</button>
+              </div>
+              <label class="check"><input type="checkbox" id="loopScene" checked /> Loop scene</label>
+              <button id="splitHere" class="btn ghost small">Split at playhead</button>
+              <span id="playerInfo" class="muted small"></span>
+            </div>
+          </div>
+          <div id="sceneDetail" class="card detail"></div>
+          <div class="card">
+            <div class="row">
+              <input id="sceneCmd" placeholder="Command for this scene — e.g. cut · trim start 0.5 · speed 1.3 · text: Nifty at record high · add a zoom on the chart" />
+              <button id="sceneSend" class="btn primary">Send</button>
+            </div>
+            <div class="chips" id="quickChips">
+              <button>cut</button><button>keep</button><button>trim start 0.5</button><button>trim end 0.5</button>
+              <button>speed 1.25</button><button>slow mo</button><button>mute</button><button>zoom in</button>
+              <button>remove silences</button><button>captions off</button><button>remove text</button>
+            </div>
+            <details class="help"><summary>All instant commands</summary>
+              <div class="helpgrid">
+                <div><b>Scene</b><br>cut · keep · trim start 1.5 · trim end 2 · split at 3.2 · speed 1.5 · slow mo · mute · unmute · volume 50% · zoom 1.3 · zoom in · no zoom · captions on/off · remove silences · keep silences · text: Your title · text top/center/bottom · remove text</div>
+                <div><b>Whole video</b><br>format 9:16 / 16:9 / 1:1 / original · fit crop / pad · captions on/off · captions upper/normal · captions top/center/bottom · highlight #F97316 · caption color #FFFFFF · words 3 · remove silences · logo &lt;file&gt; · logo top-left · no logo · speed 1.1 · mute</div>
+                <div><b>Anything else</b><br>goes to <span class="claude-t">Claude</span>: "add b-roll from reference 2", "animated title like the reference", "make captions pop like MrBeast", "tighten this to 30 seconds"…</div>
+              </div>
+            </details>
+            <div id="sceneHistory" class="history"></div>
+          </div>
+        </div>
+        <div class="right">
+          <div id="sceneList" class="scenes"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 EXPORTS -->
+    <section id="tab-exports" class="tab">
+      <div class="row"><button class="btn ghost" data-open="exports">Open Exports folder</button></div>
+      <div id="renderList" class="renders"></div>
+    </section>
+  </main>
+
+  <aside id="inbox" class="drawer hidden">
+    <div class="card-head"><h3>Waiting for Claude</h3><button id="inboxClose" class="btn ghost small">Close</button></div>
+    <div class="howto">
+      Claude works from <b>VS Code</b>. When you're ready, type there:
+      <code id="inboxPhrase">process studio inbox</code>
+      <button id="copyPhrase" class="btn ghost small">Copy</button>
+      Results appear here automatically.
+    </div>
+    <div id="inboxList" class="history"></div>
+  </aside>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
