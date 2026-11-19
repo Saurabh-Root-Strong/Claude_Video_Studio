@@ -1,0 +1,108 @@
+=====================================================================
+  CLAUDE VIDEO STUDIO - HOW TO USE  (no technical knowledge needed)
+=====================================================================
+
+---------------------------------------------------------------------
+ 1. START THE STUDIO
+---------------------------------------------------------------------
+  Double-click:   Start Studio.bat
+
+  - A black window opens and the studio opens in your web browser.
+    (If the browser doesn't open, type this in the address bar:
+     http://127.0.0.1:8070 )
+
+  - KEEP THE BLACK WINDOW OPEN while you work. It IS the studio.
+    You can minimise it. Closing it stops the studio.
+
+  FIRST TIME ON A NEW COMPUTER:
+  - The black window asks "Run Setup now? [Y,N]". Press  Y .
+  - Setup downloads everything it needs (about 2.5 GB, 10-15 minutes).
+    This happens only once. Next time the studio opens right away.
+  - You can also run setup yourself: double-click  Setup.bat
+
+---------------------------------------------------------------------
+ 2. EDIT A VIDEO (4 tabs at the top of the page)
+---------------------------------------------------------------------
+  "+ New project"  -> give it a name.
+
+  TAB 1  FOOTAGE
+     Drag your video(s) into the box, then click  "Analyze footage".
+     Wait for "Analysis complete" (about 1 minute per minute of video).
+     The video is split into short scenes with the spoken words.
+
+  TAB 2  REFERENCES & BRIEF  (optional)
+     Drag in sample videos/images whose style you like.
+     Write what you want (e.g. "60-second Instagram reel, fast cuts").
+     Choose format (9:16 for Reels/Shorts, 16:9 for YouTube),
+     caption colours, logo. Click "Save brief & settings".
+
+  TAB 3  SCENES  (the main editor)
+     Click a scene to play it. Type a command in the box and press Enter,
+     or click the quick buttons. Examples:
+
+        cut                  remove this scene
+        keep                 bring a cut scene back
+        trim start 0.5       remove 0.5 seconds from the beginning
+        trim end 1           remove 1 second from the end
+        split at 2.5         split the scene at 2.5 seconds
+        speed 1.3            make it faster  (slow mo = slower)
+        mute                 remove sound from this scene
+        zoom in              punch-in zoom
+        text: Your title     show a title on screen
+        captions off         hide captions for this scene
+        remove silences      cut out pauses (jump cuts)
+
+     Commands for the WHOLE video (top box):
+        format 9:16          vertical video for Reels / Shorts
+        captions upper       CAPITAL LETTER captions
+        highlight #22C55E    change caption highlight colour
+        remove silences      cut pauses everywhere
+
+     Made a mistake?  Click  "Undo".
+     Want to see the result?  Click  "Render preview".
+     Happy with it?  Click  "Export final".
+
+  TAB 4  EXPORTS
+     Watch your finished videos. They are saved in the  Exports  folder.
+
+---------------------------------------------------------------------
+ 3. ASKING CLAUDE (AI) TO EDIT
+---------------------------------------------------------------------
+  Anything that is not in the list above - for example
+  "make it 30 seconds" or "Ask Claude for the first cut" -
+  goes to the orange "Claude inbox" at the top right.
+
+  These wait until someone with Claude Code (in VS Code) types:
+        process studio inbox
+  Claude then does the edit and the answer appears on the page.
+  Without Claude Code, everything else still works - only the inbox waits.
+
+---------------------------------------------------------------------
+ 4. WHERE ARE MY FILES?
+---------------------------------------------------------------------
+  Raw Footage\   your uploaded videos
+  References\    your sample/reference files
+  Storyboards\   your projects (the edits you made)
+  Exports\       finished videos
+  Brand Kit\     put your logo here (PNG) to use it in videos
+
+  Your videos are NOT uploaded anywhere. Everything stays on this PC.
+  To continue a project on another PC, copy these folders for that
+  project:  Raw Footage\<project>, References\<project>,
+  Storyboards\<project>.
+
+---------------------------------------------------------------------
+ 5. IF SOMETHING GOES WRONG
+---------------------------------------------------------------------
+  Page doesn't open        -> is the black window still open?
+                              If not, double-click Start Studio.bat again.
+  "failed" shown in red    -> read the "Activity" box in tab 1;
+                              send a screenshot to whoever set this up.
+  Slow or stuck rendering  -> close other heavy programs (Chrome tabs,
+                              games). One video job runs at a time.
+  Setup stopped halfway    -> check the internet and run Setup.bat again.
+                              It continues where it stopped.
+
+  Needs: Windows 10 or 11. An NVIDIA graphics card makes it faster
+  (not required).
+=====================================================================
