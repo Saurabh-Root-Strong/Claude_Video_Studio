@@ -217,6 +217,55 @@ def new_project(name: str) -> dict:
     return data
 
 
+# ---- looks: every reference carries its own style preset; the project renders with the ACTIVE one.
+# Only these keys belong to a look. Language, face position, headline and caption spellings describe the footage /
+# this video, so they stay with the project whichever look is active.
+STYLE_KEYS = ("format", "fit", "fps", "captions", "caption_script", "caption_font", "caption_color", "highlight_color",
+              "caption_position", "caption_case", "caption_words", "remove_silence", "silence_min", "logo",
+              "logo_position", "layout", "split_ratio", "bg_mode", "bg_color", "panel_color", "grade",
+              "audio_polish", "music", "loudness", "duck_db")
+
+
+def ref_id(r: dict) -> str:
+    """Stable id for a reference (old projects stored none): derived from its file/url, so it never changes."""
+    import hashlib
+    if r.get("id"):
+        return r["id"]
+    return "r_" + hashlib.sha1(str(r.get("file") or r.get("url") or r.get("added")).encode()).hexdigest()[:8]
+
+
+def style_of(settings: dict) -> dict:
+    return {k: copy.deepcopy(settings[k]) for k in STYLE_KEYS if k in settings}
+
+
+def derive_look(base: dict, ref: dict) -> tuple[dict, list[str]]:
+    """First look for a reference: the simple settings plus what can be read off the reference automatically.
+    Claude refines it on request (deep analysis like the Brand Kit study)."""
+    look = copy.deepcopy(base)
+    notes = []
+    w, h = ref.get("width") or 0, ref.get("height") or 0
+    if w and h:
+        fmt = "9:16" if h > w * 1.2 else "16:9" if w > h * 1.2 else "1:1"
+        look["format"] = fmt
+        notes.append(f"format {fmt} (reference is {w}×{h})")
+    if ref.get("avg_shot"):
+        notes.append(f"pacing: a new shot every ~{ref['avg_shot']}s")
+    return look, notes
+
+
+_SIG_SKIP = {"thumb", "transcript", "notes", "no", "dur", "est", "caption_view", "src_skipped", "sb_applied"}
+
+
+def edit_sig(d: dict) -> str:
+    """Fingerprint of everything that changes the rendered video (scenes, settings, clip order/skip).
+    Stored with each render; if the project's fingerprint differs, that render is out of date."""
+    import hashlib
+    scenes = [{k: v for k, v in s.items() if k not in _SIG_SKIP} for s in d.get("scenes", [])]
+    srcs = [(s.get("file"), s.get("include", True)) for s in d.get("sources", [])]
+    blob = json.dumps([scenes, d.get("settings", {}), srcs], sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]
+
+
 def brand_settings() -> dict:
     """Defaults for a NEW project: built-in defaults overlaid with the approved Brand Kit (Brand Kit/brand-kit.json,
     key "settings"). Invalid or unknown keys in that file are ignored, never stored."""
@@ -247,6 +296,10 @@ def load(pid: str) -> dict:
     for k, v in DEFAULT_SETTINGS.items():
         data.setdefault("settings", {}).setdefault(k, v)
     data.pop("history", None)  # undo history lives in history.json (pre-audit projects kept it inline)
+    for r in data.get("references", []):  # stable ids (looks are keyed by them)
+        r["id"] = ref_id(r)
+    data.setdefault("looks", {})
+    data.setdefault("style_source", "none")
     return data
 
 

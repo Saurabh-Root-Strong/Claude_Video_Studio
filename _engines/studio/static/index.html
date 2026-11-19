@@ -37,18 +37,77 @@
     <section id="tab-footage" class="tab active">
       <div class="drop" id="dropSource" data-kind="source">
         <strong>Drop raw footage here</strong>
-        <span>or click to choose · MP4, MOV, MKV, WEBM…</span>
+        <span>or click to choose · MP4, MOV, MKV, WEBM… · several at once is fine</span>
         <input type="file" id="fileSource" multiple accept="video/*" hidden />
         <div class="progress hidden"><div></div></div>
       </div>
-      <div class="card">
-        <div class="card-head"><h3>Footage</h3><button class="btn ghost small" data-open="raw">Open folder</button></div>
-        <div id="sourceList" class="list"></div>
+      <div class="card" id="binCard">
+        <div class="card-head bin-head">
+          <h3>Footage <span class="muted small" id="binSummary"></span></h3>
+          <div class="bin-tools">
+            <button class="btn primary small" id="addClips" title="Add more videos to this project">+ Add videos</button>
+            <label class="sortby">Order
+              <select id="sortClips" title="Clip order = the order of the video">
+                <option value="">Custom (drag)</option>
+                <option value="name">Sort by name</option>
+                <option value="recorded">Sort by recording time</option>
+                <option value="duration">Sort by length</option>
+              </select>
+            </label>
+            <button class="btn ghost small" data-open="raw">Open folder</button>
+          </div>
+        </div>
+        <p class="hint bin-hint">The clip order is the order of your video. Drag a clip by <b>⠿</b> or use ▲▼. <b>Skip</b> leaves a clip out of the video without deleting it.</p>
+        <div id="sourceList" class="clips"></div>
+        <div id="seqEditor" class="seq hidden">
+          <div class="monitor">
+            <div class="screen">
+              <video id="seqA" preload="auto" playsinline></video>
+              <video id="seqB" preload="auto" playsinline class="off"></video>
+              <div class="screen-label" id="seqLabel"></div>
+            </div>
+            <div class="transport">
+              <button class="btn primary small" id="seqPlay" title="Play / pause (Space)">▶ Play</button>
+              <span class="tc" id="seqTime">00:00.0 / 00:00.0</span>
+              <span class="muted small" id="seqWhat"></span>
+            </div>
+          </div>
+          <div class="tl-toolbar">
+            <span class="muted small" id="tlSel">Click a clip to select · Ctrl/Shift-click for several · drag to reorder</span>
+            <span class="spacer"></span>
+            <button class="btn ghost small" id="tlStart" disabled title="Move the selected clip(s) to the start">⇤ Move to start</button>
+            <button class="btn ghost small" id="tlEnd" disabled title="Move the selected clip(s) to the end">Move to end ⇥</button>
+            <button class="btn ghost small" id="tlSkip" disabled>Skip / Include</button>
+            <span class="zoom">
+              <button class="btn ghost small" id="tlOut" title="Zoom out">−</button>
+              <button class="btn ghost small" id="tlFit" title="Fit the whole sequence">Fit</button>
+              <button class="btn ghost small" id="tlIn" title="Zoom in">+</button>
+            </span>
+          </div>
+          <div class="timeline" id="timeline">
+            <div class="tl-heads">
+              <div class="tl-head ruler-head"></div>
+              <div class="tl-head">🎬 Video</div>
+              <div class="tl-head">🔊 Audio</div>
+            </div>
+            <div class="tl-scroll" id="tlScroll">
+              <div class="tl-canvas" id="tlCanvas">
+                <div class="ruler" id="tlRuler"></div>
+                <div class="track vtrack" id="tlVideo"></div>
+                <div class="track atrack" id="tlAudio"></div>
+                <div class="playhead" id="tlHead"><i></i></div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="row">
+      <div class="row step-row">
         <button id="analyzeBtn" class="btn primary">Analyze footage</button>
         <label class="check"><input type="checkbox" id="reanalyze" /> Re-analyze everything (replaces scenes)</label>
+        <span class="spacer"></span>
+        <button id="nextScenes" class="btn next" disabled title="Go to the Scenes page">Next: Scenes →</button>
       </div>
+      <div id="doneBanner" class="done-banner hidden"></div>
       <p class="hint">Analysis transcribes speech word by word (Whisper on your GPU), finds visual cuts and sentence breaks, and splits the video into scenes.</p>
       <div class="card"><div class="card-head"><h3>Activity</h3></div><pre id="jobLog" class="log"></pre></div>
     </section>
@@ -79,11 +138,16 @@
         </div>
         <div>
           <div class="card">
-            <div class="card-head"><h3>Brief</h3><span id="briefState" class="muted small"></span></div>
-            <textarea id="brief" rows="8" placeholder="What is this video? Who is it for? Style, pacing, length, platform, what to cut, what to highlight…&#10;e.g. 60-second Instagram reel from my market recap. Fast cuts like reference 1, orange word-highlight captions, cut all ums and pauses, title card at start."></textarea>
+            <div class="card-head"><h3>Brief <span class="badge acc" id="lookBriefTag"></span></h3><span id="briefState" class="muted small"></span></div>
+            <label class="brief-label" for="lookBrief" id="lookBriefLabel">Brief for this look</label>
+            <textarea id="lookBrief" rows="6" placeholder="How should this look feel? Energy, pacing, captions, music, what makes this style…&#10;e.g. Calm and trustworthy. Cards on top, me below, voice only. Cut every pause, keep my natural cadence. One zoom per section."></textarea>
+            <label class="brief-label" for="brief">About this video <span class="muted small">– shared by every look</span></label>
+            <textarea id="brief" rows="3" placeholder="What is this video about? Who is it for? Length, platform, what to cut, what to highlight…&#10;e.g. Bajaj IPO listing news, 30-second Instagram reel for beginners, end with follow."></textarea>
           </div>
           <div class="card">
-            <div class="card-head"><h3>Style settings</h3></div>
+            <div class="card-head"><h3>Style settings <span class="muted small" id="lookTitle"></span></h3></div>
+            <div class="lookbar" id="lookBar" title="Each reference keeps its own style. Pick one – the settings below show and edit that look."></div>
+            <div class="looknote hidden" id="lookNote"></div>
             <div class="form" id="settingsForm">
               <label>Format<select name="format"><option value="original">Original</option><option value="16:9">16:9 YouTube</option><option value="9:16">9:16 Reels / Shorts</option><option value="1:1">1:1 Square</option></select></label>
               <label>Fit<select name="fit"><option value="crop">Crop to fill</option><option value="pad">Fit with bars</option></select></label>
@@ -128,6 +192,12 @@
         <button id="sbBtn" class="btn claude" style="display:none" title="Beat-by-beat edit plan – approve before rendering">Storyboard</button>
         <button id="previewBtn" class="btn">Render preview</button>
         <button id="finalBtn" class="btn primary">Export final</button>
+      </div>
+      <div class="lookpick">
+        <label for="lookSelect">Look</label>
+        <select id="lookSelect" title="Which look (reference style) this video uses – change it here, edit looks on page 2"></select>
+        <span class="muted small" id="lookPickInfo"></span>
+        <button class="btn ghost small" id="lookEdit" title="Open this look's settings on page 2">Edit look</button>
       </div>
       <div id="totals" class="totals"></div>
       <div class="editor">

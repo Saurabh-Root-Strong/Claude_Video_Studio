@@ -208,6 +208,57 @@ try:
     st = core.load(pid)["settings"]
     check("invalid settings rejected, not stored", r.status_code == 400 and st["caption_words"] == 4
           and st["highlight_color"] == "#F97316")
+    # ---------------------------------------------------------------- looks: one style per reference
+    with open(FIX / "phone_rot.mp4", "rb") as f1, open(FIX / "recap_test.mp4", "rb") as f2:
+        client.post(f"/api/projects/{pid}/upload?kind=reference", data={"files": [(f1, "vertical_ref.mp4"), (f2, "wide_ref.mp4")]},
+                    content_type="multipart/form-data")
+    wait_job(pid, "ref_analyze")
+    refs = core.load(pid)["references"]
+    rA, rB = refs[0]["id"], refs[1]["id"]
+    base_words, base_fmt = core.load(pid)["settings"]["caption_words"], core.load(pid)["settings"]["format"]
+    r = post(f"/api/projects/{pid}/style_source", {"source": rA}).get_json()
+    stA = core.load(pid)["settings"]
+    post(f"/api/projects/{pid}/brief", {"settings": {"caption_words": 6, "language": "hi"}})
+    post(f"/api/projects/{pid}/style_source", {"source": "none"})
+    stN = core.load(pid)["settings"]
+    post(f"/api/projects/{pid}/style_source", {"source": rA})
+    stA2 = core.load(pid)["settings"]
+    check("each reference keeps its own look: R1 auto 9:16 from a vertical reference, edits stay in R1, "
+          "'None' keeps the simple settings, language (footage) is shared",
+          stA["format"] == "9:16" and any("9:16" in n for n in r["notes"]) and stA["caption_words"] == base_words and
+          stN["caption_words"] == base_words and stN["format"] == base_fmt and stN["language"] == "hi" and
+          stA2["caption_words"] == 6 and stA2["format"] == "9:16", f"{stA['format']} {stN['caption_words']} {stA2['caption_words']}")
+    subprocess.run([sys.executable, str(HERE / "studio_cli.py"), "look", pid, "R2", "highlight_color=\"#22C55E\"", "language=en"],
+                   env={**os.environ, "CVE_ROOT": str(ROOT)}, capture_output=True)
+    dd = core.load(pid)
+    check("Claude can fill an inactive look (R2) without touching the active one; non-style keys refused",
+          dd["looks"][rB]["highlight_color"] == "#22C55E" and dd["settings"]["highlight_color"] != "#22C55E" and
+          "language" not in dd["looks"][rB] and dd["references"][1].get("studied"))
+    q1 = post(f"/api/projects/{pid}/reference/{rB}/study").get_json()
+    q2 = post(f"/api/projects/{pid}/reference/{rB}/study").get_json()
+    check("'Ask Claude to study' queues one inbox job per reference", q1["ok"] and not q1["already"] and q2["already"])
+    # page 2 edits a look the video doesn't use -> video unchanged; Scenes' Look dropdown then switches to it
+    before = core.load(pid)["settings"]["caption_words"]
+    post(f"/api/projects/{pid}/brief", {"look": rB, "settings": {"caption_words": 7, "face_y": 0.31}})
+    dd = core.load(pid)
+    lv = client.get(f"/api/projects/{pid}").get_json()["looks_view"]
+    check("editing an unused look (page 2) leaves the video alone; footage keys (face position) stay project-wide",
+          dd["settings"]["caption_words"] == before and dd["looks"][rB]["caption_words"] == 7 and
+          dd["settings"]["face_y"] == 0.31 and lv[rB]["caption_words"] == 7 and lv[rA]["caption_words"] == before)
+    post(f"/api/projects/{pid}/brief", {"look": rB, "look_brief": "high energy, fast cuts", "brief": "IPO reel, 30 s"})
+    post(f"/api/projects/{pid}/brief", {"look": "none", "look_brief": "calm and simple"})
+    dd = core.load(pid)
+    check("each look has its own brief; 'about this video' is shared",
+          dd["look_briefs"][rB] == "high energy, fast cuts" and dd["look_briefs"]["none"] == "calm and simple"
+          and dd["brief"] == "IPO reel, 30 s")
+    post(f"/api/projects/{pid}/style_source", {"source": rB})
+    check("choosing that look in Scenes applies it to the video", core.load(pid)["settings"]["caption_words"] == 7
+          and core.load(pid)["settings"]["highlight_color"] == "#22C55E")
+    post(f"/api/projects/{pid}/style_source", {"source": rA})
+    post(f"/api/projects/{pid}/reference/remove", {"id": rA})
+    dd = core.load(pid)
+    check("removing the ACTIVE reference returns to the simple settings and drops its look",
+          dd["style_source"] == "none" and dd["settings"]["format"] == base_fmt and rA not in dd["looks"])
     r1 = post(f"/api/projects/{pid}/command", {"scene": s1, "text": "captions hinglish; spell Market as MARKET"})
     r2 = post(f"/api/projects/{pid}/brief", {"settings": {"caption_fixes": ["not", "a", "dict"]}})
     r3 = post(f"/api/projects/{pid}/command", {"scene": None, "text": "fix audio to be louder"}).get_json()
@@ -286,11 +337,103 @@ try:
                         content_type="multipart/form-data")
     post(f"/api/projects/{p2}/analyze")
     wait_job(p2, "analyze")
+    dmov = core.load(p2)
+    mov_scenes = [s for s in dmov["scenes"] if s["src"] == "clip.mov"]
+    mp4_scenes = [s for s in dmov["scenes"] if s["src"] == "clip.mp4"]
+    check("clip without speech -> captions off automatically; talking clip untouched",
+          core.source_by_file(dmov, "clip.mov").get("speech") is False and mov_scenes and
+          all(s["captions"] is False and s.get("captions_auto_off") for s in mov_scenes) and
+          all(s["captions"] is None for s in mp4_scenes) and core.source_by_file(dmov, "clip.mp4").get("speech"))
+    sp = [pipeline.is_speech(3, 10.7), pipeline.is_speech(2, 1.5), pipeline.is_speech(25, 10.0), pipeline.is_speech(0, 3)]
+    fake = {"scenes": [{"id": "x", "src": "m", "in": 0, "out": 10, "captions": True},
+                       {"id": "y", "src": "m", "in": 10, "out": 20, "captions": None}],
+            "sources": [{"file": "m", "speech": False}]}
+    check("speech rule: 3 words in 10.7 s = music; 'thank you' in 1.5 s = speech; user's explicit 'captions on' wins",
+          sp == [False, True, True, False] and pipeline.mark_no_speech(fake, {"m": []}) == ["y"]
+          and fake["scenes"][0]["captions"] is True)
+    r = post(f"/api/projects/{p2}/command", {"scene": mov_scenes[0]["id"], "text": "captions on"}).get_json()
+    s_on = core.scene_by_id(core.load(p2), mov_scenes[0]["id"])
+    check("'captions on' brings captions back on a no-speech scene (with a heads-up)",
+          s_on["captions"] is True and "captions_auto_off" not in s_on and "no detected speech" in r["replies"][0])
+    post(f"/api/projects/{p2}/undo")
+    pj2 = client.get(f"/api/projects/{p2}").get_json()
+    rlast = (pj2.get("renders") or [{}])[-1]
+    check("after analysis a preview of the COMPLETE video is rendered automatically (fresh fingerprint)",
+          rlast.get("kind") == "preview" and rlast.get("sig") == pj2["edit_sig"] and
+          any("complete video" in x for x in pj2["job"]["log"]), str(rlast))
+    post(f"/api/projects/{p2}/command", {"scene": pj2["scenes"][0]["id"], "text": "mute"})
+    check("an edit after the render makes that render 'out of date'",
+          client.get(f"/api/projects/{p2}").get_json()["edit_sig"] != rlast.get("sig"))
+    post(f"/api/projects/{p2}/undo")
     w_mp4 = core.read_json(core.work_file(p2, "clip.mp4", "words.json"), [])
     w_mov = core.read_json(core.work_file(p2, "clip.mov", "words.json"), [])
     check("clip.mp4 and clip.mov keep separate transcripts", len(w_mp4) > 20 and w_mov == [] and
           core.work_file(p2, "clip.mp4", "words.json") != core.work_file(p2, "clip.mov", "words.json"),
           f"mp4 {len(w_mp4)} words, mov {len(w_mov)} words")
+
+    # ---------------------------------------------------------------- Footage bin: add, order, skip, remove
+    for nm, col in (("C0010.mp4", "red"), ("C0002.mp4", "blue")):
+        subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c={col}:s=320x240:d=1.5",
+                        "-c:v", "libx264", "-preset", "ultrafast", str(ROOT / nm)], check=True)
+    files = [("files", (open(ROOT / "C0010.mp4", "rb"), "C0010.mp4")), ("files", (open(ROOT / "C0002.mp4", "rb"), "C0002.mp4"))]
+    r = client.post(f"/api/projects/{p2}/upload?kind=source", data={"files": [f for _, f in files]},
+                    content_type="multipart/form-data")
+    order = [s["file"] for s in core.load(p2)["sources"]]
+    check("multi-select upload lands in natural name order (C0002 before C0010) with poster + size",
+          order[-2:] == ["C0002.mp4", "C0010.mp4"] and core.load(p2)["sources"][-1].get("thumb")
+          and core.load(p2)["sources"][-1].get("bytes"), str(order))
+    src_rec = core.source_by_file(core.load(p2), "clip.mp4")
+    strip_ok = bool(src_rec.get("strip")) and (core.work_dir(p2) / "thumbs" / src_rec["strip"]).exists() and bool(src_rec.get("wave"))
+    core.mutate(p2, lambda d: [s.pop(k, None) for s in d["sources"] for k in ("strip", "wave")])
+    ra = post(f"/api/projects/{p2}/footage/assets").get_json()
+    check("timeline film strip + waveform made on upload, and regenerated for older clips",
+          strip_ok and ra["made"] >= 3 and all(s.get("strip") for s in core.load(p2)["sources"]), str(ra))
+    with open(ROOT / "C0002.mp4", "rb") as f:
+        r = client.post(f"/api/projects/{p2}/upload?kind=source", data={"files": (f, "copy of C0002.mp4")},
+                        content_type="multipart/form-data")
+    check("same clip under another name is refused as a duplicate (no second copy on disk)",
+          r.status_code == 409 and not (core.raw_dir(p2) / "copy of C0002.mp4").exists(), str(r.get_json()))
+    # scenes follow the clip order; a manual cross-clip arrangement is protected by a confirm
+    d2 = core.load(p2)
+    srcs = [s["file"] for s in d2["sources"]]
+    rev = list(reversed(srcs))
+    r = post(f"/api/projects/{p2}/sources/order", {"files": rev})
+    seq = [s["src"] for s in core.load(p2)["scenes"]]
+    check("reorder clips -> sources reordered, scenes regrouped in the new clip order",
+          r.status_code == 200 and [s["file"] for s in core.load(p2)["sources"]] == rev and
+          seq == sorted(seq, key=rev.index), str(seq))
+    stale = post(f"/api/projects/{p2}/sources/order", {"files": rev[:-1]})
+    check("reorder with an out-of-date clip list is refused (409), nothing changes",
+          stale.status_code == 409 and [s["file"] for s in core.load(p2)["sources"]] == rev)
+    core.mutate(p2, lambda d: d.__setitem__("scenes", d["scenes"][-1:] + d["scenes"][:-1]))  # cross-clip arrangement
+    if pipeline.scenes_interleaved(core.load(p2)["scenes"]):
+        r1 = post(f"/api/projects/{p2}/sources/order", {"sort": "name"})
+        r2 = post(f"/api/projects/{p2}/sources/order", {"sort": "name", "force": True})
+        names = [s["file"] for s in core.load(p2)["sources"]]
+        check("manual scene arrangement across clips -> confirm first, then sort by name",
+              r1.status_code == 409 and r1.get_json()["confirm"] and r2.status_code == 200 and
+              names == sorted(names, key=appmod._natural_key), str(names))
+    # skip a clip: out of totals/render, still in the project
+    one = core.load(p2)["sources"][0]["file"]
+    post(f"/api/projects/{p2}/source/include", {"file": one, "include": False})
+    pj = client.get(f"/api/projects/{p2}").get_json()
+    check("Skip keeps the clip but leaves it out of the edit length",
+          any(s["file"] == one and s["include"] is False for s in pj["sources"]) and
+          all(s["est"] == 0 for s in pj["scenes"] if s["src"] == one) and pj["footage"]["included"] == len(pj["sources"]) - 1)
+    post(f"/api/projects/{p2}/source/include", {"file": one, "include": True})
+    n_sc = len(core.load(p2)["scenes"])
+    post(f"/api/projects/{p2}/source/remove", {"file": "clip.mp4"})
+    gone = all(s["src"] != "clip.mp4" for s in core.load(p2)["scenes"])
+    post(f"/api/projects/{p2}/undo")
+    check("Remove clip is undoable (its edited scenes come back)", gone and len(core.load(p2)["scenes"]) == n_sc)
+    # analysing a new clip must not reshuffle a hand-made scene order
+    a_ = [{"id": "a1", "src": "A"}, {"id": "b1", "src": "B"}, {"id": "a2", "src": "A"}]
+    placed = pipeline.place_scenes(a_, [{"id": "c1", "src": "C"}], "C", ["A", "B", "C"])
+    redone = pipeline.place_scenes(a_, [{"id": "b9", "src": "B"}], "B", ["A", "B", "C"])
+    first = pipeline.place_scenes([{"id": "b1", "src": "B"}], [{"id": "a1", "src": "A"}], "A", ["A", "B"])
+    check("new/re-analyzed clip slots in without reshuffling the user's scene order",
+          [x["id"] for x in placed] == ["a1", "b1", "a2", "c1"] and [x["id"] for x in redone] == ["a1", "b9", "a2"]
+          and [x["id"] for x in first] == ["a1", "b1"], f"{[x['id'] for x in placed]} {[x['id'] for x in redone]}")
 
     # ---------------------------------------------------------------- Brand Kit split layout: green screen, cards, music
     import cards

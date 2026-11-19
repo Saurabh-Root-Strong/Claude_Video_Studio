@@ -92,9 +92,11 @@ def _scene_cmd(sc: dict, t: str, data: dict) -> str | None:
         sc["zoom"] = 1.0
         return "Zoom removed."
     if t in ("captions on", "subtitles on", "show captions"):
+        was_auto = sc.pop("captions_auto_off", False)  # an explicit choice replaces the automatic one
         sc["captions"] = True
-        return "Captions on for this scene."
+        return "Captions on for this scene." + (" (It had no detected speech – check the words make sense.)" if was_auto else "")
     if t in ("captions off", "subtitles off", "hide captions", "no captions"):
+        sc.pop("captions_auto_off", None)
         sc["captions"] = False
         return "Captions off for this scene."
     if t in ("remove silences", "remove silence", "cut silences", "cut silence", "jump cut", "jump cuts"):

@@ -38,13 +38,25 @@ def run(cmd: list, cwd: Path | None = None, timeout: int | None = None) -> str:
 
 def probe(path: Path) -> dict:
     out = run([FFPROBE, "-v", "error", "-show_entries",
-               "format=duration:stream=codec_type,width,height,r_frame_rate:stream_side_data=rotation:stream_tags=rotate",
+               "format=duration,size:format_tags=creation_time:stream=codec_type,codec_name,width,height,"
+               "r_frame_rate:stream_disposition=attached_pic:stream_side_data=rotation:stream_tags=rotate",
                "-of", "json", path])
     j = json.loads(out[out.index("{"):])
-    dur = float(j.get("format", {}).get("duration") or 0)
+    fmt = j.get("format", {})
+    dur = float(fmt.get("duration") or 0)
     meta = {"duration": round(dur, 3), "width": 0, "height": 0, "fps": 0.0, "has_audio": False, "has_video": False}
+    try:
+        meta["bytes"] = int(fmt.get("size") or 0)
+    except ValueError:
+        pass
+    ct = (fmt.get("tags") or {}).get("creation_time")
+    if ct:
+        meta["recorded"] = str(ct)[:19]  # camera/phone recording time, for "sort by recording time"
     for s in j.get("streams", []):
+        if (s.get("disposition") or {}).get("attached_pic"):
+            continue  # cover art in an audio file is not video
         if s.get("codec_type") == "video" and not meta["has_video"]:
+            meta["codec"] = s.get("codec_name", "")
             meta["has_video"] = True
             meta["width"], meta["height"] = int(s.get("width") or 0), int(s.get("height") or 0)
             num, _, den = (s.get("r_frame_rate") or "0/1").partition("/")
@@ -379,6 +391,40 @@ def thumbnail(src: Path, t: float, out: Path, width: int = 320) -> None:
          "-vf", f"scale={width}:-2", "-q:v", "4", out])
 
 
+STRIP_N = 24  # frames in a clip's film strip (the timeline shows as many as fit the block)
+
+
+def clip_assets(pid: str, file: str, meta: dict) -> dict:
+    """Timeline graphics for a clip: a film strip (STRIP_N square frames side by side) and an audio waveform.
+    Returns {"strip":..., "wave":...} with whatever could be made; failures just leave a field out."""
+    src = core.raw_dir(pid) / file
+    dur = float(meta.get("duration") or 0)
+    out: dict = {}
+    if not src.is_file() or dur <= 0.05:
+        return out
+    thumbs = core.work_dir(pid) / "thumbs"
+    thumbs.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", file)
+    strip = thumbs / f"strip_{safe}.jpg"
+    try:  # evenly spaced frames, centre-cropped square so portrait and landscape tile the same way
+        run([FFMPEG, "-y", "-v", "error", "-i", src, "-an", "-vf",
+             f"fps={STRIP_N / max(dur, 0.1):.5f},scale=80:80:force_original_aspect_ratio=increase,crop=80:80,"
+             f"tile={STRIP_N}x1", "-frames:v", "1", "-q:v", "5", strip], timeout=max(120, int(dur)))
+        out["strip"] = strip.name
+    except (PipelineError, subprocess.TimeoutExpired):
+        pass
+    if meta.get("has_audio"):
+        wave = thumbs / f"wave_{safe}.png"
+        try:
+            run([FFMPEG, "-y", "-v", "error", "-i", src, "-filter_complex",
+                 "aformat=channel_layouts=mono,showwavespic=s=1600x64:colors=0x5eead4:scale=sqrt",
+                 "-frames:v", "1", wave], timeout=max(120, int(dur)))
+            out["wave"] = wave.name
+        except (PipelineError, subprocess.TimeoutExpired):
+            pass
+    return out
+
+
 def make_proxy(src: Path, out: Path, has_audio: bool) -> None:
     """Light 540p H.264 copy for the browser player (plays HEVC/ProRes/MKV sources, easy on 7 GB RAM)."""
     out.parent.mkdir(exist_ok=True)
@@ -401,7 +447,74 @@ def words_in(words: list[dict], a: float, b: float) -> list[dict]:
 
 # ----------------------------------------------------------------- project analysis
 
-def analyze_project(pid: str, reanalyze: bool = False) -> None:
+SPEECH_WPS = 0.5  # real speech is ~2-3 words/s; whisper "hearing" words in music/ambience gives ~0.1-0.4
+
+
+def is_speech(n_words: int, seconds: float) -> bool:
+    """False when a stretch has too few words to be real speech (whisper hallucinating on music/noise).
+    A short stretch with a few words still counts (a 1.5 s 'thank you dosto' is speech)."""
+    if n_words == 0:
+        return False
+    if seconds <= 0:
+        return True
+    return n_words / seconds >= SPEECH_WPS or (n_words >= 3 and seconds < 4.0)
+
+
+def mark_no_speech(data: dict, words_by_src: dict) -> list[str]:
+    """Captions OFF for scenes without real speech (a clip of music / B-roll, or a silent stretch).
+    Only scenes whose captions are still 'auto' (None) are touched – a user's explicit captions on/off wins.
+    Returns the ids switched off."""
+    off = []
+    for s in data["scenes"]:
+        sw = words_in(words_by_src.get(s["src"]) or [], s["in"], s["out"])
+        src = core.source_by_file(data, s["src"]) or {}
+        silent = src.get("speech") is False or not is_speech(len(sw), s["out"] - s["in"])
+        s["no_speech"] = silent
+        if silent and s.get("captions") is None:
+            s["captions"] = False
+            s["captions_auto_off"] = True
+            off.append(s["id"])
+    return off
+
+
+def place_scenes(scenes: list[dict], new: list[dict], src_file: str, order: list[str]) -> list[dict]:
+    """Put a clip's (re)analyzed scenes into the timeline WITHOUT disturbing the user's arrangement:
+    re-analysis replaces the clip's scenes where its first old scene was; a new clip goes after the last scene of
+    the clips before it in the clip order (or before the first scene of a later clip). Earlier code re-sorted the
+    whole timeline by clip, wiping any manual scene reordering."""
+    old_pos = next((i for i, x in enumerate(scenes) if x["src"] == src_file), None)
+    rest = [x for x in scenes if x["src"] != src_file]
+    if old_pos is not None:
+        at = sum(1 for x in scenes[:old_pos] if x["src"] != src_file)
+    else:
+        rank = {f: i for i, f in enumerate(order)}
+        me = rank.get(src_file, len(order))
+        earlier = [i for i, x in enumerate(rest) if rank.get(x["src"], len(order)) < me]
+        later = [i for i, x in enumerate(rest) if rank.get(x["src"], len(order)) > me]
+        # right after the last scene of an earlier clip; else before the first scene of a later clip; else at end
+        at = earlier[-1] + 1 if earlier else (later[0] if later else len(rest))
+    return rest[:at] + new + rest[at:]
+
+
+def regroup_scenes(scenes: list[dict], order: list[str]) -> list[dict]:
+    """Scenes grouped by clip in `order`, keeping each clip's own scene order."""
+    rank = {f: i for i, f in enumerate(order)}
+    return sorted(scenes, key=lambda x: rank.get(x["src"], len(order)))  # stable sort keeps in-clip order
+
+
+def scenes_interleaved(scenes: list[dict]) -> bool:
+    """True if the user arranged scenes across clips (a clip's scenes are not one contiguous block)."""
+    seen, last = set(), None
+    for x in scenes:
+        if x["src"] != last:
+            if x["src"] in seen:
+                return True
+            seen.add(x["src"])
+            last = x["src"]
+    return False
+
+
+def analyze_project(pid: str, reanalyze: bool = False) -> int:
     data = core.load(pid)
     lang = data["settings"].get("language", "auto")
     wd = core.work_dir(pid)
@@ -409,7 +522,7 @@ def analyze_project(pid: str, reanalyze: bool = False) -> None:
     todo = [s for s in data["sources"] if reanalyze or not s.get("analyzed")]
     if not todo:
         core.job_log(pid, "Nothing new to analyze.")
-        return
+        return 0
 
     failed = 0
     for idx, src in enumerate(todo, 1):
@@ -419,8 +532,11 @@ def analyze_project(pid: str, reanalyze: bool = False) -> None:
         except Exception as e:  # one bad file must not stop the others
             failed += 1
             core.job_log(pid, f"{tag}: FAILED – {e}")
+            msg = str(e).splitlines()[0][:160] if str(e) else type(e).__name__
+            core.mutate(pid, lambda d, f=src["file"], m=msg: (core.source_by_file(d, f) or {}).update(error=m))
     if failed and failed == len(todo):
         raise PipelineError("Every file failed to analyze – see the activity log.")
+    return len(todo) - failed  # clips analysed OK (the worker renders a preview when > 0)
 
 
 def _analyze_one(pid: str, src: dict, tag: str, lang: str, wd: Path) -> None:
@@ -484,22 +600,26 @@ def _analyze_one(pid: str, src: dict, tag: str, lang: str, wd: Path) -> None:
                 "thumb": f"{sid}.jpg", "notes": "",
             })
         core.job_log(pid, f"{tag}: {len(new_scenes)} scenes")
+        clip_speech = is_speech(len(words), meta["duration"])
+        if not clip_speech:
+            core.job_log(pid, f"{tag}: no speech detected ({len(words)} words in {meta['duration']:.1f}s – music or "
+                              f"ambient sound) → captions off for this clip (type 'captions on' in a scene to undo)")
 
-        def fn(d, src_file=src["file"], meta=meta, new_scenes=new_scenes):
+        def fn(d, src_file=src["file"], meta=meta, new_scenes=new_scenes, clip_speech=clip_speech):
             s = core.source_by_file(d, src_file)
             if s is None:
                 return
             s.update(meta)
             s["analyzed"] = True
             s["words"] = len(words)
+            s["speech"] = clip_speech
+            # captions off where nobody speaks (the new scenes are all still on "auto")
+            mark_no_speech({"scenes": new_scenes, "sources": d["sources"]}, {src_file: words})
             # replace this source's scenes, keep position of other sources' scenes
-            others = [x for x in d["scenes"] if x["src"] != src_file]
-            if len(others) != len(d["scenes"]):
+            if any(x["src"] == src_file for x in d["scenes"]):
                 core.snapshot(pid, d)  # re-analysis replaces edited scenes – make it undoable
-            order = [x["file"] for x in d["sources"]]
-            merged = others + new_scenes
-            merged.sort(key=lambda x: (order.index(x["src"]) if x["src"] in order else 999, x["orig_in"]))
-            d["scenes"] = merged
+            d["scenes"] = place_scenes(d["scenes"], new_scenes, src_file, [x["file"] for x in d["sources"]])
+            s.pop("error", None)
         core.mutate(pid, fn)
 
 
@@ -1104,12 +1224,15 @@ def finish_audio(src: Path, dst: Path, dur: float, music: Path | None, polish: b
 
 def render_project(pid: str, preview: bool) -> Path:
     data = core.load(pid)
-    scenes = [s for s in data["scenes"] if s.get("keep", True)]
+    skipped = {s["file"] for s in data["sources"] if s.get("include") is False}  # clip set to "Skip" in Footage
+    scenes = [s for s in data["scenes"] if s.get("keep", True) and s["src"] not in skipped]
     if not scenes:
-        raise PipelineError("No scenes are kept – nothing to render.")
+        raise PipelineError("No scenes are kept – nothing to render." +
+                            (" (Some clips are set to Skip in the Footage tab.)" if skipped else ""))
     missing = sorted({s["src"] for s in scenes if not (core.raw_dir(pid) / s["src"]).is_file()})
     if missing:
         raise PipelineError(f"Source video missing from Raw Footage: {', '.join(missing)}")
+    sig = core.edit_sig(data)  # what this render shows – lets the page say "edited since this render"
     w, h = target_size(data, preview)
     wd = core.work_dir(pid)
     cache: dict[str, tuple[list, list]] = {}
@@ -1198,7 +1321,8 @@ def render_project(pid: str, preview: bool) -> Path:
 
     def fn(d):
         d.setdefault("renders", []).append({"kind": "preview" if preview else "final", "file": out.name,
-                                            "created": core.now_iso(), "duration": dur, "size": f"{w}x{h}"})
+                                            "created": core.now_iso(), "duration": dur, "size": f"{w}x{h}",
+                                            "sig": sig})
         d["renders"] = d["renders"][-30:]
     core.mutate(pid, fn)
     return out

@@ -39,6 +39,14 @@ rebuild — statuses/notes are kept), `storyboard apply <pid>` (approved beats o
 word cut on the audio first: whisper word times inside fast speech can be off 0.3 s (re-transcribe a padded clip
 with context; micro-silences inside words like "apne" are NOT word gaps). Never render before the user's feedback.
 
+LOOKS (one style preset per reference; project renders with the active one = project settings):
+STUDY REFERENCE command (kind=ref_style, field ref=<id>): analyse that reference like the Brand Kit study (frames,
+captions, pacing, audio loudness/music), then `studio_cli.py look <pid> R2 key=value ...` (STYLE keys only: format,
+caption_*, highlight_color, remove_silence, silence_min, layout, bg_*, panel_color, music, loudness, duck_db, ...).
+Writing the active look changes the project settings directly. Reply with what you set and why.
+BRIEFS: `brief` = about this video (shared); `look_briefs[<look id>]` = how each look should feel. `show` prints the
+video brief + the ACTIVE look's brief – follow both (first cut, storyboard, studying a reference).
+
 FIRST CUT command (kind=first_cut): read brief + references, then cut weak/duplicate/filler scenes, set
 format/captions/silence removal per the brief, add text titles where useful, reorder if the brief asks, render preview,
 reply with a short scene-by-scene summary.

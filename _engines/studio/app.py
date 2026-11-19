@@ -4,6 +4,7 @@ Run:  .venv\\Scripts\\python.exe app.py      then open http://127.0.0.1:8070
 """
 from __future__ import annotations
 
+import copy
 import os
 import queue
 import re
@@ -56,9 +57,13 @@ def _worker():
                 d["job"] = {"kind": kind, "status": "running", "progress": "Starting…", "started": core.now_iso(),
                             "finished": None, "error": None, "log": log, "pending": pend}
             core.mutate(pid, start)
+            auto_preview = False
             if kind == "analyze":
-                pipeline.analyze_project(pid, reanalyze=args.get("reanalyze", False))
+                n_done = pipeline.analyze_project(pid, reanalyze=args.get("reanalyze", False))
                 msg = "Analysis complete."
+                # new scenes exist -> render the COMPLETE video (all clips, in clip order) so the Scenes page's
+                # "Edited video" shows it, instead of an old render from before these clips were added
+                auto_preview = bool(n_done) and args.get("auto_preview", True)
             elif kind in ("preview", "final"):
                 out = pipeline.render_project(pid, preview=(kind == "preview"))
                 msg = f"Rendered {out.name}"
@@ -67,7 +72,7 @@ def _worker():
                 name = pipeline.download_reference(pid, args["url"])
                 core.job_log(pid, f"Saved {name}; analysing")
                 info = pipeline.analyze_reference(pid, name)
-                core.mutate(pid, lambda d: d["references"].append({"file": name, "url": args["url"], **info}))
+                core.mutate(pid, lambda d: d["references"].append({"id": core.new_id("r"), "file": name, "url": args["url"], **info}))
                 msg = f"Reference downloaded: {name}"
             elif kind == "ref_analyze":
                 for name in args["files"]:
@@ -88,6 +93,11 @@ def _worker():
                 msg = f"Unknown job {kind}"
             core.job_log(pid, msg)
             core.set_job(pid, status="done", progress=msg, finished=core.now_iso())
+            if auto_preview:
+                d_ = core.load(pid)
+                if any(s.get("keep", True) for s in d_["scenes"]) and "preview" not in ((d_.get("job") or {}).get("pending") or []):
+                    core.job_log(pid, "Rendering a preview of the complete video for the Scenes page…")
+                    enqueue(pid, "preview")
         except Exception as e:  # report every failure to the UI rather than dying silently
             traceback.print_exc()
             try:
@@ -134,14 +144,39 @@ def _exists(pid: str):
 
 def _decorate(data: dict) -> dict:
     """Add derived display fields (estimated durations, numbering)."""
+    data["edit_sig"] = core.edit_sig(data)  # before any derived fields are added
+    # every look's values for the page (the active look IS the project settings; never-opened looks are previewed
+    # from the simple settings + auto-detection, and only stored once edited or chosen)
+    looks, active = data.get("looks", {}), data.get("style_source", "none")
+    view = {}
+    for lid in ["none"] + [r["id"] for r in data.get("references", [])]:
+        if lid == active:
+            view[lid] = core.style_of(data["settings"])
+        elif lid in looks:
+            view[lid] = looks[lid]
+        else:
+            base = looks.get("none") or core.style_of(data["settings"])
+            ref = next((r for r in data["references"] if r["id"] == lid), {})
+            view[lid], notes = core.derive_look(base, ref) if lid != "none" else (base, [])
+            if ref and not ref.get("look_notes"):
+                ref["look_notes"] = notes
+    data["looks_view"] = view
     sil_cache: dict[str, list] = {}
     total_orig = total_est = 0.0
+    skipped = {s["file"] for s in data["sources"] if s.get("include") is False}
+    per_src: dict[str, dict] = {}
     for i, sc in enumerate(data["scenes"], 1):
         if sc["src"] not in sil_cache:
             sil_cache[sc["src"]] = core.read_json(core.work_file(data["id"], sc["src"], "silences.json"), []) or []
         sc["no"] = i
         sc["dur"] = round(sc["out"] - sc["in"], 2)
-        sc["est"] = pipeline.estimated_duration(sc, sil_cache[sc["src"]], data["settings"])
+        sc["est"] = 0.0 if sc["src"] in skipped else \
+            pipeline.estimated_duration(sc, sil_cache[sc["src"]], data["settings"])
+        sc["src_skipped"] = sc["src"] in skipped
+        ps = per_src.setdefault(sc["src"], {"scenes": 0, "kept": 0, "est": 0.0, "thumb": sc.get("thumb")})
+        ps["scenes"] += 1
+        ps["kept"] += 1 if sc.get("keep", True) else 0
+        ps["est"] += sc["est"]
         # what the captions will actually say (Hinglish and/or user spellings), so the page matches the video
         st = data["settings"]
         if st.get("caption_script") == "hinglish" or st.get("caption_fixes"):
@@ -151,7 +186,25 @@ def _decorate(data: dict) -> dict:
         total_orig += sc["dur"]
         total_est += sc["est"]
     data["totals"] = {"orig": round(total_orig, 1), "est": round(total_est, 1),
-                      "kept": sum(1 for s in data["scenes"] if s.get("keep", True)), "count": len(data["scenes"])}
+                      "kept": sum(1 for s in data["scenes"] if s.get("keep", True) and s["src"] not in skipped),
+                      "count": len(data["scenes"])}
+    raw = core.raw_dir(data["id"])
+    for s in data["sources"]:
+        ps = per_src.get(s["file"], {})
+        s["missing"] = not (raw / s["file"]).is_file()
+        if not s.get("bytes") and not s["missing"]:
+            s["bytes"] = (raw / s["file"]).stat().st_size
+        s["scenes"] = ps.get("scenes", 0)
+        s["kept"] = ps.get("kept", 0)
+        s["est"] = round(ps.get("est", 0.0), 1)
+        s.setdefault("include", True)
+        if not s.get("thumb") and ps.get("thumb"):
+            s["thumb_scene"] = ps["thumb"]  # older projects: use the first scene's frame as the poster
+    data["footage"] = {"clips": len(data["sources"]),
+                       "included": sum(1 for s in data["sources"] if s.get("include", True)),
+                       "duration": round(sum(s.get("duration") or 0 for s in data["sources"]), 1),
+                       "bytes": sum(s.get("bytes") or 0 for s in data["sources"]),
+                       "new": sum(1 for s in data["sources"] if not s.get("analyzed") and not s.get("missing"))}
     data["inbox"] = sum(1 for c in data.get("commands", []) if c["status"] == "claude")
     data["undo_depth"] = core.history_depth(data["id"])
     sb = core.read_json(storyboard.sb_path(data["id"]), None)
@@ -239,7 +292,15 @@ def api_upload(pid):
     if not files:
         return jsonify(error="No files received."), 400
     folder = core.raw_dir(pid) if kind == "source" else core.refs_dir(pid)
-    saved, skipped = [], []
+    saved, skipped, dupes = [], [], []
+    # camera files arrive in any order from a multi-select: add them in natural name order (C0002 before C0010)
+    files = sorted(files, key=lambda f: _natural_key(f.filename or ""))
+    known = {}
+    if kind == "source":
+        for s in core.load(pid)["sources"]:
+            fp = s.get("fp") or _fingerprint(folder / s["file"])
+            if fp:
+                known[fp] = s["file"]
     for f in files:
         name = core.safe_filename(f.filename or "upload")
         ext = Path(name).suffix.lower()
@@ -252,27 +313,68 @@ def api_upload(pid):
         except OSError as e:  # disk full / permission – don't leave a half-written file behind
             dest.unlink(missing_ok=True)
             return jsonify(error=f"Could not save {name}: {e.strerror or e}. Is the disk full?"), 507
+        if kind == "source":
+            fp = _fingerprint(dest)
+            if fp and fp in known:  # same clip dropped twice (any name): keep one copy
+                dest.unlink(missing_ok=True)
+                dupes.append(f"{name} (= {known[fp]})")
+                continue
+            known[fp] = dest.name
         saved.append(dest.name)
     if not saved:
+        if dupes:
+            return jsonify(error=f"Already in this project: {', '.join(dupes)}"), 409
         return jsonify(error=f"No supported files – footage must be a video ({', '.join(sorted(core.VIDEO_EXT))})."), 400
 
     def fn(d):
         for n in saved:
             if kind == "source":
-                d["sources"].append({"file": n, "analyzed": False, "added": core.now_iso()})
+                d["sources"].append({"file": n, "analyzed": False, "added": core.now_iso(), "include": True,
+                                     "fp": _fingerprint(folder / n)})
             else:
-                d["references"].append({"file": n, "kind": "pending", "added": core.now_iso()})
+                d["references"].append({"id": core.new_id("r"), "file": n, "kind": "pending", "added": core.now_iso()})
     core.mutate(pid, fn)
     if kind == "source":
-        for n in saved:  # quick probe so duration/resolution show immediately
+        for n in saved:  # quick probe + poster frame so the clip card is complete immediately
+            meta = {}
             try:
                 meta = pipeline.probe(folder / n)
-                core.mutate(pid, lambda d, n=n, meta=meta: core.source_by_file(d, n).update(meta))
             except Exception:
-                pass
+                meta = {"error": "could not read this file (damaged or unsupported?)"}
+            thumb = _clip_thumb(pid, n, meta.get("duration") or 0)
+            if thumb:
+                meta["thumb"] = thumb
+            meta.update(pipeline.clip_assets(pid, n, meta))  # timeline film strip + waveform
+            core.mutate(pid, lambda d, n=n, meta=meta: (core.source_by_file(d, n) or {}).update(meta))
     else:
         enqueue(pid, "ref_analyze", files=saved)
-    return jsonify(saved=saved, skipped=skipped)
+    return jsonify(saved=saved, skipped=skipped, duplicates=dupes)
+
+
+def _natural_key(name: str):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
+
+
+def _fingerprint(path: Path) -> str | None:
+    """size + hash of the first 2 MB: cheap and enough to recognise the same clip under another name."""
+    import hashlib
+    try:
+        with open(path, "rb") as f:
+            head = f.read(2 * 1024 * 1024)
+        return f"{path.stat().st_size}-{hashlib.sha1(head).hexdigest()[:16]}"
+    except OSError:
+        return None
+
+
+def _clip_thumb(pid: str, file: str, duration: float) -> str | None:
+    name = f"src_{re.sub(r'[^A-Za-z0-9._-]', '_', file)}.jpg"
+    (core.work_dir(pid) / "thumbs").mkdir(parents=True, exist_ok=True)
+    try:
+        pipeline.thumbnail(core.raw_dir(pid) / file, min(1.0, max(0.0, duration * 0.1)),
+                           core.work_dir(pid) / "thumbs" / name)
+        return name
+    except Exception:
+        return None
 
 
 @app.post("/api/projects/<pid>/source/remove")
@@ -281,22 +383,205 @@ def api_remove_source(pid):
     file = (request.json or {}).get("file")
 
     def fn(d):
+        if not core.source_by_file(d, file):
+            return
+        core.snapshot(pid, d)  # removing a clip deletes its edited scenes – Undo must bring them back
         d["sources"] = [s for s in d["sources"] if s["file"] != file]
         d["scenes"] = [s for s in d["scenes"] if s["src"] != file]
     core.mutate(pid, fn)
     return jsonify(ok=True)
 
 
+@app.post("/api/projects/<pid>/sources/order")
+def api_sources_order(pid):
+    """Set the clip order. body: {files:[...]} (custom) or {sort:"name"|"recorded"|"duration"}, force:bool.
+    Scenes follow: each clip's scenes stay together in clip order. If the user had arranged scenes ACROSS clips,
+    answer 409 first (regrouping would undo that arrangement) unless force=true."""
+    _exists(pid)
+    body = request.json or {}
+    result = {}
+
+    def fn(d):
+        cur = [s["file"] for s in d["sources"]]
+        if body.get("sort"):
+            key = {"name": lambda s: _natural_key(s["file"]),
+                   "recorded": lambda s: (s.get("recorded") or "9999", _natural_key(s["file"])),
+                   "duration": lambda s: (s.get("duration") or 0, _natural_key(s["file"]))}.get(body["sort"])
+            if not key:
+                result["error"] = "unknown sort"
+                return
+            new = [s["file"] for s in sorted(d["sources"], key=key)]
+        else:
+            new = list(body.get("files") or [])
+        if sorted(new) != sorted(cur):  # the page was out of date (a clip was added/removed meanwhile)
+            result["error"] = "The clip list changed – refreshing."
+            result["code"] = 409
+            return
+        if new == cur:
+            result["unchanged"] = True
+            return
+        if pipeline.scenes_interleaved(d["scenes"]) and not body.get("force"):
+            result["error"] = ("You arranged scenes across clips in the Scenes tab. Reordering clips will regroup "
+                               "every clip's scenes together (Undo can bring your arrangement back).")
+            result["code"] = 409
+            result["confirm"] = True
+            return
+        core.snapshot(pid, d)
+        by = {s["file"]: s for s in d["sources"]}
+        d["sources"] = [by[f] for f in new]
+        d["scenes"] = pipeline.regroup_scenes(d["scenes"], new)
+    core.mutate(pid, fn)
+    if result.get("error"):
+        return jsonify(error=result["error"], confirm=result.get("confirm", False)), result.get("code", 400)
+    return jsonify(ok=True, unchanged=result.get("unchanged", False))
+
+
+_assets_lock = threading.Lock()
+
+
+@app.post("/api/projects/<pid>/footage/assets")
+def api_footage_assets(pid):
+    """Make missing timeline graphics (film strip, waveform, poster) – for clips added before the timeline existed.
+    One request at a time; the page asks once per project."""
+    _exists(pid)
+    if not _assets_lock.acquire(blocking=False):
+        return jsonify(ok=True, busy=True)
+    made = 0
+    try:
+        for s in core.load(pid)["sources"]:
+            if s.get("strip") or not (core.raw_dir(pid) / s["file"]).is_file():
+                continue
+            meta = s if s.get("duration") else {**s, **pipeline.probe(core.raw_dir(pid) / s["file"])}
+            extra = pipeline.clip_assets(pid, s["file"], meta)
+            if not s.get("thumb"):
+                t = _clip_thumb(pid, s["file"], meta.get("duration") or 0)
+                if t:
+                    extra["thumb"] = t
+            if extra:
+                made += 1
+                core.mutate(pid, lambda d, f=s["file"], x=extra: (core.source_by_file(d, f) or {}).update(x))
+    finally:
+        _assets_lock.release()
+    return jsonify(ok=True, made=made)
+
+
+@app.post("/api/projects/<pid>/source/include")
+def api_source_include(pid):
+    """Include / Skip a clip in the video without deleting it or its edits."""
+    _exists(pid)
+    body = request.json or {}
+
+    def fn(d):
+        s = core.source_by_file(d, body.get("file"))
+        if s:
+            core.snapshot(pid, d)
+            s["include"] = bool(body.get("include", True))
+        return bool(s)
+    _, ok = core.mutate(pid, fn)
+    return (jsonify(ok=True), 200) if ok else (jsonify(error="no such clip"), 404)
+
+
 @app.post("/api/projects/<pid>/reference/remove")
 def api_remove_ref(pid):
     _exists(pid)
-    file = (request.json or {}).get("file")
-    url = (request.json or {}).get("url")
+    body = request.json or {}
+    rid, file, url = body.get("id"), body.get("file"), body.get("url")
 
     def fn(d):
-        d["references"] = [r for r in d["references"] if not (r.get("file") == file and r.get("url") == url)]
+        gone = [r for r in d["references"] if (rid and r["id"] == rid) or
+                (not rid and r.get("file") == file and r.get("url") == url)]
+        if not gone:
+            return False
+        core.snapshot(pid, d)
+        for r in gone:
+            if d.get("style_source") == r["id"]:  # removing the active look: fall back to the simple settings
+                _switch_style(d, "none")
+            d.get("looks", {}).pop(r["id"], None)
+            d.get("look_briefs", {}).pop(r["id"], None)
+        d["references"] = [r for r in d["references"] if r not in gone]
+        return True
     core.mutate(pid, fn)
     return jsonify(ok=True)
+
+
+def _ensure_look(d: dict, lid: str) -> dict:
+    """The stored look `lid` (created from the simple settings + auto-detection the first time it's needed)."""
+    looks = d.setdefault("looks", {})
+    if lid == d.get("style_source", "none"):
+        return d["settings"]
+    if lid not in looks:
+        base = looks.get("none") or core.style_of(d["settings"])
+        ref = next((r for r in d["references"] if r["id"] == lid), None)
+        looks[lid], notes = core.derive_look(base, ref or {}) if lid != "none" else (core.style_of(base), [])
+        if ref is not None:
+            ref["look_notes"] = notes
+    return looks[lid]
+
+
+def _switch_style(d: dict, target: str) -> list[str]:
+    """Make `target` ('none' or a reference id) the active look. The outgoing look's style is stored first, so
+    switching back and forth never loses anything. Returns notes about an auto-derived first look."""
+    looks = d.setdefault("looks", {})
+    cur = d.get("style_source", "none")
+    looks[cur] = core.style_of(d["settings"])
+    notes: list[str] = []
+    if target not in looks:
+        ref = next((r for r in d["references"] if r["id"] == target), None)
+        look, notes = core.derive_look(looks.get("none") or core.style_of(d["settings"]), ref or {})
+        looks[target] = look
+        if ref is not None:
+            ref["look_notes"] = notes
+    d["settings"].update(copy.deepcopy(looks[target]))
+    d["style_source"] = target
+    return notes
+
+
+@app.post("/api/projects/<pid>/style_source")
+def api_style_source(pid):
+    """Choose which look the project uses: 'none' (simple settings) or a reference id. Undoable."""
+    _exists(pid)
+    target = str((request.json or {}).get("source") or "none")
+    out = {}
+
+    def fn(d):
+        if target != "none" and not any(r["id"] == target for r in d["references"]):
+            out["error"] = "That reference no longer exists."
+            return
+        if d.get("style_source", "none") == target:
+            out["unchanged"] = True
+            return
+        core.snapshot(pid, d)
+        out["notes"] = _switch_style(d, target)
+    core.mutate(pid, fn)
+    if out.get("error"):
+        return jsonify(error=out["error"]), 404
+    return jsonify(ok=True, **out)
+
+
+@app.post("/api/projects/<pid>/reference/<rid>/study")
+def api_ref_study(pid, rid):
+    """Ask Claude for a deep style analysis of one reference (fills in that reference's look)."""
+    _exists(pid)
+    res = {}
+
+    def fn(d):
+        refs = d["references"]
+        r = next((x for x in refs if x["id"] == rid), None)
+        if not r:
+            res["error"] = "no such reference"
+            return
+        no = refs.index(r) + 1
+        if any(c.get("kind") == "ref_style" and c.get("ref") == rid and c["status"] == "claude" for c in d["commands"]):
+            res["already"] = True
+            return
+        d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "kind": "ref_style",
+                              "ref": rid, "text": f"STUDY REFERENCE R{no} ({r.get('file') or r.get('url')}) – "
+                                                 f"analyse its editing style and fill in its look.",
+                              "status": "claude", "reply": "", "by": None, "created": core.now_iso()})
+    core.mutate(pid, fn)
+    if res.get("error"):
+        return jsonify(error=res["error"]), 404
+    return jsonify(ok=True, already=res.get("already", False))
 
 
 @app.post("/api/projects/<pid>/reference_url")
@@ -309,7 +594,7 @@ def api_ref_url(pid):
     if body.get("download"):
         enqueue(pid, "ref_download", url=url)
     else:
-        core.mutate(pid, lambda d: d["references"].append({"url": url, "kind": "link", "added": core.now_iso()}))
+        core.mutate(pid, lambda d: d["references"].append({"id": core.new_id("r"), "url": url, "kind": "link", "added": core.now_iso()}))
     return jsonify(ok=True)
 
 
@@ -318,16 +603,27 @@ def api_brief(pid):
     _exists(pid)
     body = request.json or {}
     rejected = []
+    look = body.get("look")  # which look the page is EDITING ('none' / ref id); style keys go there
 
     def fn(d):
         if "brief" in body:
-            d["brief"] = str(body["brief"])[:20000]
+            d["brief"] = str(body["brief"])[:20000]  # about this video – shared by every look
+        if "look_brief" in body and look:
+            if look == "none" or any(r["id"] == look for r in d["references"]):
+                d.setdefault("look_briefs", {})[look] = str(body["look_brief"])[:20000]  # how this look should feel
         if "name" in body and str(body["name"]).strip():
             d["name"] = str(body["name"]).strip()[:120]
+        active = d.get("style_source", "none")
+        target = d["settings"]
+        if look and look != active:
+            if look != "none" and not any(r["id"] == look for r in d["references"]):
+                rejected.append("look (reference no longer exists)")
+                return
+            target = _ensure_look(d, look)  # editing a look the video doesn't use: the video stays as it is
         for k, v in (body.get("settings") or {}).items():
             ok, clean = core.clean_setting(k, v)
             if ok:
-                d["settings"][k] = clean
+                (target if k in core.STYLE_KEYS else d["settings"])[k] = clean  # footage keys stay project-wide
             elif k in core.DEFAULT_SETTINGS:
                 rejected.append(k)
     core.mutate(pid, fn)
@@ -345,13 +641,16 @@ def api_apply_brand(pid):
         return jsonify(error="No Brand Kit yet (Brand Kit/brand-kit.json missing or invalid)."), 400
     applied = []
 
+    look = (request.json or {}).get("look")
+
     def fn(d):
         core.snapshot(pid, d)
+        target = _ensure_look(d, look) if look and look != d.get("style_source", "none") else d["settings"]
         for k, v in kit["settings"].items():
             if k in core.DEFAULT_SETTINGS:
                 ok, clean = core.clean_setting(k, v)
                 if ok:
-                    d["settings"][k] = clean
+                    (target if k in core.STYLE_KEYS else d["settings"])[k] = clean
                     applied.append(k)
     core.mutate(pid, fn)
     return jsonify(ok=True, applied=applied)

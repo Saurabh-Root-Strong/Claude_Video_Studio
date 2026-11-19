@@ -56,7 +56,11 @@ def inbox():
 
 def show(pid):
     d = core.load(pid)
-    print(f"{d['name']}  [{pid}]\nBrief: {d['brief']}\nSettings: {json.dumps(d['settings'])}")
+    act = d.get("style_source", "none")
+    refs = d.get("references", [])
+    act_name = "None (simple)" if act == "none" else next((f"R{i + 1}" for i, r in enumerate(refs) if r["id"] == act), act)
+    print(f"{d['name']}  [{pid}]\nAbout this video: {d['brief']}\nActive look: {act_name}\n"
+          f"Brief for {act_name}: {(d.get('look_briefs') or {}).get(act, '')}\nSettings: {json.dumps(d['settings'])}")
     print("Sources:", [(s['file'], s.get('duration'), f"{s.get('width')}x{s.get('height')}") for s in d["sources"]])
     for i, r in enumerate(d["references"], 1):
         sheet = core.work_dir(pid) / "refs" / r["sheet"] if r.get("sheet") else ""
@@ -91,6 +95,44 @@ def caption_words(pid):
                 rows.append((w["w"].strip(), hinglish.caption_word(w["w"], st).strip(), w["s"]))
     for orig, shown, s in rows:
         print(f"{s:7.2f}s  {orig:<22} -> {shown}")
+
+
+def set_look(pid, which, pairs):
+    """Write style keys into one look (R2 / ref id / none). If that look is active, the project settings change
+    too (they ARE the active look). Validated like the UI; non-style keys are refused."""
+    def fn(d):
+        refs = d["references"]
+        if which.lower() == "none":
+            rid = "none"
+        elif which.upper().startswith("R") and which[1:].isdigit() and 0 < int(which[1:]) <= len(refs):
+            rid = refs[int(which[1:]) - 1]["id"]
+        elif any(r["id"] == which for r in refs):
+            rid = which
+        else:
+            raise SystemExit(f"no reference {which}")
+        core.snapshot(pid, d)
+        looks = d.setdefault("looks", {})
+        active = d.get("style_source", "none") == rid
+        target = d["settings"] if active else looks.setdefault(rid, core.style_of(looks.get("none") or d["settings"]))
+        done, bad = [], []
+        for p in pairs:
+            k, _, v = p.partition("=")
+            try:
+                val = json.loads(v)
+            except json.JSONDecodeError:
+                val = v
+            ok, clean = core.clean_setting(k, val)
+            if ok and k in core.STYLE_KEYS:
+                target[k] = clean
+                done.append(f"{k}={clean}")
+            else:
+                bad.append(k)
+        r = next((x for x in refs if x["id"] == rid), None)
+        if r is not None and done:
+            r["studied"] = True
+        return rid, active, done, bad
+    _, (rid, active, done, bad) = core.mutate(pid, fn)
+    print(f"look {rid}{' (active)' if active else ''}: set {done}" + (f" | refused (invalid or not a style key): {bad}" if bad else ""))
 
 
 def cmd(pid, ref, text):
@@ -152,6 +194,8 @@ def main(argv):
         cmd(rest[0], rest[1], rest[2])
     elif op == "captions":
         caption_words(rest[0])
+    elif op == "look":  # look <pid> <R-number|ref id|none> key=value ...  (fills a reference's style preset)
+        set_look(rest[0], rest[1], rest[2:])
     elif op == "storyboard":  # storyboard build <pid> [creative.json] | storyboard show <pid> | storyboard apply <pid>
         import storyboard
         sub, pid = rest[0], rest[1]

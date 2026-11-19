@@ -26,21 +26,38 @@
   "+ New project"  -> give it a name.
 
   TAB 1  FOOTAGE
-     Drag your video(s) into the box, then click  "Analyze footage".
-     Wait for "Analysis complete" (about 1 minute per minute of video).
-     The video is split into short scenes with the spoken words.
+     Click "+ Add videos" (or drag files into the box). Several at once
+     is fine; the same clip twice is refused.
+     ORDER = the order of your video. Change it by:
+        - dragging a clip card by its handle, or the arrow buttons
+        - "Order: Sort by name / recording time / length"
+        - the TIMELINE below: drag a clip block left/right
+     Timeline: click a clip to select it (Ctrl/Shift for several),
+     Play plays the selected clips one after another (Space = play).
+     "Skip" leaves a clip out of the video without deleting it.
+     Click "Analyze footage" (about 1 minute per minute of video).
+     When it's done, a preview of the complete video renders by itself,
+     and the green "Next: Scenes ->" button takes you to tab 3.
+     Clips with no speech (music, street footage) get captions OFF
+     automatically. To bring them back: "captions on" in that scene.
 
-  TAB 2  REFERENCES & BRIEF  (optional)
-     Drag in sample videos/images whose style you like.
-     Write what you want (e.g. "60-second Instagram reel, fast cuts").
-     Choose format (9:16 for Reels/Shorts, 16:9 for YouTube),
-     caption colours, logo. Click "Save brief & settings".
-     "Caption script": Hindi (हिंदी) or Hinglish (English letters).
-     For Hindi videos also set "Language" to Hindi before analyzing.
-     "Apply Brand Kit" = your approved look (Brand Kit\brand-kit.md).
-     New projects start with it automatically.
+  TAB 2  REFERENCES & BRIEF  (your LOOK LIBRARY)
+     Drag in sample videos you like. Each one gets a number (R1, R2...)
+     and its own LOOK (all the style settings) and its own brief.
+     "Edit look": click None / R1 / R2... - the settings and the
+     "Brief for R1" box below show THAT look. Editing a look does NOT
+     change your video. "Ask Claude to study" = Claude analyses the
+     reference and fills in its look.
+     "About this video" = what the video is about (shared by all looks).
+     Every setting has a "?" - click it to see what it does and why.
+     Click "Save brief & settings" when done.
+     For Hindi videos set "Language" to Hindi before analyzing.
 
   TAB 3  SCENES  (the main editor)
+     "Look" dropdown at the top = which look this video USES
+     (None, R1, R2...). Change it and click "Render preview".
+     Under the player, "Edited video" plays your latest render;
+     "Original footage" plays the raw camera clip.
      Click a scene to play it. Type a command in the box and press Enter,
      or click the quick buttons. Examples:
 
