@@ -59,6 +59,7 @@ DEFAULT_SETTINGS = {
     "caption_color": "#FFFFFF",
     "highlight_color": "#F97316",
     "caption_position": "bottom",  # bottom | center | top
+    "caption_y": None,  # exact caption height for the WHOLE video, % from the top (None = the look's position)
     "caption_case": "normal",      # normal | upper
     "caption_words": 4,
     "caption_script": "original",  # original (as transcribed, e.g. Hindi script) | hinglish (Hindi in English letters)
@@ -213,16 +214,16 @@ def new_project(name: str) -> dict:
         "created": now_iso(),
         "version": 0,
         "brief": "",
-        "settings": brand_settings(),
+        "settings": plain_settings(),
         "sources": [],
         "references": [],
         "scenes": [],
         "commands": [],
         "renders": [],
         "job": None,
-        # starts in the Brand Kit look (if there is one); "None · simple" = truly plain settings
-        "style_source": BRANDKIT if brandkit_look() else "none",
-        "looks": {"none": style_of(DEFAULT_SETTINGS)} if brandkit_look() else {},
+        # a new video starts on "None · simple settings"; the Look dropdown (Scenes) switches it to ★ Brand Kit / R1…
+        "style_source": "none",
+        "looks": {},
     }
     save(pid, data)
     return data
@@ -265,7 +266,7 @@ def derive_look(base: dict, ref: dict) -> tuple[dict, list[str]]:
 
 
 _SIG_SKIP = {"thumb", "transcript", "notes", "no", "dur", "est", "caption_view", "src_skipped", "sb_applied",
-             "broll_view", "start_at"}
+             "broll_view", "start_at", "lib_missing"}
 
 
 def edit_sig(d: dict) -> str:
@@ -306,6 +307,14 @@ def brand_settings() -> dict:
             ok, val = clean_setting(k, v)
             if ok:
                 s[k] = val
+    return s
+
+
+def plain_settings() -> dict:
+    """Settings of a NEW project: the plain look ("None · simple") for every STYLE key; the Brand Kit's footage keys
+    (language, face position… – they describe you/your camera, not a look) still apply."""
+    s = brand_settings()
+    s.update(copy.deepcopy({k: DEFAULT_SETTINGS[k] for k in STYLE_KEYS if k in DEFAULT_SETTINGS}))
     return s
 
 
@@ -412,11 +421,14 @@ def _hfile(pid: str) -> Path:
     return project_dir(pid) / "history.json"
 
 
-def snapshot(pid: str, data: dict) -> None:
-    """Push scenes + settings onto the undo stack (max 30). Call inside mutate()."""
+def snapshot(pid: str, data: dict, restore_assets: list[str] | None = None) -> None:
+    """Push scenes + settings onto the undo stack (max 30). Call inside mutate().
+    restore_assets: uploaded B-roll files this step moves to Assets/.trash – undo moves them back."""
     hist = read_json(_hfile(pid), []) or []
     hist.append({"at": now_iso(), "scenes": copy.deepcopy(data.get("scenes", [])),
-                 "settings": copy.deepcopy(data.get("settings", {}))})
+                 "settings": copy.deepcopy(data.get("settings", {})),
+                 "sources": copy.deepcopy(data.get("sources", [])),  # undo can bring back a removed clip's entry
+                 **({"restore_assets": list(restore_assets)} if restore_assets else {})})
     _atomic_write(_hfile(pid), hist[-30:])
 
 
@@ -433,6 +445,23 @@ def pop_snapshot(pid: str) -> dict | None:
     snap = hist.pop()
     _atomic_write(_hfile(pid), hist)
     return snap
+
+
+def untrash_assets(pid: str, data: dict, names: list[str] | None = None) -> None:
+    """Move uploads back from Assets/.trash: the ones named, and any a scene points at again (after an undo)."""
+    trash = assets_dir(pid) / ".trash"
+    if not trash.is_dir():
+        return
+    want = set(names or []) | {s["broll"].get("src") for s in data.get("scenes", []) if isinstance(s.get("broll"), dict)}
+    for n in want:
+        if not isinstance(n, str) or Path(n).name != n:
+            continue
+        t, dest = trash / n, assets_dir(pid) / n
+        if t.is_file() and not dest.exists():
+            try:
+                t.replace(dest)
+            except OSError:
+                pass  # still usable from the trash (broll_path looks there)
 
 
 def history_depth(pid: str) -> int:
@@ -536,6 +565,11 @@ def clean_setting(key: str, value):
             return True, value in (True, "true", "1", 1, "on")
         if key in ("caption_color", "highlight_color", "bg_color", "panel_color"):
             return bool(_HEX.match(str(value))), str(value).upper()
+        if key == "caption_y":
+            if value in (None, "", "auto", "none"):
+                return True, None
+            v = round(float(value), 1)
+            return 5 <= v <= 95, v
         if key == "caption_words":
             return True, max(1, min(int(value), 8))
         if key == "silence_min":
@@ -603,7 +637,29 @@ def broll_path(pid: str, data: dict, name: str | None) -> Path | None:
         p = raw_dir(pid) / name
         return p if s.get("include", True) is not False and p.is_file() else None
     p = raw_dir(pid) / "Assets" / Path(name).name
-    return p if p.is_file() else None
+    if p.is_file():
+        return p
+    t = raw_dir(pid) / "Assets" / ".trash" / Path(name).name  # removed upload: an undo may still point at it
+    return t if t.is_file() else None
+
+
+BROLL_WHERE = ("full", "top", "bottom")  # full screen | top half / top panel | bottom half / over the speaker panel
+
+
+def broll_where(b: dict | None, split: bool) -> str:
+    """Where a scene's B-roll shows. Not chosen = follow the layout (split -> top panel, full layout -> full screen)."""
+    w = (b or {}).get("where")
+    return w if w in BROLL_WHERE else ("top" if split else "full")
+
+
+def is_still(name: str) -> bool:
+    """A picture (not an animated GIF): shown as a still for the whole scene."""
+    ext = os.path.splitext(str(name))[1].lower()
+    return ext in IMAGE_EXT and ext != ".gif"
+
+
+def assets_dir(pid: str) -> Path:
+    return raw_dir(pid) / "Assets"
 
 
 def scene_by_id(data: dict, sid: str) -> dict | None:

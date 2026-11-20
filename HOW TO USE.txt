@@ -55,7 +55,10 @@
 
   TAB 3  SCENES  (the main editor)
      "Look" dropdown at the top = which look this video USES
-     (None, R1, R2...). Change it and click "▶ Edited view".
+     (None, ★ Brand Kit, R1, R2...). A NEW video starts on
+     "None · simple settings". Pick a look and its settings apply
+     right away; the edited view updates by itself. Your scene edits
+     (cuts, trims, cards, caption height...) stay. Undo switches back.
      "▶ Edited view" (above the player, right of the timeline) plays your
      video with every edit so far - it updates itself after each change;
      "Original footage" plays the raw camera clip.
@@ -67,6 +70,13 @@
      Keys: Space play · arrows next/previous scene · S split ·
      Delete cut/restore · I / O trim start/end to the playhead ·
      Ctrl+Z undo.
+     COPY A SCENE: select it, "⧉ Duplicate" (or Ctrl+D) = a copy right
+     after it. Or Ctrl+C, click another scene, Ctrl+V = the copy goes
+     AFTER that scene. The copy keeps every edit (trim, speed, zoom,
+     captions, card, text...), is a scene of its own (7 -> 8 scenes)
+     and can be dragged anywhere. Ctrl+Z removes it.
+     Command: duplicate   /   paste scene 3 (copy of scene 3 after
+     the selected scene)
 
      INSPECTOR (right): buttons for the selected scene - cut, role,
      trim, speed, zoom, mute/volume, captions, caption POSITION
@@ -74,6 +84,13 @@
      Click a WORD to fix how the captions write it.
      HOVER over any button or label to see what it does.
      Command: captions at head / center / below / auto
+     EXACT HEIGHT: type a number in the % box next to Position
+     (% from the TOP of the screen: 0 = top edge, 100 = bottom edge)
+     and press Enter: EVERY scene gets that height (also scenes you add
+     later). "only this scene" = an exception for the selected scene;
+     its "follow the video" link undoes the exception. The small
+     phone picture shows where it lands: dark blue = top card, red =
+     covered by Instagram/YouTube's caption + buttons (keep it 15-78).
      ZOOM MOMENTS: a quick punch-in on a few words, INSIDE the scene -
      the scene stays one scene. Type  punch 1.2-2.5  (seconds in this
      scene; add a strength: punch 1.2-2.5 1.2). Shown in the Inspector
@@ -89,6 +106,58 @@
      with nobody speaking (market footage etc.). Drag any block left or
      right to put it before/after another scene. That's all you need.
 
+     B-ROLL FOR ONE SCENE (Inspector, "Cover with B-roll"):
+        - "⬆ Upload video / picture" = pick any video or picture
+          (chart, screenshot...) from your computer: it covers THIS
+          scene right away. It is kept with the project and listed
+          under "Uploaded B-roll" for other scenes (no second copy).
+        - Placement: Full screen / Top / Bottom.
+            split layout:  Top = the card panel, Bottom = over YOU
+                           (the card stays on top)
+            full layout:   Top half / Bottom half (you in the other
+                           half, an orange line between)
+          The small phone picture shows the covered part in orange.
+        - Picture: "Fill (crop)" fills the space (edges cut off if the
+          shape differs) or "Whole picture" (nothing cut off; the empty
+          space is a soft blurred copy of it - best for charts and
+          screenshots). Command: broll fit / broll fill
+        - Captions on it: On / Off for this scene.
+        - "Manage uploads": see every uploaded file, which scenes use
+          it, and 🗑 delete. Scenes using it show you again. Undo
+          brings the file and the scenes back.
+        - Videos: "Starts in the clip at" (seconds). Pictures stay
+          on screen for the whole scene. Your voice always keeps
+          playing; B-roll never makes the video longer.
+     ✨ LIBRARY (Inspector, under B-roll): four tabs for the selected
+     scene. Everything is free to use (licences: Library\LICENSES.md).
+        ⇄ Transition  how the video goes INTO this scene: 47 kinds
+                      (fade, slide, wipe, circle, zoom, pixelate...).
+                      Hover a tile to preview it, click to use it.
+                      Pick the time (0.25-1 s) and the whoosh sound.
+                      "use at every cut" = the whole video.
+                      The video never gets longer: the next voice
+                      starts exactly at the cut.
+        ✨ Effects     flash, fade in/out, punch-in zoom, slow zoom,
+                      camera shake, glitch, black & white, vintage,
+                      cinematic... (captions + stickers stay steady).
+        🙂 Stickers    1,600 3D emoji. "Finance picks" first (rocket,
+                      money bag, chart, fire, warning...), or search.
+                      Click to add; then set when (at), how long
+                      (for), where, size and pop/bounce/still.
+        🔊 Sounds      320 sound effects (whoosh, pop, cash register,
+                      ding, riser, typing...). ▶ listens. "+ add" puts
+                      it in the scene; "hits at" = the second where
+                      its hit lands (it starts a bit earlier so the
+                      hit is exactly there).
+     Your own: put PNG/GIF stickers in Library\Stickers\My stickers and
+     WAV/MP3 sounds in Library\Sounds\My sounds, then click ↻.
+     First time on a PC: the Library downloads in Setup (or click
+     "Download the free Library" in that panel, ~120 MB).
+     Commands: transition slide left 0.5 · transition off ·
+        transitions fade (whole video) · effect shake · effect remove
+        shake · sticker rocket at 1 for 2 top-right size 30% ·
+        sticker 1 at 0.5 · sticker remove 1 · sfx whoosh-fast-hard at
+        0.2 · sfx 1 vol 50% · sfx remove 1
      B-ROLL (optional): a clip can instead COVER a speaker scene while
      your voice keeps playing (top panel in the split layout, full
      screen otherwise). B-roll scenes show as small blue 🎞 blocks;
@@ -147,7 +216,7 @@
 
      B-roll commands:
         broll Stock Market Sensex.mp4   cover this scene with that clip
-        broll top / broll full          top panel or full screen
+        broll top / bottom / full       where it shows (top / bottom / full)
         broll from 3                    start 3 s into the clip
         broll off                       remove it from this scene
         role broll / role speaker       what this scene IS
@@ -190,6 +259,7 @@
   Storyboards\   your projects (the edits you made)
   Exports\       finished videos
   Brand Kit\     put your logo here (PNG) to use it in videos
+  Library\       stickers, sound effects, previews (+ your own)
 
   Your videos are NOT uploaded anywhere. Everything stays on this PC.
   To continue a project on another PC, copy these folders for that

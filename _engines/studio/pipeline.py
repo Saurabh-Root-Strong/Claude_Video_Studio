@@ -13,6 +13,7 @@ from pathlib import Path
 import cards
 import commands
 import core
+import library
 import hinglish
 from core import FFMPEG, FFPROBE, YTDLP
 
@@ -861,9 +862,13 @@ def zoom_pieces(windows, geo, base_zoom: float) -> str:
     return txt + ";" + "".join(f"[zr{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0"
 
 
-def caption_center_y(scene: dict, w: int, h: int, seam_y: int | None) -> int | None:
+def caption_center_y(scene: dict, w: int, h: int, seam_y: int | None, settings: dict | None = None) -> int | None:
     """Pinned caption centre row (\\an5), or None = the look's style alignment (bottom/center/top margins)."""
-    cp = scene.get("cap_pos")  # per-scene override: head | center | below (None = the look's position / the seam)
+    cp = scene.get("cap_pos")  # per-scene override: head | center | below | a number = % from the top (None = video)
+    if cp is None and settings and isinstance(settings.get("caption_y"), (int, float)):
+        cp = settings["caption_y"]  # the whole video's exact height
+    if isinstance(cp, (int, float)) and not isinstance(cp, bool):
+        return round(h * min(max(float(cp), 3.0), 97.0) / 100)
     if cp in ("head", "center", "below"):
         if seam_y:  # split layout: Auto = ON the seam; head = just under it (over the hair/forehead), middle, low
             lo = h - seam_y
@@ -878,7 +883,7 @@ def caption_band(scene: dict, settings: dict, w: int, h: int, seam_y: int | None
     portrait = h > w
     fs = round(min(w, h) * (0.085 if portrait else 0.072))
     line = round(fs * 1.25)
-    y = caption_center_y(scene, w, h, seam_y)
+    y = caption_center_y(scene, w, h, seam_y, settings)
     if y is not None:
         return y - line, y + line                 # \an5: lines grow both ways from the centre
     pos = settings.get("caption_position", "bottom")
@@ -972,7 +977,7 @@ def write_ass(path: Path, scene: dict, words: list[dict], ranges, settings: dict
         "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
     lines += extra or []
-    y = caption_center_y(scene, w, h, seam_y)
+    y = caption_center_y(scene, w, h, seam_y, settings)
     at = f"{{\\an5\\pos({w // 2},{y})}}" if y is not None else ""
     events = []
     for ch in chunks:
@@ -1070,6 +1075,137 @@ def green_key(pid: str, src_file: str) -> str | None:
     return key
 
 
+def _video_len(p: Path) -> float:
+    """Length of a file's video stream (frames / rate); 0.0 if unknown."""
+    try:
+        o = run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries",
+                 "stream=nb_read_packets,r_frame_rate,duration", "-of", "json", p])
+        s = (json.loads(o[o.index("{"):]).get("streams") or [{}])[0]
+        num, _, den = (s.get("r_frame_rate") or "0/1").partition("/")
+        fps = float(num) / float(den or 1) if float(num or 0) else 0.0
+        if s.get("nb_read_packets") and fps:
+            return round(int(s["nb_read_packets"]) / fps, 4)
+        return float(s.get("duration") or 0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _sticker_sigs(scene: dict) -> list:
+    out = []
+    for s in scene.get("stickers") or []:
+        p = library.path_of(s.get("file")) if isinstance(s, dict) else None
+        out.append([s.get("file"), p.stat().st_mtime if p else None] if isinstance(s, dict) else None)
+    return out
+
+
+def _sfx_events(scenes: list[dict], durs: list[float]) -> tuple[list[tuple], list]:
+    """Transitions INTO scenes and every sound effect, on the edited video's timeline.
+    Returns (transitions [(index, xfade type, seconds)], sounds [(path, start s, trim s, gain dB)]).
+    A sound is placed so its SYNC point (the hit / the middle of a whoosh) meets its moment: start = moment - sync."""
+    trans, snd = [], []
+    t0 = 0.0
+    for i, (sc, d) in enumerate(zip(scenes, durs)):
+        tr = sc.get("transition") if isinstance(sc.get("transition"), dict) else None
+        if i > 0 and tr and tr.get("type") in library.TRANSITIONS:
+            td = min(max(0.15, float(tr.get("dur") or library.DEFAULT_TRANS_DUR)), 1.0, durs[i - 1] * 0.5, d * 0.5)
+            if td >= 0.1:
+                trans.append((i, tr["type"], round(td, 3)))
+                s = tr.get("sound")
+                if isinstance(s, dict):
+                    snd.append((s.get("file"), t0 + td / 2 - float(s.get("sync") or 0), float(s.get("gain_db") or 0), 1.0))
+        for e in sc.get("sfx") or []:
+            if isinstance(e, dict):
+                at = max(0.0, float(e.get("at") or 0))
+                if at >= d:
+                    continue  # the scene got shorter than where this sound was placed
+                snd.append((e.get("file"), t0 + at - float(e.get("sync") or 0), float(e.get("gain_db") or 0),
+                            min(2.0, max(0.0, float(e.get("vol", 1.0) if e.get("vol") is not None else 1.0)))))
+        t0 += d
+    out = []
+    for f, start, gain, vol in snd:
+        p = library.path_of(f)
+        if p and vol > 0.001 and start < t0 and library.media_ok(p):
+            trim = max(0.0, -start)
+            out.append((p, max(0.0, start), trim, gain + 20 * math.log10(vol)))
+    return trans, out[:60]
+
+
+def assemble(wd: Path, scenes: list[dict], segs: list[Path], durs: list[float], out: Path, fps: int,
+             preview: bool) -> bool:
+    """Join the scene segments WITH transitions and sound effects. False = nothing to add (caller stream-copies).
+    Transitions don't change any length: the outgoing scene's last frame is held for the transition (the voice of the
+    next scene starts exactly at the cut), so captions, music and the page's scene times all stay in place."""
+    trans, sounds = _sfx_events(scenes, durs)
+    if not trans and not sounds:
+        return False
+    tmap = {i: (ty, d) for i, ty, d in trans}
+    lst = wd / "concat.txt"
+    if trans:
+        inputs = []
+        for p in segs:
+            inputs += ["-i", p.name if p.parent == wd else str(p)]
+        g = [f"[{i}:v]fps={fps},setpts=PTS-STARTPTS,format=yuv420p,setsar=1,settb=AVTB[v{i}]" for i in range(len(segs))]
+        acc, acc_len = "v0", durs[0]
+        for i in range(1, len(segs)):
+            if i in tmap:
+                ty, d = tmap[i]
+                g.append(f"[{acc}]tpad=stop_mode=clone:stop_duration={d:.3f}[p{i}];"
+                         f"[p{i}][v{i}]xfade=transition={ty}:duration={d:.3f}:offset={acc_len:.4f},settb=AVTB[x{i}]")
+            else:
+                g.append(f"[{acc}][v{i}]concat=n=2:v=1:a=0,settb=AVTB[x{i}]")
+            acc, acc_len = f"x{i}", acc_len + durs[i]
+        g.append(f"[{acc}]settb=AVTB,format=yuv420p[vout]")
+        g.append("".join(f"[{i}:a]" for i in range(len(segs))) + f"concat=n={len(segs)}:v=0:a=1[ac]")
+        a_in, base = len(segs), "[ac]"
+    else:  # sounds only: the joined picture is stream-copied
+        inputs = ["-f", "concat", "-safe", "0", "-i", lst.name]
+        g, a_in, base = [], 1, "[0:a]"
+    for k, (p, start, trim, gain) in enumerate(sounds):
+        inputs += ["-i", str(p)]
+        ms = round(start * 1000)
+        g.append(f"[{a_in + k}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                 f"atrim=start={trim:.3f},asetpts=PTS-STARTPTS,volume={gain:.2f}dB,adelay={ms}:all=1[s{k}]")
+    if sounds:
+        g.append(f"{base}{''.join(f'[s{k}]' for k in range(len(sounds)))}amix=inputs={1 + len(sounds)}:duration=first:"
+                 f"normalize=0:dropout_transition=0,alimiter=limit=0.97:attack=2:release=50:latency=1[aout]")
+    else:
+        g.append(f"{base}anull[aout]")
+    total = sum(durs)
+    vmap = ["-map", "[vout]"] if trans else ["-map", "0:v", "-c:v", "copy"]
+
+    def enc(nvenc: bool) -> list[str]:
+        if not trans:
+            return []
+        if nvenc:
+            return ["-c:v", "h264_nvenc", "-preset", "p1" if preview else "p5", "-cq", "30" if preview else "21", "-b:v", "0"]
+        return ["-c:v", "libx264", "-preset", "veryfast" if preview else "medium", "-crf", "28" if preview else "20"]
+    base_cmd = [FFMPEG, "-y", "-v", "error", *inputs, "-filter_complex", ";".join(g), *vmap, "-map", "[aout]"]
+    tail = ["-r", str(fps), "-g", str(fps * 2), "-c:a", "aac", "-b:a", "192k", "-t", f"{total:.3f}",
+            "-movflags", "+faststart", out.name]
+    try:
+        run(base_cmd + enc(True) + tail, cwd=wd, timeout=max(600, int(total * 10)))
+    except PipelineError:
+        if not trans:
+            raise
+        run(base_cmd + enc(False) + tail, cwd=wd, timeout=max(900, int(total * 20)))
+    return True
+
+
+def _broll_graph(inp: str, out: str, br: dict, fps: int, bw: int, bh: int, extra: list[str] | None = None) -> str:
+    """Filtergraph text: B-roll input -> [out], a bw x bh picture. fill = cover + centre crop (like a phone);
+    fit = the WHOLE picture, the empty space filled with a soft blurred, darkened copy of it (no black bars)."""
+    extra = extra or []
+    if br.get("fit") != "fit":
+        return f"[{inp}]{','.join(_broll_chain(fps, bw, bh, br.get('hdr')) + extra)}[{out}]"
+    head = (hdr_chain() if br.get("hdr") else []) + [f"fps={fps}", "setpts=PTS-STARTPTS", "format=yuv420p"]
+    sw, sh = max(16, bw // 8 // 2 * 2), max(16, bh // 8 // 2 * 2)  # blur at 1/8 size: fast and very soft
+    return (f"[{inp}]{','.join(head)},split=2[{out}_b][{out}_f];"
+            f"[{out}_b]scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh},boxblur=6:2,"
+            f"scale={bw}:{bh},eq=brightness=-0.12:saturation=0.8,setsar=1[{out}_bg];"
+            f"[{out}_f]scale={bw}:{bh}:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[{out}_fg];"
+            f"[{out}_bg][{out}_fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p{(',' + ','.join(extra)) if extra else ''}[{out}]")
+
+
 def _broll_chain(fps: int, bw: int, bh: int, hdr: bool = False) -> list[str]:
     """B-roll footage -> a bw x bh picture (cover + centre crop, like a phone fills the screen)."""
     return (hdr_chain() if hdr else []) + [f"fps={fps}", "setpts=PTS-STARTPTS", f"scale={bw}:{bh}:force_original_aspect_ratio=increase",
@@ -1088,7 +1224,7 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     if caps is None:
         caps = settings.get("captions", True)
     relevant = {k: settings.get(k) for k in ("fit", "caption_font", "caption_color", "highlight_color",
-                                              "caption_position", "caption_case", "caption_words",
+                                              "caption_position", "caption_y", "caption_case", "caption_words",
                                               "caption_script", "caption_fixes",
                                               "silence_min", "logo", "logo_position", "remove_silence",
                                               "layout", "split_ratio", "bg_mode", "bg_color", "panel_color",
@@ -1101,9 +1237,10 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     gkey = green_key(pid, scene["src"]) if split and settings.get("bg_mode", "auto") == "auto" else None
     # cache key covers everything that changes the pixels/audio: scene edits, style, the words in range,
     # the source file itself and the logo file – so re-analysis or a replaced logo never reuses a stale segment
-    key = _seg_hash({k: v for k, v in scene.items() if k not in ("notes", "transcript", "thumb", "sb_applied")}, relevant, caps,
+    key = _seg_hash({k: v for k, v in scene.items() if k not in ("notes", "transcript", "thumb", "sb_applied", "transition", "sfx")},
+                    relevant, caps,
                     w, h, fps, preview, words_in(words, scene["in"], scene["out"]), st.st_size, st.st_mtime,
-                    logo_sig, "nvenc" if nvenc else "x264", gkey, 14)  # bump when caption/card/render logic changes
+                    logo_sig, "nvenc" if nvenc else "x264", gkey, _sticker_sigs(scene), 17)  # bump when caption/card/render logic changes
     out = seg_dir / f"seg_{key}.mp4"
     if out.exists() and out.stat().st_size > 1000:
         return out
@@ -1128,7 +1265,8 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     pre = []  # graph parts that must come BEFORE the main [0:v] chain's consumers (split layout)
     top_h = 0
     br = scene.get("_broll") if isinstance(scene.get("_broll"), dict) and Path(scene["_broll"].get("file", "")).is_file() else None
-    br_where = (br["where"] if split else "full") if br else None
+    br_where = (br["where"] if br["where"] in core.BROLL_WHERE else "full") if br else None
+    half = not split and br_where in ("top", "bottom")  # full layout: B-roll in one half, you in the other
     card = None if br_where == "full" else scene.get("_card")  # a full-screen cutaway covers the top-panel card
     card_on = split and cards.valid(card) and card.get("kind") != "none"
     if split:
@@ -1149,22 +1287,43 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
         panel = (settings.get("panel_color") or "#0F1B2D").lstrip("#")
         seam = (settings.get("highlight_color") or "#F97316").lstrip("#")
         t = max(2, round(h * 0.0021)) // 2 * 2
-        if gkey:
+        if gkey and br_where != "bottom":
             pre.append(f"color=c=0x{bg}:s={w}x{bot_h}:r={fps},format=yuv420p,vignette=angle=PI/14[bg]")  # faint: PI/7 turned off-white grey
+        if br_where == "bottom":
+            # B-roll replaces YOU in the bottom panel (the card stays on top); the speaker picture isn't used
+            pre.append(_broll_graph("1:v", "sp", br, fps, w, bot_h))
+            gkey_bg = False
+        else:
+            gkey_bg = bool(gkey)
         if br_where == "top":
             # B-roll fills the top panel; under a card it's dimmed with the panel colour so the white text stays readable
             # exact RGB blend 45 % footage / 55 % panel colour (drawbox@alpha on YUV lost the footage's colour: red -> grey)
             pr, pg, pb = (int(panel[i:i + 2], 16) if len(panel) == 6 else 30 for i in (0, 2, 4))
             dim = [f"lutrgb=r='val*0.45+{pr * 0.55:.1f}':g='val*0.45+{pg * 0.55:.1f}':b='val*0.45+{pb * 0.55:.1f}'",
                    "format=yuv420p"] if card_on else []
-            pre.append(f"[1:v]{','.join(_broll_chain(fps, w, top_h, br.get("hdr")) + dim)}[top]")
+            pre.append(_broll_graph("1:v", "top", br, fps, w, top_h, dim))
         else:
             pre.append(f"color=c=0x{panel}:s={w}x{top_h}:r={fps},format=yuv420p[top]")
-        speaker_tail = (f"[bg][sp]overlay=0:0:shortest=1[bot];" if gkey else "") + \
-                       f"[top][{'bot' if gkey else 'sp'}]vstack=inputs=2:shortest=1," \
+        speaker_tail = (f"[bg][sp]overlay=0:0:shortest=1[bot];" if gkey_bg else "") + \
+                       f"[top][{'bot' if gkey_bg else 'sp'}]vstack=inputs=2:shortest=1," \
                        f"drawbox=x=0:y={top_h - t // 2}:w={w}:h={t}:color=0x{seam}:t=fill,setsar=1"
         if br_where == "full":  # cutaway hides the whole frame; captions still go on top (post)
-            speaker_tail += f"[comp];[1:v]{','.join(_broll_chain(fps, w, h, br.get("hdr")))}[br];[comp][br]overlay=0:0:shortest=1"
+            speaker_tail += f"[comp];{_broll_graph('1:v', 'br', br, fps, w, h)};[comp][br]overlay=0:0:shortest=1"
+    elif half:
+        # you in one half of the screen (cover-cropped around your face), the B-roll in the other
+        bh = h // 2 // 2 * 2
+        sp_h = h - bh
+        sw0, sh0 = (src or {}).get("width") or 1080, (src or {}).get("height") or 1920
+
+        def geo(zz, sw0=sw0, sh0=sh0, sp_h=sp_h):
+            f = max(w / sw0, sp_h / sh0) * zz
+            S_w, S_h = int(sw0 * f) // 2 * 2, int(sh0 * f) // 2 * 2
+            cx = max(0, (S_w - w) // 2)
+            cy = int(min(max(0.0, float(settings.get("face_y", 0.27)) * S_h - 0.42 * sp_h), S_h - sp_h)) // 2 * 2
+            return [f"scale={S_w}:{S_h}", f"crop={w}:{sp_h}:{cx}:{cy}", "setsar=1"]
+        if settings.get("grade", True):
+            v.append("eq=brightness=0.03:contrast=1.04")
+        v.append(zoom_pieces(zw, geo, z) if zw else ",".join(geo(z)))
     else:
         def geo(zz):
             g = [f"crop=trunc(iw/{zz:.3f}/2)*2:trunc(ih/{zz:.3f}/2)*2"] if zz > 1.001 else []
@@ -1206,20 +1365,62 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
                         f"fontcolor=white:box=1:boxcolor=black@0.55:boxborderw={round(fs * 0.35)}:x=(w-text_w)/2:"
                         f"y={ty + i * round(fs * 1.55) + round(fs * 0.35)}")
 
+    fx = [f for e in (scene.get("effects") or []) if isinstance(e, str)
+          for f in library.effect_filters(e, w, h, fps, out_dur)]
+    post = fx + post
     inputs = ["-ss", f"{scene['in']:.3f}", "-t", f"{dur:.3f}", "-i", core.raw_dir(pid) / scene["src"]]
     in_idx = 1
     if br:
-        # input 1 = the B-roll, looped (a cutaway longer than the clip wraps around); its audio is never used
-        inputs += ["-ss", f"{float(br['at']):.3f}", "-stream_loop", "-1", "-i", Path(br["file"])]
+        # input 1 = the B-roll, looped (a cutaway longer than the clip wraps around); its audio is never used.
+        # A picture is held for the whole scene.
+        if br.get("still"):
+            inputs += ["-loop", "1", "-framerate", str(fps), "-i", Path(br["file"])]
+        else:
+            inputs += ["-ss", f"{float(br['at']):.3f}", "-stream_loop", "-1", "-i", Path(br["file"])]
         in_idx = 2
     if split:
-        graph = pre + [f"[0:v]{','.join(v)}[sp]", f"{speaker_tail}{(',' + ','.join(post)) if post else ''}[v0]"]
+        graph = pre + ([] if br_where == "bottom" else [f"[0:v]{','.join(v)}[sp]"]) + \
+            [f"{speaker_tail}{(',' + ','.join(post)) if post else ''}[v0]"]
+    elif half:
+        seam_c = (settings.get("highlight_color") or "#F97316").lstrip("#")
+        t = max(2, round(h * 0.0021)) // 2 * 2
+        bh = h // 2 // 2 * 2
+        y_seam = bh if br_where == "top" else h - bh
+        order = "[br][sp0]" if br_where == "top" else "[sp0][br]"
+        graph = [f"[0:v]{','.join(v)}[sp0]", _broll_graph("1:v", "br", br, fps, w, bh),
+                 f"{order}vstack=inputs=2:shortest=1,drawbox=x=0:y={y_seam - t // 2}:w={w}:h={t}:color=0x{seam_c}:t=fill,"
+                 f"setsar=1{(',' + ','.join(post)) if post else ''}[v0]"]
     elif br:
-        graph = [f"[0:v]{','.join(v)}[sp0]", f"[1:v]{','.join(_broll_chain(fps, w, h, br.get("hdr")))}[br]",
+        graph = [f"[0:v]{','.join(v)}[sp0]", _broll_graph("1:v", "br", br, fps, w, h),
                  f"[sp0][br]overlay=0:0:shortest=1{(',' + ','.join(post)) if post else ''}[v0]"]
     else:
         graph = [f"[0:v]{','.join(v + post)}[v0]"]
     vlabel = "v0"
+    for k, stk in enumerate(s for s in (scene.get("stickers") or []) if isinstance(s, dict)):
+        p = library.path_of(stk.get("file"))
+        if not p or not library.media_ok(p):
+            continue  # deleted / undecodable library file: the page warns, the render goes on without it
+        a = max(0.0, float(stk.get("at") or 0.0))
+        if a >= out_dur - 0.05:
+            continue  # the scene got shorter (trim / speed) – it would start after the scene ends
+        b = out_dur if not stk.get("dur") else min(out_dur, a + max(0.2, float(stk["dur"])))
+        size = max(16, round(w * min(0.9, max(0.05, float(stk.get("size") or 0.22)))) // 2 * 2)
+        cx, cy = library.STICKER_POS.get(stk.get("pos") or "top-right", library.STICKER_POS["top-right"])
+        anim = stk.get("anim") if stk.get("anim") in library.STICKER_ANIM else "pop"
+        y0 = f"{cy * h:.0f}-h/2"
+        y = {"pop": f"{y0}+{h * 0.035:.0f}*max(0\\,1-(t-{a:.3f})/0.25)",
+             "bounce": f"{y0}+{h * 0.012:.0f}*sin((t-{a:.3f})*6)"}.get(anim, y0)
+        if p.suffix.lower() == ".gif":
+            inputs += ["-ignore_loop", "0", "-i", p]
+        else:
+            inputs += ["-loop", "1", "-framerate", str(fps), "-i", p]
+        fades = (f",fade=t=in:st={a:.3f}:d=0.2:alpha=1" if anim != "still" else "") + \
+                (f",fade=t=out:st={max(a, b - 0.15):.3f}:d=0.15:alpha=1" if b < out_dur - 0.05 else "")
+        graph.append(f"[{in_idx}:v]fps={fps},format=rgba,scale={size}:-1{fades}[stk{k}]")
+        graph.append(f"[{vlabel}][stk{k}]overlay=x={cx * w:.0f}-w/2:y={y}:eval=frame:"
+                     f"enable='between(t,{a:.3f},{b:.3f})'[vst{k}]")
+        vlabel = f"vst{k}"
+        in_idx += 1
     logo = settings.get("logo")
     if logo and (core.BRAND / logo).exists():
         inputs += ["-i", core.BRAND / logo]
@@ -1332,7 +1533,10 @@ def with_broll(pid: str, data: dict, scenes: list[dict], cache: dict) -> list[di
             continue
         if b["src"] not in lens:
             s = core.source_by_file(data, b["src"]) or {}
-            lens[b["src"]] = float(s.get("duration") or probe(p).get("duration") or 0.0)
+            try:
+                lens[b["src"]] = 0.0 if core.is_still(p.name) else float(s.get("duration") or probe(p).get("duration") or 0.0)
+            except PipelineError:
+                lens[b["src"]] = 0.0
         clip_len = lens[b["src"]]
         at = b.get("at")
         try:
@@ -1341,9 +1545,11 @@ def with_broll(pid: str, data: dict, scenes: list[dict], cache: dict) -> list[di
             at = 0.0
         at = at % clip_len if clip_len > 0.2 else 0.0  # past the end: wrap (the input loops anyway)
         st = p.stat()
-        where = "top" if split and b.get("where", "top") == "top" else "full"
-        out.append(dict(sc, _broll={"file": str(p), "at": round(at, 3), "where": where, "sig": [st.st_size, st.st_mtime],
-                                         "hdr": is_hdr(p)}))
+        where = core.broll_where(b, split)
+        still = core.is_still(p.name)
+        out.append(dict(sc, _broll={"file": str(p), "at": 0.0 if still else round(at, 3), "where": where,
+                                         "sig": [st.st_size, st.st_mtime], "hdr": False if still else is_hdr(p),
+                                         "still": still, "fit": "fit" if b.get("fit") == "fit" else "fill"}))
         prev = b["src"]
         words, sil = cache.get(sc["src"], ([], []))
         t_next = at + estimated_duration(sc, sil, data["settings"])
@@ -1537,12 +1743,28 @@ def render_project(pid: str, preview: bool) -> Path:
     polish = bool(st.get("audio_polish", False))
     lufs = _num(st.get("loudness"), -16.0)
     duck = _num(st.get("duck_db"), 10.0)  # 0 is a valid choice ("don't duck") – no `or default` here
+    durs = [_video_len(sp) for sp in segs]
+    fx_join = wd / "joined_fx.part.mp4"
     try:
-        if music or polish:
+        core.set_job(pid, progress="Joining scenes")
+        has_fx = all(d > 0 for d in durs) and assemble(wd, scenes, segs, durs, fx_join,
+                                                       int(st.get("fps", 30) or 30), preview)
+    except PipelineError as e:
+        fx_join.unlink(missing_ok=True)
+        core.job_log(pid, f"Transitions / sound effects could not be added ({str(e).splitlines()[-1][:120]}) – "
+                          f"rendered without them")
+        has_fx = False
+    try:
+        if has_fx and not (music or polish):
+            os.replace(fx_join, tmp_out)
+        elif music or polish:
             joined = wd / "joined.part.mp4"
             try:
-                run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
-                     joined.name], cwd=wd)
+                if has_fx:
+                    os.replace(fx_join, joined)
+                else:
+                    run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
+                         joined.name], cwd=wd)
                 jdur = probe(joined)["duration"]
                 core.set_job(pid, progress="Mixing audio" + (" + music" if music else ""))
                 try:
@@ -1568,6 +1790,7 @@ def render_project(pid: str, preview: bool) -> Path:
             run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
                  "-movflags", "+faststart", tmp_out], cwd=wd)
     except BaseException:
+        fx_join.unlink(missing_ok=True)
         tmp_out.unlink(missing_ok=True)  # never leave a half-written file in Exports
         tmp_out.with_name(tmp_out.stem + "2.mp4").unlink(missing_ok=True)
         raise
@@ -1576,10 +1799,8 @@ def render_project(pid: str, preview: bool) -> Path:
     _prune_segments(wd, "preview" if preview else "final", segs)
     # REAL scene start/length in this file (the page's playhead/scene jumps; estimates drift by frames per scene)
     times, t = [], 0.0
-    for sc, sp in zip(scenes, segs):
-        try:
-            d_ = float(probe(sp)["duration"] or 0)
-        except Exception:  # noqa: BLE001 – timing info is a nicety, never fail a finished render for it
+    for sc, d_ in zip(scenes, durs):
+        if d_ <= 0:  # timing info is a nicety, never fail a finished render for it
             times = None
             break
         times.append([sc["id"], round(t, 3), round(d_, 3)])
@@ -1589,6 +1810,11 @@ def render_project(pid: str, preview: bool) -> Path:
         d.setdefault("renders", []).append({"kind": "preview" if preview else "final", "file": out.name,
                                             "created": core.now_iso(), "duration": dur, "size": f"{w}x{h}",
                                             "sig": sig, "times": times})
-        d["renders"] = d["renders"][-30:]
+        # keep EVERY final export's record (the Exports page lists them) – auto-preview adds a record per edit and a
+        # plain "last 30" made finals vanish from the page after ~30 edits; previews: only the last 5 matter
+        rs = d["renders"]
+        fin = [r for r in rs if r.get("kind") == "final"][-200:]
+        pv = [r for r in rs if r.get("kind") != "final"][-5:]
+        d["renders"] = [r for r in rs if r in fin or r in pv]
     core.mutate(pid, fn)
     return out

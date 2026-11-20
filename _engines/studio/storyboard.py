@@ -146,10 +146,10 @@ def _build(pid: str, creative: dict | None = None) -> dict:
         av = assets(pid) + [s["file"] for s in data["sources"] if s["file"] != sc["src"]]
         if cr.get("broll"):
             ok = cr["broll"].get("file") in av
-            where = cr["broll"].get("where") if cr["broll"].get("where") in ("top", "full") else None  # None = follow the look
+            where = cr["broll"].get("where") if cr["broll"].get("where") in core.BROLL_WHERE else None  # None = follow the look
             items.append({"id": "broll", "type": "broll", "file": cr["broll"].get("file") if ok else None,
                           "want": cr["broll"].get("want", ""), "where": where,
-                          "label": (f"B-roll cutaway: {cr['broll']['file']} ({'full screen' if where == 'full' else 'top panel' if where else 'placed by the look'})"
+                          "label": (f"B-roll cutaway: {cr['broll']['file']} ({'full screen' if where == 'full' else 'bottom' if where == 'bottom' else 'top' if where else 'placed by the look'})"
                                     f" – voice keeps playing" if ok else
                                     f"B-roll slot: {cr['broll'].get('want', '')} – no Assets file yet, card stands in"),
                           "default": ok})

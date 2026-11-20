@@ -18,6 +18,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import commands
 import core
 import hinglish
+import library
 import pipeline
 import storyboard
 
@@ -211,12 +212,25 @@ def _decorate(data: dict) -> dict:
         if b:
             ok = core.broll_path(data["id"], data, b.get("src")) is not None and b.get("src") != sc["src"]
             src_b = core.source_by_file(data, b.get("src"))
-            sc["broll_view"] = {"src": b.get("src"), "where": "top" if split and b.get("where", "top") == "top" else "full",
-                                "at": b.get("at"), "ok": ok,
+            sc["broll_view"] = {"src": b.get("src"), "where": core.broll_where(b, split), "chosen": b.get("where") in core.BROLL_WHERE,
+                                "fit": "fit" if b.get("fit") == "fit" else "fill",
+                                "at": b.get("at"), "ok": ok, "still": core.is_still(b.get("src") or ""),
                                 "why": "" if ok else ("this clip is set to Skip in Footage" if src_b and src_b.get("include") is False
                                                       else "the file is missing")}
         else:
             sc.pop("broll_view", None)
+        def _bad(x):  # gone from the Library, or a file ffmpeg can't read (cached check)
+            pth = library.path_of(x.get("file"))
+            return not pth or not library.media_ok(pth)
+        lib_missing = [x.get("name") or x.get("file") for x in (sc.get("stickers") or []) + (sc.get("sfx") or [])
+                       if isinstance(x, dict) and _bad(x)]
+        tr_s = (sc.get("transition") or {}).get("sound") if isinstance(sc.get("transition"), dict) else None
+        if isinstance(tr_s, dict) and _bad(tr_s):
+            lib_missing.append(tr_s.get("name"))
+        if lib_missing:
+            sc["lib_missing"] = lib_missing
+        else:
+            sc.pop("lib_missing", None)
         ps = per_src.setdefault(sc["src"], {"scenes": 0, "kept": 0, "est": 0.0, "thumb": sc.get("thumb")})
         ps["scenes"] += 1
         ps["kept"] += 1 if sc.get("keep", True) else 0
@@ -248,6 +262,15 @@ def _decorate(data: dict) -> dict:
                             "used_by": used.get(f, []),
                             "thumb": next((x.get("thumb") for x in data["scenes"] if x["src"] == f), None)}
                            for f in commands.broll_clips(data)]
+    # uploaded B-roll (Raw Footage/<pid>/Assets): pictures and videos that only ever show OVER scenes
+    adir, meta = core.assets_dir(data["id"]), data.get("assets") or {}
+    thumbs = core.project_dir(data["id"]) / "work" / "thumbs"
+    data["broll_assets"] = [{"file": p.name, "still": core.is_still(p.name), "duration": (meta.get(p.name) or {}).get("duration"),
+                             "used_by": used.get(p.name, []),
+                             "thumb": _asset_thumb_name(p.name) if (thumbs / _asset_thumb_name(p.name)).is_file() else None}
+                            for p in (sorted(adir.iterdir(), key=lambda p: p.name.lower()) if adir.is_dir() else [])
+                            if p.is_file() and not p.name.startswith(".") and p.suffix.lower() in BROLL_EXT
+                            and not core.source_by_file(data, p.name)]
     raw = core.raw_dir(data["id"])
     for s in data["sources"]:
         ps = per_src.get(s["file"], {})
@@ -311,6 +334,7 @@ def media(pid, area, name):
     base = {
         "raw": core.RAW / pid, "refs": core.REFS / pid, "work": work, "proxy": work / "proxy",
         "thumbs": work / "thumbs", "sheets": work / "refs", "exports": core.EXPORTS, "brand": core.BRAND,
+        "library": library.LIB,
     }.get(area)
     if base is None:
         abort(404)
@@ -318,7 +342,9 @@ def media(pid, area, name):
     if not p.is_relative_to(base.resolve()) or not p.is_file():
         abort(404)
     resp = send_file(p, conditional=True)
-    resp.headers["Cache-Control"] = "no-cache"
+    # library files (1,600 sticker pictures, 64 preview clips) are re-drawn on every Inspector change: let the browser
+    # keep them a day instead of re-asking for each one every time; everything else may change any moment
+    resp.headers["Cache-Control"] = "max-age=86400" if area == "library" else "no-cache"
     return resp
 
 
@@ -346,6 +372,43 @@ def api_project(pid):
         return jsonify(error=str(e), damaged=True), 500
 
 
+# ----------------------------------------------------------------- Library (transitions, effects, stickers, sounds)
+_LIBSETUP = {"running": False, "log": []}
+
+
+@app.get("/api/library")
+def api_library():
+    cat = library.catalog()
+    return jsonify(dict(cat, setup=dict(_LIBSETUP, log=_LIBSETUP["log"][-6:])))
+
+
+@app.post("/api/library/setup")
+def api_library_setup():
+    """Download the free packs (stickers + sounds) and make previews – in the background, once at a time."""
+    if _LIBSETUP["running"]:
+        return jsonify(ok=True, already=True)
+    _LIBSETUP.update(running=True, log=["Starting…"])
+
+    def work():
+        try:
+            library.setup(log=lambda m: _LIBSETUP["log"].append(str(m)))
+        except Exception as e:  # noqa: BLE001
+            _LIBSETUP["log"].append(f"Failed: {e}")
+        finally:
+            _LIBSETUP["running"] = False
+    threading.Thread(target=work, daemon=True).start()
+    return jsonify(ok=True)
+
+
+@app.post("/api/library/open")
+def api_library_open():
+    library.MY_STICKERS.mkdir(parents=True, exist_ok=True)
+    library.MY_SOUNDS.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        os.startfile(library.LIB)  # local convenience – app is bound to 127.0.0.1 only
+    return jsonify(ok=True)
+
+
 @app.get("/api/brandkit")
 def api_brandkit():
     core.BRAND.mkdir(exist_ok=True)
@@ -359,6 +422,8 @@ def api_upload(pid):
     files = request.files.getlist("files")
     if not files:
         return jsonify(error="No files received."), 400
+    if kind == "broll":
+        return _upload_broll(pid, files[0], request.args.get("scene") or None)
     folder = core.raw_dir(pid) if kind == "source" else core.refs_dir(pid)
     saved, skipped, dupes = [], [], []
     # camera files arrive in any order from a multi-select: add them in natural name order (C0002 before C0010)
@@ -417,6 +482,141 @@ def api_upload(pid):
     else:
         enqueue(pid, "ref_analyze", files=saved)
     return jsonify(saved=saved, skipped=skipped, duplicates=dupes)
+
+
+BROLL_EXT = core.VIDEO_EXT | core.IMAGE_EXT
+
+
+def _asset_thumb_name(name: str) -> str:
+    import hashlib
+    return f"asset_{hashlib.sha1(name.encode()).hexdigest()[:12]}.jpg"
+
+
+def _upload_broll(pid: str, f, sid: str | None):
+    """A video or picture uploaded for ONE scene's B-roll. Saved in Raw Footage/<pid>/Assets (not footage: it is
+    never analysed, adds no scenes, no captions). The same file uploaded again is reused, not stored twice.
+    With `sid`, that scene is covered with it right away (one undo step; its top/bottom/full choice is kept)."""
+    name = core.safe_filename(f.filename or "broll")
+    stem, ext = os.path.splitext(name)
+    ext = ext.lower()
+    if ext not in BROLL_EXT:
+        return jsonify(error=f"“{name}” can't be B-roll – use a video ({', '.join(sorted(core.VIDEO_EXT))}) "
+                             f"or a picture ({', '.join(sorted(core.IMAGE_EXT))})."), 400
+    folder = core.assets_dir(pid)
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / f".upload-{core.new_id('u')}{ext}"
+    try:
+        f.save(tmp)
+    except OSError as e:
+        tmp.unlink(missing_ok=True)
+        return jsonify(error=f"Could not save {name}: {e.strerror or e}. Is the disk full?"), 507
+    if tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
+        return jsonify(error=f"“{name}” is empty (0 bytes)."), 400
+    fp, reused, dest = _fingerprint(tmp), False, None
+    for p in folder.iterdir():  # same file uploaded before (any name): reuse it
+        if p.is_file() and p != tmp and not p.name.startswith(".") and p.stat().st_size == tmp.stat().st_size \
+                and _fingerprint(p) == fp:
+            tmp.unlink(missing_ok=True)
+            dest, reused = p, True
+            break
+    if dest is None:
+        d0 = core.load(pid)
+        taken = {s["file"].lower() for s in d0["sources"]}  # a footage clip of the same name would win the lookup
+        if name.lower() in taken:
+            name = f"{stem} (B-roll){ext}"
+        dest = core.unique_path(folder, name)
+        tmp.replace(dest)
+    try:
+        meta = pipeline.probe(dest)
+    except Exception:
+        meta = {}
+    if not meta.get("has_video") or not meta.get("width"):
+        if not reused:
+            dest.unlink(missing_ok=True)
+        return jsonify(error=f"Can't read a picture from “{name}” – is it damaged, or a sound-only file?"), 400
+    still = core.is_still(dest.name)
+    info = {"duration": 0.0 if still else meta.get("duration"), "width": meta["width"], "height": meta["height"],
+            "still": still, "hdr": False if still else pipeline.is_hdr(dest)}
+    try:
+        (core.work_dir(pid) / "thumbs").mkdir(parents=True, exist_ok=True)
+        pipeline.thumbnail(dest, 0.0 if still else min(1.0, (meta.get("duration") or 0) * 0.1),
+                           core.work_dir(pid) / "thumbs" / _asset_thumb_name(dest.name))
+    except Exception:
+        pass
+    res = {"file": dest.name, "reused": reused, **info}
+
+    def fn(d):
+        d.setdefault("assets", {})[dest.name] = info
+        if not sid:
+            return
+        sc = core.scene_by_id(d, sid)
+        if sc is None:
+            res["note"] = "The scene no longer exists – the file is saved; pick it under B-roll on another scene."
+            return
+        if sc.get("role") == "broll":
+            res["note"] = "That scene IS B-roll footage – pick a speaker scene to cover it."
+            return
+        core.snapshot(pid, d)
+        old = sc.get("broll") if isinstance(sc.get("broll"), dict) else {}
+        sc["broll"] = {"src": dest.name, **({"where": old["where"]} if old.get("where") else {}),
+                       **({"fit": "fit"} if old.get("fit") == "fit" else {})}
+        split = d["settings"].get("layout") == "split"
+        no = d["scenes"].index(sc) + 1
+        res["reply"] = (f'B-roll "{dest.name}" over scene {no} ({commands._where_txt(core.broll_where(sc["broll"], split), split)})'
+                        f' – your voice keeps playing.' + (" (Same file as before – reused, not stored twice.)" if reused else ""))
+        d["commands"].append({"id": core.new_id("cmd"), "scene": sid, "scene_no": no, "text": f"upload B-roll: {dest.name}",
+                              "status": "done", "reply": res["reply"], "by": "studio", "created": core.now_iso()})
+        _cap_commands(d)
+    core.mutate(pid, fn)
+    return jsonify(res)
+
+
+@app.post("/api/projects/<pid>/broll_asset/remove")
+def api_broll_asset_remove(pid):
+    """Remove an uploaded B-roll file from the project. Scenes using it lose that B-roll (ONE undo step). The file goes
+    to Assets/.trash, so Undo shows it again; trash older than 30 days is cleaned up here."""
+    _exists(pid)
+    name = str((request.json or {}).get("file") or "")
+    folder = core.assets_dir(pid)
+    p = folder / Path(name).name
+    if not name or Path(name).name != name or name.startswith(".") or not p.is_file():
+        return jsonify(error="That upload no longer exists."), 404
+    d0 = core.load(pid)
+    if core.source_by_file(d0, name):
+        return jsonify(error="That is a footage clip – remove it in the Footage tab."), 400
+    trash = folder / ".trash"
+    trash.mkdir(exist_ok=True)
+    dest = trash / name
+    try:
+        if dest.exists():
+            dest.unlink()
+        p.replace(dest)
+    except OSError:
+        return jsonify(error=f"“{name}” is in use (a render may be reading it) – try again in a moment."), 409
+    import time as _t
+    for old in trash.iterdir():  # purge long-gone uploads
+        try:
+            if old.is_file() and _t.time() - old.stat().st_mtime > 30 * 86400:
+                old.unlink()
+        except OSError:
+            pass
+    os.utime(dest)  # its 30 days start now
+    res = {}
+
+    def fn(d):
+        users = [s for s in d["scenes"] if isinstance(s.get("broll"), dict) and s["broll"].get("src") == name]
+        core.snapshot(pid, d, restore_assets=[name])  # undo moves the file back out of the trash
+        for s in users:
+            s.pop("broll", None)
+        nos = [d["scenes"].index(s) + 1 for s in users]
+        res["reply"] = f"Removed “{name}” from the project." + (
+            f" Scene(s) {', '.join(map(str, nos))} no longer show it." if nos else "") + " (Undo brings it back.)"
+        d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "text": f"remove upload: {name}",
+                              "status": "done", "reply": res["reply"], "by": "studio", "created": core.now_iso()})
+        _cap_commands(d)
+    core.mutate(pid, fn)
+    return jsonify(ok=True, reply=res["reply"])
 
 
 def _natural_key(name: str):
@@ -805,7 +1005,8 @@ def api_command(pid):
                                   "text": "; ".join(unhandled), "status": "claude", "reply": "",
                                   "by": None, "created": core.now_iso()})
         _cap_commands(d)
-        return {"replies": replies, "queued": unhandled}
+        return {"replies": replies, "queued": unhandled,
+                "new": [s["id"] for s in d["scenes"] if s["id"] in new_ids]}  # in timeline order (paste/split select it)
     _, result = core.mutate(pid, fn)
     if result.get("error"):
         return jsonify(result), 400
@@ -984,8 +1185,10 @@ def api_broll(pid):
                 res["error"] = f'No clip called "{src}".'
                 return
             e = {"src": src if core.source_by_file(d, src) else Path(src).name}
-            if b.get("where") in ("top", "full"):
+            if b.get("where") in core.BROLL_WHERE:
                 e["where"] = b["where"]
+            if b.get("fit") == "fit":
+                e["fit"] = "fit"
             if b.get("at") is not None:
                 try:
                     e["at"] = round(max(0.0, float(b["at"])), 2)
@@ -1102,6 +1305,14 @@ def api_undo(pid):
         if not snap:
             return False
         d["scenes"], d["settings"] = snap["scenes"], snap["settings"]
+        # a clip removed in Footage: its scenes come back above – its entry (audio, size, analysis) must come back too,
+        # else those scenes render silent and the clip is missing from Footage. Clips added since are kept.
+        have = {s["file"] for s in d["sources"]}
+        used = {s["src"] for s in d["scenes"]}
+        for s in snap.get("sources") or []:
+            if s.get("file") not in have and s.get("file") in used:
+                d["sources"].append(s)
+        core.untrash_assets(pid, d, snap.get("restore_assets"))
         d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "text": "undo",
                               "status": "done", "reply": f"Restored state from {snap['at'][11:]}.", "by": "studio",
                               "created": core.now_iso()})

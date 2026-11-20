@@ -23,7 +23,7 @@ Devanagari or misheard (एक्सपेक्टेट, पॉल्ड). Use
 `spell X as -` hides a word). Spellings apply in both scripts and are per project (settings.caption_fixes).
 For ADDING words to the built-in dictionary for every future project, edit `BUILTIN` in hinglish.py.
 
-BRAND KIT + CARDS: the approved profile is `Brand Kit\brand-kit.md` (+ `brand-kit.json`, applied to new projects;
+BRAND KIT + CARDS: the approved profile is `Brand Kit\brand-kit.md` (+ `brand-kit.json`; new projects start on look "none" – the user picks ★ Brand Kit/R1 in Scenes → Look;
 `POST /api/projects/<pid>/apply_brand` for old ones). Split layout = cards on top: per scene
 `cmd <pid> <n> "card: title text with *keyword*"` / `"card: number 2x+ | label"` / `"card: chart 1,2,3 | label"` /
 `"card off"`; a scene without a card keeps the previous one. Card text in Hinglish, 2-5 words, ONE orange *keyword*,
@@ -40,10 +40,12 @@ word cut on the audio first: whisper word times inside fast speech can be off 0.
 with context; micro-silences inside words like "apne" are NOT word gaps). Never render before the user's feedback.
 
 B-ROLL CUTAWAYS: scene["role"]="broll" = footage that never plays alone (opt-in only since 2026-11-19: no-speech clips stay normal scenes, captions off);
-a speaker scene's `broll` = {"src": clip file or Assets/<name>, "where": "top"|"full" (omit = follow the look: split ->
-top panel, else full screen), "at": seconds (omit = continue the previous scene's footage)}. Voice keeps playing, B-roll
-is silent and adds no length. Commands: `broll <clip>`, `broll top|full`, `broll from 3`, `broll continue`, `broll off`,
-`role broll|speaker`, whole-video `broll auto|off|top|full`. Storyboard plan "broll": {"file": <project clip or Assets
+a speaker scene's `broll` = {"src": clip file or Assets/<name>, "where": "top"|"bottom"|"full" (omit = follow the look: split ->
+top panel, else full screen; split: top = card panel, bottom = over the speaker, card stays; full layout: top/bottom =
+that half, speaker in the other half). Pictures (png/jpg…) work too (held for the scene). "fit": "fit" = whole picture over a blurred copy (omit = fill/crop; `broll fit|fill`). Deleting an upload (`broll_asset/remove`) moves it to Assets/.trash (undo restores). The page uploads B-roll
+straight into Raw Footage/<pid>/Assets (`upload?kind=broll&scene=<id>`, same file reused), "at": seconds (omit = continue the previous scene's footage)}. Voice keeps playing, B-roll
+is silent and adds no length. Commands: `broll <clip>`, `broll top|bottom|full|layout`, `broll from 3`, `broll continue`, `broll off`,
+`role broll|speaker`, whole-video `broll auto|off|top|bottom|full`. Storyboard plan "broll": {"file": <project clip or Assets
 file>, "want": ..., "where": optional} -> applied as a cutaway. Absolute trims: `trim start to 0.4` / `trim end to 0.2`
 (from the original edges); `captions auto`, `silences auto`.
 
@@ -73,3 +75,14 @@ NO_TELEMETRY / NO_UPDATE_CHECK = 1 are set; its skills live in `D:\Claude_Video_
 
 Rules: project.json is shared with the running UI — always go through studio_cli.py / core.mutate (locks + atomic
 write), never hand-edit while the server runs. RAM is tight (7 GB): one render at a time.
+
+LIBRARY (library.py, folder <root>/Library, never in git): transitions (ffmpeg xfade ids in library.TRANSITIONS), effects
+(library.EFFECTS recipes), stickers (Microsoft Fluent Emoji 3D, MIT + Library/Stickers/My stickers), sounds (Wyzowl SFX Kit,
+CC0, with sync points + levels, + Library/Sounds/My sounds). `python library.py setup` downloads/repairs it.
+Scene keys: "transition" {type, dur, sound} = INTO this scene (length-neutral: outgoing last frame held, voice cut stays);
+"effects" [ids]; "stickers" [{file, name, at, dur, pos, size, anim}]; "sfx" [{file, name, at, vol, sync, gain_db}]
+(sound starts at at - sync so its hit lands at `at`). Commands: `transition <name> [0.5]`, `transition off|sound on|off`,
+whole video `transitions <name>|off`; `effect <name>`, `effect remove <name>`, `effects off`; `sticker <id> at 1 for 2
+top-right size 30% pop`, `sticker N <opts>`, `sticker remove N`; `sfx <id> at 0.5 vol 80%`, `sfx N <opts>`, `sfx remove N`.
+Transitions + sounds are added when the segments are joined (pipeline.assemble); a failure there renders without them
+and logs it. Effects + stickers are per segment (cache key includes the sticker files).

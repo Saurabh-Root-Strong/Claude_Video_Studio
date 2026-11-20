@@ -224,8 +224,13 @@ foreach ($d in 'Raw Footage', 'References', 'Storyboards', 'Exports', 'Brand Kit
 }
 Ok 'Raw Footage, References, Storyboards, Exports, Brand Kit'
 
+# ---------------------------------------------------------------- Library (stickers + sound effects, ~120 MB, free licences)
+Step 'Library: 1,600 3D stickers (Microsoft Fluent Emoji, MIT) + 320 sound effects (Wyzowl SFX Kit, CC0)'
+Push-Location $Studio
+try { & $VenvPy library.py setup; if ($LASTEXITCODE -ne 0) { Write-Host '   Library not complete - the studio works without it; run Setup again later.' -ForegroundColor Yellow } else { Ok 'Library ready' } } finally { Pop-Location }
+
 if ($RunTests) {
-    Step 'Self-test (23 checks)'
+    Step 'Self-test'
     Push-Location $Studio
     try { & $VenvPy selftest.py; $code = $LASTEXITCODE } finally { Pop-Location }
     if ($code -ne 0) { throw 'Self-test failed - see the FAIL lines above.' }

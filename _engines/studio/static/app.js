@@ -109,7 +109,7 @@ function renderAll() {
   renderBrief();
   if (changed("scenes", [P.scenes, P.settings, P.storyboard, P.commands.filter((c) => c.status === "claude").map((c) => c.scene), selected])) renderScenes();
   if (changed("detail", [curScene(), P.commands.length, P.commands.map((c) => c.status).join(), P.settings.layout,
-    P.settings.remove_silence, P.broll_clips, P.sources.map((s) => s.file)])) renderDetail();
+    P.settings.remove_silence, P.settings.captions, P.settings.split_ratio, P.broll_clips, P.broll_assets, P.sources.map((s) => s.file)])) renderDetail();
   if (changed("renders", P.renders)) {
     renderRenders();
     // a render just finished while the page was open -> show it in the player
@@ -604,7 +604,9 @@ async function switchLook(id) {
   try {
     const r = await api(`/api/projects/${PID}/style_source`, { method: "POST", body: { source: id } });
     lastSig.refs = null; await refresh(true);
-    toast(`The video now uses ${lookName(id)}.${r.notes && r.notes.length ? " " + r.notes.join(", ") + "." : ""} Click ▶ Edited view to see it. (Undo reverts.)`);
+    toast(`The video now uses ${lookName(id)}.${r.notes && r.notes.length ? " " + r.notes.join(", ") + "." : ""} The edited view updates by itself. (Undo reverts.)`);
+    SHOW = { sid: selected, switchView: true, at: Date.now() };  // a look is only visible in the edited view
+    loadPlayer(false); autoPreviewTick(); renderPvBadge();
   } catch (e) { toast(e.message, true); renderLookPick(); }
 }
 $("#lookSelect").onchange = (e) => switchLook(e.target.value);
@@ -817,7 +819,7 @@ $("#planBtn").onclick = async () => {
 function sceneBadges(s) {
   const b = [];
   if (s.role === "broll") b.push(`<span class="badge broll" title="B-roll footage: covers speaker scenes, not played on its own">B-ROLL</span>`);
-  if (s.broll_view) b.push(`<span class="badge ${s.broll_view.ok ? "broll" : "warn"}" title="${esc(s.broll_view.src)}">🎞 ${s.broll_view.where === "full" ? "full" : "top"}</span>`);
+  if (s.broll_view) b.push(`<span class="badge ${s.broll_view.ok ? "broll" : "warn"}" title="${esc(s.broll_view.src)}">🎞 ${s.broll_view.where}</span>`);
   if (!s.keep) b.push(`<span class="badge cut">CUT</span>`);
   if (s.speed && s.speed !== 1) b.push(`<span class="badge acc">${s.speed}x</span>`);
   if (s.mute) b.push(`<span class="badge">muted</span>`);
@@ -825,6 +827,11 @@ function sceneBadges(s) {
   if (s.zoom && s.zoom > 1) b.push(`<span class="badge acc">zoom ${s.zoom}x</span>`);
   if ((s.punches || []).length) b.push(`<span class="badge acc" title="Zoom moments (punch-ins) inside this scene">🔍 ${s.punches.length}</span>`);
   if (s.text) b.push(`<span class="badge acc">text</span>`);
+  if (s.transition) b.push(`<span class="badge acc" title="Transition into this scene">⇄ ${esc((LIBCAT?.transitions || []).find((t) => t.id === s.transition.type)?.name || s.transition.type)}</span>`);
+  if ((s.effects || []).length) b.push(`<span class="badge acc" title="Effects">✨ ${s.effects.length}</span>`);
+  if ((s.stickers || []).length) b.push(`<span class="badge acc" title="Stickers">🙂 ${s.stickers.length}</span>`);
+  if ((s.sfx || []).length) b.push(`<span class="badge acc" title="Sound effects">🔊 ${s.sfx.length}</span>`);
+  if ((s.lib_missing || []).length) b.push(`<span class="badge warn" title="Missing from the Library or can't be read – left out of the video: ${esc(s.lib_missing.join(", "))}">⚠ library file missing</span>`);
   if (s.card && s.card.kind !== "none") b.push(`<span class="badge acc">${esc(s.card.kind)} card</span>`);
   if (s.captions === false) b.push(s.captions_auto_off ? `<span class="badge" title="No speech detected (music / ambient sound) – captions switched off automatically. Type 'captions on' to bring them back.">no speech · captions off</span>` : `<span class="badge">no captions</span>`);
   else if (s.no_speech) b.push(`<span class="badge warn" title="Very few words for its length – maybe music or noise. You turned captions on for it.">few words</span>`);
@@ -896,16 +903,211 @@ const ITIP = {
     "1.3": "Close-up 30 % – strong emphasis on your face.", "1.5": "Tight close-up 50 % – very dramatic, can look soft on low-resolution footage." },
   captions: { auto: "Follow the whole video: captions on, except scenes with no speech (those turn off by themselves).",
     on: "Always show captions in this scene.", off: "Never show captions in this scene (e.g. when a card or B-roll already says it)." },
-  cappos: { auto: "Use the look's position. Split layout: on the line between the card and you, just above your head.",
+  cappos: { auto: "Follow the whole video: its exact height if you set one (the % box), else the look's position (split layout: on the line above your head, ≈ 44 %).",
     head: "Captions high – over your head (split layout: just under the line, on your forehead/hair). Use when something important is low.",
     center: "Captions in the middle of the picture – most eye-catching, but can cover your face.",
     below: "Captions low – near the bottom of the screen, under your chest. Keeps your face clear." },
   pauses: { auto: "Follow the whole-video setting for cutting pauses (shown on the right).",
     cut: "Cut the silent pauses out of this scene – jump cuts, faster pace.", keep: "Keep every pause in this scene – natural, calm pace." },
-  bwhere: { top: "Show the B-roll in the top panel (card area); you stay visible below.", full: "Show the B-roll over the whole screen; your voice keeps playing." },
+  bwhere: { top: "Top: split layout = the top panel (card area), you stay visible below. Full screen layout = the top half of the screen, you in the bottom half.",
+    bottom: "Bottom: split layout = over YOU in the bottom panel, the card stays on top. Full screen layout = the bottom half, you in the top half.",
+    full: "Show the B-roll over the whole screen (hides you and the card); your voice keeps playing." },
+  bfit: { fill: "Fill its space – edges are cut off if the shape differs (a wide video in a tall space loses its sides).",
+    fit: "Show the WHOLE picture – nothing cut off; the empty space is a soft blurred copy of it, not black bars. Best for charts and screenshots." },
+  bcaps: { on: "Captions shown on top of the B-roll in this scene.", off: "No captions in this scene (the B-roll stays clean)." },
   role: { speaker: "Normal scene: plays in the video with its picture and sound.",
     broll: "Take this scene OUT of the video and use its picture only as B-roll over other scenes. Its own sound is not heard." },
 };
+// caption height in % from the top – mirrors pipeline.caption_center_y / caption_band (for the number box + mini map)
+function capPctOf(s, cp) {
+  const split = P.settings.layout === "split", seam = (+P.settings.split_ratio || 0.44) * 100;
+  if (typeof cp === "number") return cp;
+  if (cp === "auto" && typeof P.settings.caption_y === "number") return P.settings.caption_y;  // the video's exact height
+  if (split) return { auto: seam, head: seam + (100 - seam) * 0.16, center: seam + (100 - seam) / 2, below: 78 }[cp] ?? seam;
+  if (cp === "head") return 22; if (cp === "center") return 50; if (cp === "below") return 78;
+  return { bottom: 75, center: 50, top: 25 }[P.settings.caption_position || "bottom"];
+}
+function capMini(s) {  // tiny phone: card area, Reels-covered bottom, where the captions are
+  const split = P.settings.layout === "split", seam = (+P.settings.split_ratio || 0.44) * 100;
+  const y = capPctOf(s, s.cap_pos || "auto");
+  return `<span class="capmini" data-tip="Where the captions sit on the phone screen. Dark blue = top card, red = covered by the Reels/Shorts caption + buttons.">
+    ${split ? `<i class="cm-card" style="height:${seam}%"></i>` : ""}<i class="cm-ui"></i><i class="cm-cap" style="top:${y}%"></i></span>`;
+}
+// tiny phone: where the B-roll covers the screen (orange) – split layout shows the card panel line
+function brMini(where, split) {
+  const seam = split ? (+P.settings.split_ratio || 0.44) * 100 : 50;
+  const [t, hgt] = where === "full" ? [0, 100] : where === "top" ? [0, seam] : [seam, 100 - seam];
+  return `<span class="capmini brmini" data-tip="Orange = where the B-roll shows on the phone screen."><i class="cm-br" style="top:${t}%;height:${hgt}%"></i>${where !== "full" ? `<i class="cm-seam" style="top:${seam}%"></i>` : ""}</span>`;
+}
+// upload a B-roll video/picture for one scene (kept in the project's Assets; the same file twice is reused)
+let BRUP = null, BRMANAGE = false;
+async function deleteBrollAsset(file) {
+  const a = (P.broll_assets || []).find((x) => x.file === file);
+  if (!a) return;
+  if (!confirm(`Delete “${file}” from this project?${a.used_by.length ? `\nScene ${rangeTxt(a.used_by)} will no longer show it (you show there again).` : ""}\n(Undo brings it back.)`)) return;
+  try {
+    const r = await api(`/api/projects/${PID}/broll_asset/remove`, { method: "POST", body: { file } });
+    toast(r.reply);
+    await refresh(true); loadPlayer(false); autoPreviewTick(); renderPvBadge();
+  } catch (e) { toast(e.message, true); }
+}
+function uploadBroll(file, sid) {
+  if (BRUP) return toast("One upload at a time – wait for the current one to finish.", true);
+  const fd = new FormData(); fd.append("files", file);
+  BRUP = { sid, pct: 0 };
+  const show = () => { const el = $("#brUpProg"); if (el && selected === sid) el.textContent = BRUP ? `uploading ${BRUP.pct} %…` : ""; };
+  show();
+  const x = new XMLHttpRequest();
+  x.open("POST", `/api/projects/${PID}/upload?kind=broll&scene=${encodeURIComponent(sid)}`);
+  x.upload.onprogress = (e) => { if (e.lengthComputable && BRUP) { BRUP.pct = Math.round((100 * e.loaded) / e.total); show(); } };
+  const done = async (ok, j) => {
+    BRUP = null; show();
+    if (!ok) return toast(j.error || "Upload failed – is the black Start Studio window still open?", true);
+    toast(j.reply || j.note || `Uploaded ${j.file}.`, !!j.note);
+    if (j.reply) SHOW = { sid, switchView: true, at: Date.now() };
+    await refresh(true); loadPlayer(false); autoPreviewTick(); renderPvBadge();
+  };
+  x.onload = () => { let j = {}; try { j = JSON.parse(x.responseText); } catch {} done(x.status < 400, j); };
+  x.onerror = () => done(false, {});
+  x.send(fd);
+}
+/* ---- ✨ LIBRARY: transitions, effects, stickers, sound effects for the selected scene (Library/ folder on disk).
+   Every click sends a normal scene command (undoable, in the history, same grammar for Claude / the CLI). */
+let LIBCAT = null, LIBTAB = store.get("cve.libtab") || "transition", LIBPOLL = null;
+const LIBQ = { sticker: "", sgroup: "picks", sound: "", scat: "whooshes" };
+let LIBAUDIO = null;
+async function loadLib(force) {
+  if (!LIBCAT || force) { try { LIBCAT = await api("/api/library"); } catch { LIBCAT = null; } }
+  return LIBCAT;
+}
+function libPlay(file, btn) {
+  if (!LIBAUDIO) LIBAUDIO = new Audio();
+  const url = media("library", file);
+  if (!LIBAUDIO.paused && LIBAUDIO.dataset.f === file) { LIBAUDIO.pause(); if (btn) btn.textContent = "▶"; return; }
+  $$("[data-play]").forEach((b) => (b.textContent = "▶"));
+  LIBAUDIO.src = url; LIBAUDIO.dataset.f = file; LIBAUDIO.play().catch(() => toast("Can't play this sound in the browser.", true));
+  if (btn) { btn.textContent = "■"; LIBAUDIO.onended = () => (btn.textContent = "▶"); }
+}
+function libTile(kind, it, active) {
+  return `<button class="libtile ${active ? "on" : ""}" data-lib="${kind}" data-id="${esc(it.id)}" data-tip="${esc(it.desc || it.name)}${active ? " (click to remove)" : ""}">
+    ${it.preview ? `<video muted loop playsinline preload="metadata" src="${media("library", it.preview)}#t=0.9"></video>` : `<i class="noprev">${kind === "transition" ? "⇄" : "✨"}</i>`}<span>${esc(it.name)}</span></button>`;
+}
+function renderLibSection(s) {
+  const box = $("#libSec"); if (!box) return;
+  const head = (inner) => `<div class="ilab hastip" data-tip="Transitions, effects, stickers and sound effects from your Library folder (free packs: Microsoft Fluent Emoji – MIT, Wyzowl SFX Kit – CC0). Your own: put PNG/GIF in Library\\Stickers\\My stickers, WAV/MP3 in Library\\Sounds\\My sounds.">✨ Library
+    <span class="spacer"></span><button class="lnk" id="libOpen" data-tip="Open the Library folder (add your own stickers / sounds there)">📁 folder</button>
+    <button class="lnk" id="libReload" data-tip="Read the Library folder again (after adding your own files)">↻</button></div>${inner}`;
+  if (!LIBCAT) { box.innerHTML = head(`<span class="muted small">loading…</span>`); loadLib().then(() => { if (curScene()?.id === s.id) renderLibSection(s); }); return; }
+  const L = LIBCAT;
+  if (!L.ready) {
+    const st = L.setup || {};
+    box.innerHTML = head(`<div class="ibox">The Library isn't downloaded yet: ~1,600 3D stickers (Microsoft Fluent Emoji, MIT) and 320 sound effects (Wyzowl SFX Kit, CC0) – about 120 MB, once.
+      ${st.running ? `<div class="muted small">⏳ ${esc((st.log || []).slice(-1)[0] || "working…")}</div>` : `<button class="btn small primary" id="libSetup">⬇ Download the free Library</button>`}
+      <div class="muted small">Transitions and effects work without it.</div></div>`) + libTabs(s, L);
+    if (st.running && !LIBPOLL) LIBPOLL = setInterval(async () => { await loadLib(true); if (!LIBCAT.setup?.running) { clearInterval(LIBPOLL); LIBPOLL = null; } if (curScene()) renderLibSection(curScene()); }, 2500);
+  } else box.innerHTML = head(libTabs(s, L));
+  bindLib(box, s);
+}
+function libTabs(s, L) {
+  const n = { transition: s.transition ? 1 : 0, effect: (s.effects || []).length, sticker: (s.stickers || []).length, sound: (s.sfx || []).length };
+  const tabs = [["transition", "⇄ Transition"], ["effect", "✨ Effects"], ["sticker", "🙂 Stickers"], ["sound", "🔊 Sounds"]];
+  let body = "";
+  if (LIBTAB === "transition") {
+    const vid = P.scenes.filter(inVid), first = vid.length && vid[0].id === s.id, tr = s.transition;
+    const tn = tr && (L.transitions.find((t) => t.id === tr.type) || {}).name;
+    body = `<div class="muted small">How the video goes INTO this scene from the scene before. Lengths don't change; the next voice starts right at the cut.</div>
+      ${first ? `<div class="warnline">⚠ This is the first scene – nothing comes before it. For an opening, use Effects → “Fade in from black”.</div>` : ""}
+      ${tr ? `<div class="irow libcur"><b>⇄ ${esc(tn || tr.type)}</b>
+        <select id="trDur" data-tip="How long the transition takes">${[0.25, 0.4, 0.6, 0.8, 1].map((v) => `<option value="${v}" ${Math.abs(v - tr.dur) < 0.01 ? "selected" : ""}>${v} s</option>`).join("")}${[0.25, 0.4, 0.6, 0.8, 1].some((v) => Math.abs(v - tr.dur) < 0.01) ? "" : `<option selected value="${tr.dur}">${tr.dur} s</option>`}</select>
+        <label class="check" data-tip="A whoosh that peaks in the middle of the move (from the SFX Kit)"><input type="checkbox" id="trSnd" ${tr.sound ? "checked" : ""}> whoosh${tr.sound ? `: ${esc(tr.sound.name)}` : ""}</label>
+        <button class="lnk" data-cmd="transition off">remove</button>
+        <button class="lnk" data-gcmd="transitions ${esc(tr.type)} ${tr.dur}" data-tip="Use this transition at EVERY cut of the video">use at every cut</button></div>` : ""}
+      <div class="libscroll">${[...new Set(L.transitions.map((t) => t.group))].map((g) => `<div class="libgrp">${esc(g)}</div><div class="libgrid">${L.transitions.filter((t) => t.group === g).map((t) => libTile("transition", t, tr && tr.type === t.id)).join("")}</div>`).join("")}</div>
+      <div class="muted small">Hover a tile to preview it.</div>`;
+  } else if (LIBTAB === "effect") {
+    const on = s.effects || [];
+    body = `<div class="muted small">Effects change this scene's picture (captions and stickers stay sharp and steady). Up to 4; one camera zoom at a time.</div>
+      ${on.length ? `<div class="irow">${on.map((e) => `<span class="zchip">✨ ${esc((L.effects.find((x) => x.id === e) || {}).name || e)} <button class="lnk" data-cmd="effect remove ${esc(e)}" title="Remove">×</button></span>`).join(" ")}
+        <button class="lnk" data-cmd="effects off">remove all</button></div>` : ""}
+      <div class="libscroll">${[...new Set(L.effects.map((t) => t.group))].map((g) => `<div class="libgrp">${esc(g)}</div><div class="libgrid">${L.effects.filter((t) => t.group === g).map((t) => libTile("effect", t, on.includes(t.id))).join("")}</div>`).join("")}</div>`;
+  } else if (LIBTAB === "sticker") {
+    const on = s.stickers || [];
+    const POS = ["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"];
+    const q = LIBQ.sticker.trim().toLowerCase();
+    let items = L.stickers;
+    if (q) items = items.filter((it) => it.id.includes(q.replace(/\s+/g, "_")) || it.name.toLowerCase().includes(q) || (it.keywords || []).some((k) => k.toLowerCase().includes(q)));
+    else if (LIBQ.sgroup === "picks") { const m = new Map(L.stickers.map((it) => [it.id, it])); items = (L.finance_picks || []).map((id) => m.get(id)).filter(Boolean); }
+    else items = items.filter((it) => it.group === LIBQ.sgroup);
+    const total = items.length; items = items.slice(0, 160);
+    body = `${on.length ? `<div class="librows">${on.map((st, i) => `<div class="librow"><img src="${media("library", st.file)}" alt=""><span class="nm" title="${esc(st.name)}">${esc(st.name)}</span>
+        <span class="muted small">at</span><input type="number" step="0.1" min="0" class="stkSet" data-i="${i + 1}" data-k="at" value="${st.at}" data-tip="Seconds into this scene when it appears">
+        <span class="muted small">for</span><input type="number" step="0.1" min="0.2" class="stkSet" data-i="${i + 1}" data-k="for" value="${st.dur || ""}" placeholder="end" data-tip="How long it stays (seconds)">
+        <select class="stkSet" data-i="${i + 1}" data-k="pos" data-tip="Where on the screen">${POS.map((p) => `<option ${p === st.pos ? "selected" : ""}>${p}</option>`).join("")}</select>
+        <select class="stkSet" data-i="${i + 1}" data-k="size" data-tip="Size (share of the screen width)">${[12, 16, 22, 30, 40, 55].map((v) => `<option value="${v}" ${Math.round((st.size || 0.22) * 100) === v ? "selected" : ""}>${v}%</option>`).join("")}${[12, 16, 22, 30, 40, 55].includes(Math.round((st.size || 0.22) * 100)) ? "" : `<option selected value="${Math.round(st.size * 100)}">${Math.round(st.size * 100)}%</option>`}</select>
+        <select class="stkSet" data-i="${i + 1}" data-k="anim" data-tip="pop = slides up + fades in · bounce = keeps bobbing · still = just appears">${["pop", "bounce", "still"].map((a) => `<option ${a === (st.anim || "pop") ? "selected" : ""}>${a}</option>`).join("")}</select>
+        <button class="lnk danger" data-cmd="sticker remove ${i + 1}" title="Remove">×</button></div>`).join("")}</div>` : ""}
+      <div class="irow"><input id="stkQ" placeholder="Search 1,600 stickers: fire, rocket, money, chart, warning…" value="${esc(LIBQ.sticker)}">
+        <select id="stkG" data-tip="Sticker group">${[["picks", "⭐ Finance picks"], ...(L.sticker_groups || []).map((g) => [g, g])].map(([v, l]) => `<option value="${esc(v)}" ${v === LIBQ.sgroup ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div>
+      <div class="stkgrid">${items.map((it) => `<button class="stk" data-stk="${esc(it.id)}" title="${esc(it.name)} – click to add (appears 0.3 s into the scene for 2 s, top-right; change it above)"><img loading="lazy" src="${media("library", it.file)}" alt="${esc(it.name)}"></button>`).join("") || `<span class="muted small">No stickers found.</span>`}</div>
+      ${total > items.length ? `<div class="muted small">Showing ${items.length} of ${total} – type to search.</div>` : ""}`;
+  } else {
+    const on = s.sfx || [];
+    const q = LIBQ.sound.trim().toLowerCase();
+    let items = L.sounds;
+    if (q) items = items.filter((it) => it.id.includes(q.replace(/\s+/g, "-")) || it.name.toLowerCase().includes(q) || (it.tags || []).some((t) => t.includes(q)) || (it.use_for || []).some((u) => u.toLowerCase().includes(q)));
+    else items = items.filter((it) => it.category === LIBQ.scat);
+    body = `${on.length ? `<div class="librows">${on.map((e, i) => `<div class="librow"><button class="lnk" data-play="${esc(e.file)}" title="Listen">▶</button><span class="nm" title="${esc(e.name)}">🔊 ${esc(e.name)}</span>
+        <span class="muted small">hits at</span><input type="number" step="0.05" min="0" class="sfxSet" data-i="${i + 1}" data-k="at" value="${e.at}" data-tip="Seconds into this scene where the sound's hit lands (it starts a little earlier so the hit is exactly there)">
+        <span class="muted small">vol</span><input type="number" step="10" min="0" max="200" class="sfxSet" data-i="${i + 1}" data-k="vol" value="${Math.round((e.vol ?? 1) * 100)}"><span class="muted small">%</span>
+        <button class="lnk danger" data-cmd="sfx remove ${i + 1}" title="Remove">×</button></div>`).join("")}</div>` : ""}
+      <div class="irow"><input id="sndQ" placeholder="Search 320 sounds: whoosh, pop, cash, ding, riser, typing…" value="${esc(LIBQ.sound)}">
+        <select id="sndC" data-tip="Sound category">${(L.sound_categories || []).map((c) => `<option ${c === LIBQ.scat ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></div>
+      <div class="sndlist">${items.slice(0, 120).map((it) => `<div class="sndrow"><button class="lnk" data-play="${esc(it.file)}" title="Listen">▶</button>
+        <span class="nm" title="${esc(it.desc || "")}">${esc(it.name)}</span><span class="muted small">${it.duration ? it.duration.toFixed(1) + " s" : ""}${(it.use_for || []).length ? " · " + esc(it.use_for.slice(0, 2).join(", ")) : ""}</span>
+        <button class="btn small" data-snd="${esc(it.id)}" data-tip="Add to this scene – its hit lands at the start of the scene (change 'hits at' above)">+ add</button></div>`).join("") || `<span class="muted small">No sounds found.</span>`}</div>`;
+  }
+  return `<div class="seg iseg libtabs">${tabs.map(([k, l]) => `<button data-libtab="${k}" class="${LIBTAB === k ? "active" : ""}">${l}${n[k] ? ` <b>${n[k]}</b>` : ""}</button>`).join("")}</div>${body}`;
+}
+let LIBBUSY = false;
+const libSend = (sid, cmd) => {  // one library action at a time: a double click must not add a sticker / sound twice
+  if (LIBBUSY) return;
+  LIBBUSY = true;
+  sendCommand(sid, cmd).finally(() => setTimeout(() => (LIBBUSY = false), 250));
+};
+function bindLib(box, s) {
+  const re = () => renderLibSection(curScene() || s);
+  $$("[data-libtab]", box).forEach((b) => (b.onclick = () => { LIBTAB = b.dataset.libtab; store.set("cve.libtab", LIBTAB); re(); }));
+  if ($("#libOpen", box)) $("#libOpen", box).onclick = () => api("/api/library/open", { method: "POST" }).catch((e) => toast(e.message, true));
+  if ($("#libReload", box)) $("#libReload", box).onclick = async () => { await loadLib(true); re(); toast("Library read again."); };
+  if ($("#libSetup", box)) $("#libSetup", box).onclick = async () => { await api("/api/library/setup", { method: "POST" }); await loadLib(true); re(); };
+  $$(".libtile", box).forEach((b) => {
+    const v = $("video", b);
+    if (v) { b.onmouseenter = () => { v.currentTime = 0; v.play().catch(() => {}); }; b.onmouseleave = () => { v.pause(); v.currentTime = 0.9; }; }
+    b.onclick = () => {
+      if (b.dataset.lib === "transition") libSend(s.id, b.classList.contains("on") ? "transition off" : `transition ${b.dataset.id}${s.transition ? " " + s.transition.dur : ""}`);
+      else libSend(s.id, b.classList.contains("on") ? `effect remove ${b.dataset.id}` : `effect ${b.dataset.id}`);
+    };
+  });
+  if ($("#trDur", box)) $("#trDur", box).onchange = (e) => sendCommand(s.id, `transition ${s.transition.type} ${e.target.value}`);
+  if ($("#trSnd", box)) $("#trSnd", box).onchange = (e) => sendCommand(s.id, `transition sound ${e.target.checked ? "on" : "off"}`);
+  $$(".stkSet", box).forEach((i) => (i.onchange = () => {
+    const k = i.dataset.k, v = i.value;
+    if (k === "for" && !v) return;
+    sendCommand(s.id, `sticker ${i.dataset.i} ${k === "at" ? `at ${v}` : k === "for" ? `for ${v}` : k === "size" ? `size ${v}%` : v}`);
+  }));
+  $$(".sfxSet", box).forEach((i) => (i.onchange = () => sendCommand(s.id, `sfx ${i.dataset.i} ${i.dataset.k === "at" ? `at ${i.value}` : `vol ${i.value}%`}`)));
+  $$("[data-stk]", box).forEach((b) => (b.onclick = () => libSend(s.id, `sticker ${b.dataset.stk}`)));
+  $$("[data-snd]", box).forEach((b) => (b.onclick = () => libSend(s.id, `sfx ${b.dataset.snd} at 0`)));
+  $$("[data-play]", box).forEach((b) => (b.onclick = () => libPlay(b.dataset.play, b)));
+  const keepFocus = (id, key, fn) => { const el = $(id, box); if (!el) return; el.oninput = () => { LIBQ[key] = el.value; clearTimeout(el._t); el._t = setTimeout(() => { fn(); const n = $(id); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 250); }; };
+  keepFocus("#stkQ", "sticker", re);
+  keepFocus("#sndQ", "sound", re);
+  if ($("#stkG", box)) $("#stkG", box).onchange = (e) => { LIBQ.sgroup = e.target.value; LIBQ.sticker = ""; re(); };
+  if ($("#sndC", box)) $("#sndC", box).onchange = (e) => { LIBQ.scat = e.target.value; LIBQ.sound = ""; re(); };
+  // data-cmd / data-gcmd buttons inside the section (renderDetail's binder ran before this section existed)
+  $$("[data-cmd]", box).forEach((b) => (b.onclick = () => sendCommand(s.id, b.dataset.cmd)));
+  $$("[data-gcmd]", box).forEach((b) => (b.onclick = () => sendCommand(null, b.dataset.gcmd)));
+}
 function segBtns(name, opts, cur) {
   return `<div class="seg iseg" data-name="${name}">${opts.map(([v, label, dis]) =>
     `<button data-v="${esc(v)}" class="${String(v) === String(cur) ? "active" : ""}" ${dis ? `disabled title="${esc(dis)}"` : `data-tip="${esc((ITIP[name] || {})[v] || "")}"`}>${label}</button>`).join("")}</div>`;
@@ -944,6 +1146,7 @@ function renderDetail() {
   const head = `
     <div class="title"><h2>Scene ${s.no}</h2> ${sceneBadges(s)}
       <span class="spacer"></span>
+      <button class="btn small ghost" id="dupScene" data-tip="Copy this scene (with all its edits) and put the copy right after it – then drag it anywhere. Keys: Ctrl+D, or Ctrl+C, select another scene, Ctrl+V (the copy goes after that scene)">⧉ Duplicate</button>
       ${isBroll(s) ? "" : `<button class="btn small ${s.keep ? "ghost" : "primary"}" data-cmd="${s.keep ? "cut" : "keep"}" data-tip="${s.keep ? "Remove this scene from the video (it stays on the timeline, striped – Restore brings it back). Key: Delete" : "Put this scene back into the video. Key: Delete"}">${s.keep ? "✂ Cut scene" : "↺ Restore scene"}</button>`}</div>
     <div class="muted small">${esc(s.src)} · ${fmt(s.in)}–${fmt(s.out)} · ${s.dur}s${s.keep && !isBroll(s) ? ` → <b>${s.est}s</b> in the video` : ""}</div>
     ${!s.keep && s.broll_view && !isBroll(s) ? `<div class="warnline">⚠ This scene is cut, so its B-roll is not in the video either. <button class="lnk" data-cmd="keep">Restore scene</button></div>` : ""}`;
@@ -962,6 +1165,7 @@ function renderDetail() {
   } else {
     const bv = s.broll_view;
     const clipOpts = [...(P.broll_clips || []).map((c) => c.file), ...P.sources.map((x) => x.file).filter((f) => f !== s.src && !(P.broll_clips || []).some((c) => c.file === f))];
+    const assets = P.broll_assets || [];
     const c = s.card;
     const cardKind = !c ? "auto" : c.kind;
     const words = (s.caption_view ?? s.transcript ?? "").split(/\s+/).filter(Boolean);
@@ -969,14 +1173,33 @@ function renderDetail() {
     el.innerHTML = head + `
       <div class="isec bsec"><div class="ilab hastip" data-tip="Show another clip (market footage, charts…) OVER this scene while your voice keeps playing.">🎞 Cover with B-roll <span class="muted small">(footage shows over this scene, your voice keeps playing)</span></div>
         <div class="irow">
-          <select id="brollSel" data-tip="Pick the clip that covers this scene. None = show yourself."><option value="">None</option>${clipOpts.map((f) => `<option ${bv && bv.src === f ? "selected" : ""}>${esc(f)}</option>`).join("")}</select>
-          ${bv ? segBtns("bwhere", [["top", "Top panel", split ? "" : "Needs the split layout"], ["full", "Full screen"]], bv.where) : ""}
+          <select id="brollSel" data-tip="Pick what covers this scene: a video/picture you uploaded for B-roll, or one of your clips. None = show yourself."><option value="">None</option>
+            ${assets.length ? `<optgroup label="Uploaded B-roll">${assets.map((a) => `<option value="${esc(a.file)}" ${bv && bv.src === a.file ? "selected" : ""}>${a.still ? "🖼" : "🎞"} ${esc(a.file)}${a.used_by.length ? ` · scene ${rangeTxt(a.used_by)}` : ""}</option>`).join("")}</optgroup>` : ""}
+            ${clipOpts.length ? `<optgroup label="Your clips">${clipOpts.map((f) => `<option value="${esc(f)}" ${bv && bv.src === f ? "selected" : ""}>${esc(f)}</option>`).join("")}</optgroup>` : ""}
+            ${bv && ![...clipOpts, ...assets.map((a) => a.file)].includes(bv.src) ? `<option value="${esc(bv.src)}" selected>${esc(bv.src)} (missing)</option>` : ""}</select>
+          <button class="btn small" id="brUpBtn" data-tip="Upload a video or a picture (chart, screenshot, logo…) from your computer to show over THIS scene. It is kept for this project and can be picked on other scenes too.">⬆ Upload video / picture</button>
+          <input type="file" id="brUpFile" accept="video/*,image/*,.mkv,.mts" hidden>
+          <span id="brUpProg" class="muted small">${BRUP && BRUP.sid === s.id ? `uploading ${BRUP.pct} %…` : ""}</span>
         </div>
-        ${bv ? `<div class="irow"><span class="muted small">Starts in the clip at</span>
+        ${assets.length ? `<details class="brmanage" ${BRMANAGE ? "open" : ""}><summary class="muted small" data-tip="See and delete the videos/pictures you uploaded for B-roll">Manage uploads (${assets.length})</summary>
+          ${assets.map((a) => `<div class="brrow">${a.thumb ? `<img src="${media("thumbs", a.thumb)}" alt="">` : `<span class="brnothumb">${a.still ? "🖼" : "🎞"}</span>`}
+            <span class="brname" title="${esc(a.file)}">${esc(a.file)}</span>
+            <span class="muted small">${a.used_by.length ? `scene ${rangeTxt(a.used_by)}` : "not used"}</span>
+            <button class="lnk danger" data-delasset="${esc(a.file)}" data-tip="Remove this upload from the project${a.used_by.length ? " – the scenes using it go back to showing you" : ""}. Undo brings it back.">🗑 delete</button></div>`).join("")}</details>` : ""}
+        ${bv ? `<div class="irow">${lab("Placement", "Where the B-roll shows. Your voice keeps playing in every case.")}
+          ${segBtns("bwhere", split ? [["full", "Full screen"], ["top", "Top panel"], ["bottom", "Over you (bottom)"]] : [["full", "Full screen"], ["top", "Top half"], ["bottom", "Bottom half"]], bv.where)}
+          ${brMini(bv.where, split)}
+          ${bv.chosen ? `<button class="lnk" data-cmd="broll layout" data-tip="Forget this choice – follow the layout (split: top panel, full screen layout: full screen)">auto</button>` : `<span class="muted small">(auto)</span>`}</div>
+        <div class="irow">${lab("Picture", "Fill = the B-roll fills its space (edges cut off if its shape differs, e.g. a wide video in a tall space). Whole picture = nothing is cut off; the empty space is a soft blurred copy of it (no black bars).")}
+          ${segBtns("bfit", [["fill", "Fill (crop)"], ["fit", "Whole picture"]], bv.fit || "fill")}</div>
+        <div class="irow">${lab("Captions on it", "Show your captions on top of the B-roll in this scene, or hide them (same switch as Captions below).")}
+          ${words.length ? segBtns("bcaps", [["on", "On"], ["off", "Off"]], capsOn ? "on" : "off") : `<span class="muted small">no speech in this scene – nothing to caption</span>`}</div>
+        ${bv.still ? `<div class="muted small">🖼 Picture – shown for the whole scene.</div>` : `<div class="irow"><span class="muted small">Starts in the clip at</span>
           <input type="number" id="brollAt" step="0.5" min="0" placeholder="auto" value="${bv.at ?? ""}" title="Empty = continue from the previous scene's B-roll">
-          <span class="muted small">s ${bv.at == null ? "(auto: continues)" : `<button class="lnk" data-cmd="broll continue">auto</button>`}</span></div>` : ""}
+          <span class="muted small">s ${bv.at == null ? "(auto: continues)" : `<button class="lnk" data-cmd="broll continue">auto</button>`}</span></div>`}` : ""}
         ${bv && !bv.ok ? `<div class="warnline">⚠ Not shown: ${esc(bv.why)}.</div>` : ""}
-        ${!clipOpts.length ? `<div class="muted small">No other clips. Add another clip in Footage (e.g. market footage) to show it over this scene.</div>` : ""}</div>
+        ${!clipOpts.length && !assets.length ? `<div class="muted small">Nothing to show yet – click “Upload video / picture”, or add another clip in Footage.</div>` : ""}</div>
+      <div class="isec libsec" id="libSec"></div>
       <div class="isec"><div class="ilab hastip" data-tip="What you say in this scene. Click a word to change how the captions spell it, or to hide it.">Words <span class="muted small">(click a word to fix how it's written)</span></div>
         ${s.heard ? `<div class="ibox">🎵 <b>No speech detected</b> – music or background sound, so captions stay off here.
             <button class="lnk" id="showHeard" data-tip="Speech recognition always 'hears' something in music. These are its guesses, not real words.">Show the ${s.heard.split(/\s+/).length} guessed word(s)</button>
@@ -1003,9 +1226,13 @@ function renderDetail() {
       <div class="irow">${lab("Captions", "Show or hide the spoken words on screen in this scene.")}${segBtns("captions", [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
         s.captions === true ? "on" : s.captions === false && !s.captions_auto_off ? "off" : "auto")}
         ${s.captions_auto_off ? `<span class="muted small">no speech → off</span>` : ""}</div>
-      <div class="irow ${capsOn ? "" : "dim"}">${lab("Position", "Where the captions sit in THIS scene. Auto = the look's position.")}${segBtns("cappos", [["auto", "Auto"], ["head", "Head"], ["center", "Center"], ["below", "Below"]], s.cap_pos || "auto")}
-        <span class="muted small">${capsOn ? `Auto = ${split ? "on the seam" : { bottom: "below", center: "center", top: "head" }[P.settings.caption_position || "bottom"]}`
-          : `captions are OFF here – ${!words.length ? "no speech in this scene" : "turn them On to see this"}`}</span></div>
+      <div class="irow ${capsOn ? "" : "dim"}">${lab("Position", "Where the captions sit in THIS scene: a preset, or an exact height in % from the top of the screen.")}${segBtns("cappos", [["auto", `Auto`], ["head", "Head"], ["center", "Center"], ["below", "Below"]], typeof s.cap_pos === "number" ? "" : s.cap_pos || "auto")}
+        <span class="cappct" data-tip="Exact caption height for the WHOLE video: % from the TOP of the screen (0 = top edge, 100 = bottom edge). Type a number, press Enter – every scene follows it (also scenes you add later). Safe for Reels/Shorts: about 15–78.">
+          <input type="number" id="capPct" min="5" max="95" step="1" value="${typeof s.cap_pos === "number" ? s.cap_pos : typeof P.settings.caption_y === "number" ? P.settings.caption_y : ""}" placeholder="${Math.round(capPctOf(s, s.cap_pos || "auto"))}"> %
+          <button class="btn small" id="capPctSet" data-tip="Set this height for ALL scenes">Set</button>
+          <button class="lnk" id="capPctOne" data-tip="Exception: use this height in THIS scene only (the other scenes keep the video's height)">only this scene</button></span>
+        ${capMini(s)}
+        <span class="muted small">${capsOn ? `now at ≈ ${Math.round(capPctOf(s, s.cap_pos || "auto"))} %${s.cap_pos != null ? ` · <b>own position</b> (other scenes: ${Math.round(capPctOf(s, "auto"))} %) – <button class="lnk" data-cmd="captions at auto" data-tip="Drop this scene's own position – follow the whole video again">follow the video</button>` : typeof P.settings.caption_y === "number" ? " · whole video" : ""}` : `captions are OFF here – ${!words.length ? "no speech in this scene" : "turn them On to see this"}`}</span></div>
       <div class="irow">${lab("Pauses", "Silent gaps while you think or breathe. Cutting them = jump cuts and a faster video.")}${segBtns("pauses", [["auto", "Auto"], ["cut", "Cut"], ["keep", "Keep"]],
         s.remove_silence === true ? "cut" : s.remove_silence === false ? "keep" : "auto")}
         <span class="muted small">Auto = ${P.settings.remove_silence ? "cut" : "keep"} (whole video)</span></div>
@@ -1048,6 +1275,19 @@ function bindInspector(s) {
   $$("[data-cmd]", el).forEach((b) => (b.onclick = () => sendCommand(s.id, b.dataset.cmd)));
   $$("[data-gcmd]", el).forEach((b) => (b.onclick = () => sendCommand(null, b.dataset.gcmd)));
   $$("[data-key]", el).forEach((b) => (b.onclick = () => trimAtPlayhead(b.dataset.key)));
+  // the % box sets the WHOLE video (what you expect from one number); "only this scene" makes an exception
+  const cpSend = (all) => {
+    const v = +($("#capPct", el)?.value || 0);
+    if (!v || v < 5 || v > 95) return toast("Type a height between 5 and 95 (% from the top).", true);
+    if (all) { SHOW = null; sendCommand(null, `captions at ${v}%`).then(() => { SHOW = { sid: s.id, switchView: true, at: Date.now() }; }); }
+    else sendCommand(s.id, `captions at ${v}%`);
+  };
+  if ($("#capPctSet", el)) {
+    $("#capPctSet", el).onclick = () => cpSend(true);
+    $("#capPctOne", el).onclick = () => cpSend(false);
+    $("#capPct", el).onkeydown = (e) => { if (e.key === "Enter") cpSend(true); };
+  }
+  if ($("#dupScene", el)) $("#dupScene", el).onclick = () => sceneClip("d");
   const sh = $("#showHeard", el); if (sh) sh.onclick = () => { const hb = $("#heardBox", el); hb.hidden = !hb.hidden; sh.textContent = hb.hidden ? sh.textContent.replace(/^Hide/, "Show") : sh.textContent.replace(/^Show/, "Hide"); };
   $$(".iseg", el).forEach((g) => $$("button", g).forEach((b) => (b.onclick = () => {
     if (b.classList.contains("active")) return;
@@ -1058,7 +1298,7 @@ function bindInspector(s) {
                  `Wanted B-roll footage to show OVER this scene instead? Cancel and use “Cover with B-roll”.`)) return;
     const cmd = { role: `role ${v === "broll" ? "broll" : "speaker"}`, speed: `speed ${v}`, zoom: v === "1" ? "no zoom" : `zoom ${v}`,
       captions: `captions ${v}`, cappos: `captions at ${v}`, pauses: v === "auto" ? "silences auto" : v === "cut" ? "remove silences" : "keep silences",
-      bwhere: `broll ${v}` }[n];
+      bwhere: `broll ${v}`, bcaps: `captions ${v}`, bfit: `broll ${v}` }[n];
     if (cmd) sendCommand(s.id, cmd);
   })));
   const trimSet = (edge, x) => { x = Math.max(0, r2(x)); sendCommand(s.id, `trim ${edge} to ${x}`); };
@@ -1066,6 +1306,12 @@ function bindInspector(s) {
   [["#trimStart", "start"], ["#trimEnd", "end"]].forEach(([id, edge]) => { const i = $(id); if (i) i.onchange = () => trimSet(edge, +i.value); });
   const vol = $("#volRange");
   if (vol) { vol.oninput = () => ($("#volVal").textContent = `${vol.value}%`); vol.onchange = () => sendCommand(s.id, `volume ${vol.value}%`); }
+  if ($("#libSec", el)) renderLibSection(s);
+  const bm = $(".brmanage", el);
+  if (bm) bm.ontoggle = () => (BRMANAGE = bm.open);
+  $$("[data-delasset]", el).forEach((b) => (b.onclick = () => deleteBrollAsset(b.dataset.delasset)));
+  const bu = $("#brUpBtn");
+  if (bu) { bu.onclick = () => $("#brUpFile").click(); $("#brUpFile").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) uploadBroll(f, s.id); }; }
   const bs = $("#brollSel");
   if (bs) bs.onchange = () => sendCommand(s.id, bs.value ? `broll ${bs.value}` : "broll off");
   const ba = $("#brollAt");
@@ -1127,7 +1373,8 @@ function renderSceneTimeline() {
   };
   const others = P.sources.map((x) => x.file).filter((f) => !bin.some((c) => c.file === f));
   $("#brollBin").innerHTML = P.sources.length ? `<span class="muted small">Clips <span title="Drag a clip onto a scene to use it as B-roll there">ⓘ drag onto a scene:</span></span> ` +
-    [...bin.map((c) => clipChip(c.file, true)), ...others.map((f) => clipChip(f, false))].join(" ") : "";
+    [...bin.map((c) => clipChip(c.file, true)), ...others.map((f) => clipChip(f, false)),
+     ...(P.broll_assets || []).map((a) => { const u = usedBy(a.file); return `<button class="bchip" data-file="${esc(a.file)}" title="Uploaded B-roll – drag onto a scene below to show it OVER that scene (your voice keeps playing).">${a.still ? "🖼" : "⬆"} ${esc(a.file)}${a.still ? "" : ` · ${(+a.duration || 0).toFixed(1)}s`} · ${u.length ? `covers ${rangeTxt(u)}` : "<i>not used</i>"}</button>`; })].join(" ") : "";
   // B-roll scenes of clips that also have speaker scenes (e.g. a talking scene set to B-roll): off the timeline, so
   // list them here – every scene must stay findable
   const loose = [];
@@ -1145,7 +1392,8 @@ function renderSceneTimeline() {
   let x = 0; STL.pps = pps;
   STL.blocks = main.map((s) => { const w = inVid(s) ? Math.max(6, s.est * pps) : STUB; const b = { s, x, w }; x += w + GAP; return b; });
   const cardsEff = effCards(main);
-  const thumb = (f) => { const c = bin.find((b) => b.file === f); const t = c ? c.thumb : (P.scenes.find((x) => x.src === f) || {}).thumb; return t ? `background-image:url('${media("thumbs", t)}')` : ""; };
+  const thumb = (f) => { const a = (P.broll_assets || []).find((x) => x.file === f); if (a) return a.thumb ? `background-image:url('${media("thumbs", a.thumb)}')` : "";
+    const c = bin.find((b) => b.file === f); const t = c ? c.thumb : (P.scenes.find((x) => x.src === f) || {}).thumb; return t ? `background-image:url('${media("thumbs", t)}')` : ""; };
   // merge runs: B-roll by clip, cards by content
   const runs = (key) => { const out = []; STL.blocks.forEach((b, i) => { const k = key(b, i); if (!k) return; const last = out[out.length - 1];
     if (last && last.k === k && last.end === i - 1) { last.w = b.x + b.w - last.x; last.end = i; } else out.push({ k, x: b.x, w: b.w, start: i, end: i, b }); }); return out; };
@@ -1159,8 +1407,8 @@ function renderSceneTimeline() {
     <div class="stl-heads"><div class="h ruler"></div><div class="h hastip" data-tip="Footage shown OVER the scenes below while your voice plays. Optional – drag a clip chip onto a scene to add one.">B-roll</div><div class="h main hastip" data-tip="Your scenes in playing order. Drag to reorder, drag an edge to trim, striped = cut.">Video</div>${cardsEff.length ? `<div class="h hastip" data-tip="The top-panel card (title / number / chart) shown during each scene – split layout.">Cards</div>` : ""}</div>
     <div class="stl-lanes" style="width:${x}px">
       <div class="lane ruler" data-tip="Time in the edited video. Click to jump there.">${ticks}</div>
-      <div class="lane broll">${bRuns.map((r, ri) => { const v = JSON.parse(r.k); return `<div class="bblk ${v[2] ? "" : "bad"}" data-run="${ri}" style="left:${r.x}px;width:${r.w}px;${thumb(v[0])}" title="${esc(v[0])} – ${v[1] === "full" ? "full screen" : "top panel"}${v[2] ? "" : " – NOT SHOWN (skipped or missing)"}
-Drag = move to other scenes · drag an edge = cover more / fewer scenes · × = remove"><i class="hd l"></i><span>🎞 ${esc(v[0])} · ${v[1] === "full" ? "full" : "top"}</span><b class="bx" title="Remove this B-roll">×</b><i class="hd r"></i></div>`; }).join("")}</div>
+      <div class="lane broll">${bRuns.map((r, ri) => { const v = JSON.parse(r.k); return `<div class="bblk ${v[2] ? "" : "bad"}" data-run="${ri}" style="left:${r.x}px;width:${r.w}px;${thumb(v[0])}" title="${esc(v[0])} – ${v[1] === "full" ? "full screen" : v[1] === "bottom" ? "bottom" : "top"}${v[2] ? "" : " – NOT SHOWN (skipped or missing)"}
+Drag = move to other scenes · drag an edge = cover more / fewer scenes · × = remove"><i class="hd l"></i><span>🎞 ${esc(v[0])} · ${v[1]}</span><b class="bx" title="Remove this B-roll">×</b><i class="hd r"></i></div>`; }).join("")}</div>
       <div class="lane main">${STL.blocks.map((b) => `<div class="sblk ${isBroll(b.s) ? "cut brs" : b.s.keep ? "" : "cut"} ${b.s.id === selected ? "sel" : ""}" data-id="${b.s.id}" style="left:${b.x}px;width:${b.w}px;${inVid(b.s) ? `background-image:url('${media("thumbs", b.s.thumb)}')` : ""}" title="Scene ${b.s.no} · ${isBroll(b.s) ? "B-roll footage, not played – drag it to a place in the video to play it there" : b.s.keep ? `${b.s.est}s` : "cut – click to select, Del to restore"}">
         ${isBroll(b.s) ? `${b.s.no}🎞` : b.s.keep ? `<i class="hd l"></i><span class="no">${b.s.no}</span>${b.w > 54 ? `<span class="du">${b.s.est}s</span>` : ""}<i class="hd r"></i>` : `${b.s.no}✂${b.s.broll_view ? "🎞" : ""}`}</div>`).join("")}</div>
       ${cardsEff.length ? `<div class="lane cards">${cRuns.map((r) => `<div class="cblk" style="left:${r.x}px;width:${r.w}px" title="${esc(cardLabel(JSON.parse(r.k)))}">${esc(cardLabel(JSON.parse(r.k)))}</div>`).join("")}</div>` : ""}
@@ -1366,7 +1614,7 @@ function bDown(e) {
   const el = e.currentTarget, run = STL.bRuns[+el.dataset.run]; if (!run) return;
   const runIdx = []; for (let i = run.start; i <= run.end; i++) runIdx.push(i);
   const first = STL.blocks[run.start].s, raw = first.broll || {};
-  const entry = (withAt) => ({ src: raw.src, ...(raw.where ? { where: raw.where } : {}), ...(withAt && raw.at != null ? { at: raw.at } : {}) });
+  const entry = (withAt) => ({ src: raw.src, ...(raw.where ? { where: raw.where } : {}), ...(raw.fit === "fit" ? { fit: "fit" } : {}), ...(withAt && raw.at != null ? { at: raw.at } : {}) });
   if (e.target.classList.contains("bx")) {  // remove the whole run
     e.stopPropagation();
     return sendBroll(Object.fromEntries(runIdx.map((i) => [STL.blocks[i].s.id, null])));
@@ -1417,6 +1665,10 @@ window.addEventListener("resize", () => { if ($("#tab-scenes").classList.contain
 document.addEventListener("keydown", (e) => {
   if (!$("#tab-scenes").classList.contains("active") || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.target.isContentEditable) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); $("#undoBtn").click(); return; }
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && ["c", "v", "d"].includes(e.key.toLowerCase())) {
+    if (e.key.toLowerCase() === "c" && String(window.getSelection() || "").trim()) return;  // copying page text: leave it alone
+    e.preventDefault(); if (!e.repeat) sceneClip(e.key.toLowerCase()); return;  // held key: one copy, not twenty
+  }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const s = curScene();
   if (e.code === "Space") { if (e.target.tagName === "VIDEO") return;  // the player's own controls already toggle it
@@ -1442,6 +1694,27 @@ function cmdHtml(c) {
 function bindCancel(root) {
   $$("[data-cancel]", root).forEach((b) => (b.onclick = () => api(`/api/projects/${PID}/command/${b.dataset.cancel}/cancel`, { method: "POST" }).then(() => refresh(true))));
 }
+// scene copy / paste: Ctrl+C copies the selected scene, Ctrl+V puts a copy AFTER the selected scene, Ctrl+D = copy right after itself.
+// The clipboard holds the scene's id (per project), so a paste copies the scene as it is NOW (with all its edits).
+let SCLIP = null, SCLIP_BUSY = false;
+async function sceneClip(op) {
+  const s = curScene();
+  if (!s) return toast("Select a scene first.", true);
+  if (op === "c") { SCLIP = { pid: PID, id: s.id }; toast(`Scene ${s.no} copied – select a scene and press Ctrl+V to put the copy after it.`); return; }
+  let text = "duplicate";
+  if (op === "v") {
+    if (!SCLIP || SCLIP.pid !== PID) return toast("Nothing copied yet – select a scene and press Ctrl+C (or Ctrl+D to copy it right away).", true);
+    const i = P.scenes.findIndex((x) => x.id === SCLIP.id);
+    if (i < 0) { SCLIP = null; return toast("The copied scene doesn't exist any more (merged or undone) – copy again.", true); }
+    text = `paste scene ${i + 1}`;
+  }
+  if (SCLIP_BUSY) return;  // one paste at a time (a double click must not make two copies by accident)
+  SCLIP_BUSY = true;
+  try {
+    const r = await sendCommand(s.id, text);
+    if (r && r.new && r.new.length) { SHOW = null; selectScene(r.new[0], false); }
+  } finally { SCLIP_BUSY = false; }
+}
 async function sendCommand(scene, text) {
   if (!text.trim()) return;
   try {
@@ -1451,10 +1724,11 @@ async function sendCommand(scene, text) {
     if (r.replies.length && !r.replies.every((x) => x.startsWith("!"))) {
       // timeline edits (trim / split / cut) are often made watching the ORIGINAL footage – don't switch away then;
       // a look change (captions, zoom, card, text, speed…) is only visible in the edited view – go there when ready
-      const timelineEdit = /^(trim|split|reset trim|untrim|cut|keep|restore|delete|remove)\b/i.test(text.trim()) && !/^remove (text|silences?|punch)/i.test(text.trim());
+      const timelineEdit = /^(trim|split|reset trim|untrim|cut|keep|restore|delete|remove|duplicate|paste)\b/i.test(text.trim()) && !/^remove (text|silences?|punch)/i.test(text.trim());
       SHOW = { sid: scene, switchView: !timelineEdit, at: Date.now() };
     }
     await refresh(true); loadPlayer(false); autoPreviewTick(); renderPvBadge();
+    return r;
   } catch (e) { toast(e.message, true); }
 }
 $("#sceneSend").onclick = () => { const s = curScene(); if (!s) return toast("Select a scene first.", true); sendCommand(s.id, $("#sceneCmd").value).then(() => ($("#sceneCmd").value = "")); };
@@ -1625,7 +1899,9 @@ function renderRenders() {
       ${r.missing ? `<div class="muted small" style="padding:20px">This file is no longer in the ${r.kind === "final" ? "Exports" : "work"} folder (moved, renamed or deleted).</div>`
         : `<video src="${media(r.kind === "final" ? "exports" : "work", r.file)}" controls preload="metadata"></video>`}
       <div class="meta"><div><b>${esc(r.file)}</b><div class="muted">${r.kind === "final" ? "Final export" : "Latest preview"} · ${esc(r.size)} · ${fmt(r.duration)} · ${esc(r.created.replace("T", " ").slice(0, 16))}</div></div>
-      <span class="badge ${r.kind === "final" ? "ok" : ""}">${r.kind}</span></div>
+      <span class="badge ${r.kind === "final" ? "ok" : ""}">${r.kind}</span>
+      ${r.kind === "final" && r.sig ? (r.sig === P.edit_sig ? `<span class="badge ok" title="This export shows your edit exactly as it is now">✓ current edit</span>`
+        : `<span class="badge warn" title="You changed the edit after this export – click Export final for a new one">edited since</span>`) : ""}</div>
     </div>`).join("");
 }
 

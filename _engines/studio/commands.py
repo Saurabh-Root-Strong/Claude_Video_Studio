@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 
 import core
+import library
 
 HEX = r"#?([0-9a-fA-F]{6})"
 
@@ -32,7 +33,9 @@ def _num(s: str) -> float:
 
 # ----------------------------------------------------------------- B-roll (cutaways over the voice)
 # A scene with role "broll" is not part of the main sequence: its clip is footage to cover OTHER scenes with.
-# A speaker scene's cutaway: sc["broll"] = {"src": clip file, "where": "top"|"full", "at": seconds (optional)}.
+# A speaker scene's cutaway: sc["broll"] = {"src": clip file or Assets file, "where": "top"|"bottom"|"full",
+# "at": seconds (optional)}. Split layout: top = the card panel, bottom = over YOU (card stays). Full layout: top /
+# bottom = that half of the screen (you in the other half).
 # The voice keeps playing, the B-roll is silent and never adds length. Without "at", consecutive scenes covered by
 # the same clip continue its footage (pipeline.with_broll works that out at render time – survives splits/trims).
 
@@ -156,14 +159,20 @@ def _broll_scene_cmd(data: dict, sc: dict, raw: str, t: str) -> str | None:
         return None  # handled as a whole-video command by apply()
     if is_broll(sc):
         return "! This scene IS B-roll footage – select a speaker scene to cover it with B-roll."
-    m = re.fullmatch(r"broll (top|panel|top panel|full|fullscreen|full screen)", t)
+    m = re.fullmatch(BROLL_FIT_RE, t)
     if m:
         if not sc.get("broll"):
             return "! No B-roll on this scene yet – first: broll <clip name>"
-        where = "full" if m.group(1).startswith("full") else "top"
-        sc["broll"] = dict(sc["broll"], where=where)
-        return f"B-roll {'full screen (hides you, voice continues)' if where == 'full' else 'in the top panel'}." + \
-            ("" if split or where == "full" else " (The top panel needs the split layout – it shows full screen now.)")
+        fit = _fit_of(m.group(1))
+        sc["broll"] = {k: v for k, v in sc["broll"].items() if k != "fit"} | ({"fit": "fit"} if fit == "fit" else {})
+        return f"B-roll {_fit_txt(fit)}."
+    m = re.fullmatch(BROLL_WHERE_RE, t)
+    if m:
+        if not sc.get("broll"):
+            return "! No B-roll on this scene yet – first: broll <clip name>"
+        where = _where_of(m.group(1))
+        sc["broll"] = {k: v for k, v in sc["broll"].items() if k != "where"} | ({"where": where} if where else {})
+        return f"B-roll {_where_txt(where, split)}."
     m = re.fullmatch(r"broll (?:from|at|starts? at|start) ([\d.,]+)\s*(?:s|sec|seconds)?", t)
     if m:
         if not sc.get("broll"):
@@ -191,9 +200,47 @@ def _broll_scene_cmd(data: dict, sc: dict, raw: str, t: str) -> str | None:
     if f == sc["src"]:
         return "! A scene can't use its own clip as B-roll."
     old = sc.get("broll") if isinstance(sc.get("broll"), dict) else {}
-    sc["broll"] = {"src": f, **({"where": old["where"]} if old.get("where") else {})}  # explicit choice kept, else follows the look
-    shown = "top panel" if split and sc["broll"].get("where", "top") == "top" else "full screen"
-    return f'B-roll "{f}" over this scene ({shown}) – your voice keeps playing.'
+    sc["broll"] = {"src": f, **({"where": old["where"]} if old.get("where") else {}),  # explicit choices kept
+                   **({"fit": "fit"} if old.get("fit") == "fit" else {})}
+    return f'B-roll "{f}" over this scene ({_where_txt(core.broll_where(sc["broll"], split), split)}) – your voice keeps playing.'
+
+
+BROLL_WHERE_RE = (r"broll (top|panel|top panel|top half|upper half|upper|bottom|bottom half|lower half|lower|"
+                  r"bottom panel|over me|full|fullscreen|full screen|full-screen|auto|layout)")
+
+
+BROLL_FIT_RE = (r"broll (fit|whole|whole picture|show all|no crop|bars|contain|letterbox|"
+                r"fill|crop|cover|zoom to fill|fill screen)")
+
+
+def _fit_of(w: str) -> str:
+    return "fit" if w in ("fit", "whole", "whole picture", "show all", "no crop", "bars", "contain", "letterbox") else "fill"
+
+
+def _fit_txt(fit: str) -> str:
+    return ("shows the WHOLE picture (nothing cut off; the empty space is a blurred copy of it)" if fit == "fit"
+            else "fills its space (edges cropped if the shape differs)")
+
+
+def _where_of(w: str) -> str | None:
+    w = w.strip()
+    if w.startswith("full"):
+        return "full"
+    if w.startswith(("bottom", "lower")) or w == "over me":
+        return "bottom"
+    if w in ("auto", "layout"):
+        return None
+    return "top"
+
+
+def _where_txt(where: str | None, split: bool) -> str:
+    if where is None:
+        return "follows the layout (" + ("top panel" if split else "full screen") + ")"
+    if where == "full":
+        return "full screen (hides you, your voice continues)"
+    if split:
+        return "in the top panel (card area)" if where == "top" else "over YOU in the bottom panel (the card stays on top)"
+    return "in the top half (you in the bottom half)" if where == "top" else "in the bottom half (you in the top half)"
 
 
 def _broll_global_cmd(data: dict, t: str) -> str | None:
@@ -208,15 +255,25 @@ def _broll_global_cmd(data: dict, t: str) -> str | None:
             if s.pop("broll", None):
                 n += 1
         return f"B-roll removed from {n} scene(s)." if n else "! No scene has B-roll."
-    m = re.fullmatch(r"broll (top|panel|top panel|full|fullscreen|full screen)", t)
+    m = re.fullmatch(BROLL_FIT_RE, t)
     if m:
-        where = "full" if m.group(1).startswith("full") else "top"
+        fit = _fit_of(m.group(1))
         n = 0
         for s in data["scenes"]:
             if isinstance(s.get("broll"), dict):
-                s["broll"] = dict(s["broll"], where=where)
+                s["broll"] = {k: v for k, v in s["broll"].items() if k != "fit"} | ({"fit": "fit"} if fit == "fit" else {})
                 n += 1
-        return f"All B-roll ({n} scene(s)) {'full screen' if where == 'full' else 'in the top panel'}." if n else "! No scene has B-roll."
+        return f"All B-roll ({n} scene(s)) {_fit_txt(fit)}." if n else "! No scene has B-roll."
+    m = re.fullmatch(BROLL_WHERE_RE, t)
+    if m:
+        where = _where_of(m.group(1))
+        n = 0
+        for s in data["scenes"]:
+            if isinstance(s.get("broll"), dict):
+                s["broll"] = {k: v for k, v in s["broll"].items() if k != "where"} | ({"where": where} if where else {})
+                n += 1
+        split = data["settings"].get("layout") == "split"
+        return f"All B-roll ({n} scene(s)) {_where_txt(where, split)}." if n else "! No scene has B-roll."
     return None
 
 
@@ -337,6 +394,23 @@ def _scene_cmd(sc: dict, t: str, data: dict) -> str | None:
         sc.pop("captions_auto_off", None)
         sc["captions"] = False
         return "Captions off for this scene."
+    # exact height: "captions at 65%" = the caption line's centre 65 % down from the top of the screen
+    m = re.fullmatch(r"(?:captions?|subtitles?) (?:at|position|pos|place|height|y) ([\d.,]+)\s*%?", t)
+    if m:
+        x = round(_num(m.group(1)), 1)
+        if not 5 <= x <= 95:
+            return "!Caption height must be between 5 and 95 (% from the top of the screen)."
+        sc["cap_pos"] = x
+        st = data["settings"] if data else {}
+        seam = float(st.get("split_ratio", 0.44) or 0.44) * 100 if st.get("layout") == "split" else None
+        warn = ""
+        if x > 80:
+            warn = " ⚠ Below 80 % Instagram/YouTube put their caption text and buttons over it – 70-78 % is safer."
+        elif seam and x < seam - 2:
+            warn = f" ⚠ That is on the top card (the card area ends at {seam:.0f} %)."
+        elif x < 10:
+            warn = " ⚠ The very top is covered by the app's header on Reels/Shorts."
+        return f"Captions at {x:g} % from the top in this scene.{warn}"
     m = re.fullmatch(r"(?:captions?|subtitles?) (?:at|position|pos|place) (head|top|center|centre|middle|below|bottom|auto|default)", t)
     if m:
         v = {"top": "head", "centre": "center", "middle": "center", "bottom": "below", "default": "auto"}.get(m.group(1), m.group(1))
@@ -389,6 +463,312 @@ def _split(data: dict, sc: dict, at: float) -> str:
     return f"Split at {at:.2f}s → new scene {idx + 2}."
 
 
+MAX_SCENES = 300
+
+
+def _duplicate(data: dict, src: dict, after: dict) -> str:
+    """Copy a scene (with ALL its edits: trims, speed, zoom moments, captions, card, text, B-roll cover, volume…)
+    and put the copy right after `after`. The copy is always IN the video: a cut scene comes back kept, a B-roll
+    scene becomes a normal scene with its own sound (a copied cutaway stub would do nothing)."""
+    if len(data["scenes"]) >= MAX_SCENES:
+        return f"!Too many scenes ({MAX_SCENES}) – cut or remove some first."
+    new = copy.deepcopy(src)
+    new["id"] = core.new_id("sc")
+    notes = []
+    if not new.get("keep", True):
+        new["keep"] = True
+        notes.append("it was cut – the copy is in the video")
+    if new.get("role") == "broll":
+        new.pop("role", None)
+        notes.append("the copy plays as its own scene, with its own sound")
+    new.pop("thumb", None)  # made by the caller for the new id
+    n = data["scenes"].index(src) + 1  # BEFORE the insert (a copy pasted in front of it would shift its number)
+    idx = data["scenes"].index(after) + 1
+    data["scenes"].insert(idx, new)
+    note = f" ({'; '.join(notes)})" if notes else ""
+    return f"Copy of scene {n} added as scene {idx + 1}{note} – {len(data['scenes'])} scenes now. Drag it anywhere."
+
+
+# ----------------------------------------------------------------- library: transitions, effects, stickers, sounds
+# scene["transition"] = {"type": xfade id, "dur": s, "sound": {file, sync, gain_db, name} | None}  (INTO this scene)
+# scene["effects"]    = [effect id, ...]
+# scene["stickers"]   = [{"file", "name", "at", "dur", "pos", "size", "anim"}]   (times = seconds into the scene)
+# scene["sfx"]        = [{"file", "name", "at", "vol", "sync", "gain_db"}]      (at = the moment the hit should land)
+# Everything the render needs is stored in the scene (file + sync + level), so the render never needs the catalog.
+MAX_STICKERS, MAX_SFX, MAX_EFFECTS = 8, 12, 4
+_TIME = r"([\d.,]+)\s*(?:s|sec|seconds)?"
+
+
+def _trans_id(name: str) -> str | None:
+    k = library.slug(name).replace("_", "")
+    for tid, (nm, _g, _s) in library.TRANSITIONS.items():
+        if k in (tid, library.slug(nm).replace("_", "")):
+            return tid
+    return None
+
+
+_FX_ALIAS = {"blackwhite": "bw", "bnw": "bw", "greyscale": "bw", "grayscale": "bw", "monochrome": "bw",
+             "kenburns": "slowzoom", "zoom": "punchin", "punch": "punchin", "whiteflash": "flash", "fade": "fadein",
+             "negative": "invertflash", "invert": "invertflash", "film": "vintage", "old": "vintage", "retro": "vintage",
+             "colour": "punchy", "color": "punchy", "vibrant": "punchy", "chromatic": "rgbsplit",
+             "zoomin": "punchin", "pushin": "slowzoom", "zoomslow": "slowzoom"}
+
+
+def _effect_id(name: str) -> str | None:
+    """An effect by id or name, forgiving: 'black and white', 'B&W', 'punch in', 'ken burns'…"""
+    k = library.slug(name.replace("&", " ")).replace("_", "").replace("and", "")
+    k = _FX_ALIAS.get(k, k)
+    for e, (nm, _g, _d) in library.EFFECTS.items():
+        if k in (e, library.slug(nm.replace("&", " ")).replace("_", "").replace("and", "")):
+            return e
+    return None
+
+
+def _sound_ref(it: dict) -> dict:
+    return {"file": it["file"], "name": it["name"], "sync": round(float(it.get("sync") or 0), 3),
+            "gain_db": float(it.get("gain_db") or 0)}
+
+
+def _opts(rest: str, full: bool = True) -> tuple[dict, str]:
+    """Pull 'at 1.2', 'for 2', 'vol 80%', 'size 25%', a position and an animation out of a command tail.
+    full=False (sounds): only at / vol – a sound id like "pop-soft" or "whoosh-left" must stay whole."""
+    o = {}
+    pats = [("at", r"\bat " + _TIME), ("dur", r"\bfor " + _TIME), ("vol", r"\b(?:vol|volume) ([\d.,]+)\s*%?"),
+            ("size", r"\bsize ([\d.,]+)\s*%?")]
+    for key, pat in pats:
+        m = re.search(pat, rest)
+        if m:
+            o[key] = _num(m.group(1))
+            rest = rest[:m.start()] + rest[m.end():]
+    if not full:
+        return o, re.sub(r"\s+", " ", rest).strip()
+    m = re.search(r"\b(top-left|top-right|bottom-left|bottom-right|top left|top right|bottom left|bottom right|"
+                  r"top|bottom|left|right|center|centre|middle)\b", rest)
+    if m:
+        o["pos"] = {"centre": "center", "middle": "center"}.get(m.group(1), m.group(1).replace(" ", "-"))
+        rest = rest[:m.start()] + rest[m.end():]
+    m = re.search(r"\b(pop|bounce|still|static)\b", rest)
+    if m:
+        o["anim"] = "still" if m.group(1) == "static" else m.group(1)
+        rest = rest[:m.start()] + rest[m.end():]
+    return o, re.sub(r"\s+", " ", rest).strip()
+
+
+def _apply_sticker_opts(st: dict, o: dict) -> list[str]:
+    done = []
+    if "at" in o:
+        st["at"] = round(max(0.0, o["at"]), 2)
+        done.append(f"at {st['at']:g} s")
+    if "dur" in o:
+        st["dur"] = round(max(0.2, o["dur"]), 2)
+        done.append(f"for {st['dur']:g} s")
+    if "pos" in o:
+        st["pos"] = o["pos"]
+        done.append(o["pos"])
+    if "size" in o:
+        v = o["size"] / 100 if o["size"] > 1 else o["size"]
+        st["size"] = round(min(0.9, max(0.05, v)), 3)
+        done.append(f"size {round(st['size'] * 100)} %")
+    if "anim" in o:
+        st["anim"] = o["anim"]
+        done.append(o["anim"])
+    return done
+
+
+def _library_scene_cmd(data: dict, sc: dict, t: str) -> str | None:
+    # ---- transition INTO this scene
+    if re.fullmatch(r"(?:transition|trans) (?:off|none|cut|remove|no)|no transition", t):
+        if not sc.get("transition"):
+            return "! This scene has no transition."
+        sc.pop("transition")
+        return "Transition removed – a straight cut into this scene."
+    m = re.fullmatch(r"(?:transition|trans) sound (on|off)", t)
+    if m:
+        tr = sc.get("transition")
+        if not tr:
+            return "! No transition on this scene yet."
+        if m.group(1) == "off":
+            tr["sound"] = None
+            return "Transition plays without a sound."
+        it = library.find("sound", library.TRANSITIONS[tr["type"]][2] or "whoosh-fast-soft")
+        if not it:
+            return "! No whoosh sounds in the Library yet – run Library setup."
+        tr["sound"] = _sound_ref(it)
+        return f'Transition sound: "{it["name"]}".'
+    m = re.fullmatch(r"(?:transition|trans) (.+?)(?: " + _TIME + r")?( silent| no sound| with sound)?", t)
+    if m:
+        tid = _trans_id(m.group(1))
+        if not tid:
+            return f'! No transition called "{m.group(1)}". Try: fade, slide left, zoom in, wipe up, circle open…'
+        dur = round(min(1.0, max(0.15, _num(m.group(2)))), 2) if m.group(2) else \
+            (sc.get("transition") or {}).get("dur") or library.DEFAULT_TRANS_DUR
+        old = sc.get("transition") or {}
+        snd = None
+        if m.group(3) != " silent" and m.group(3) != " no sound":
+            keep_off = old and old.get("sound") is None and m.group(3) is None and old.get("type")
+            want = library.TRANSITIONS[tid][2]
+            if want and not keep_off:
+                it = library.find("sound", want)
+                snd = _sound_ref(it) if it else None
+            elif m.group(3) == " with sound":
+                it = library.find("sound", "whoosh-fast-soft")
+                snd = _sound_ref(it) if it else None
+        sc["transition"] = {"type": tid, "dur": dur, "sound": snd}
+        vid = [x for x in data["scenes"] if x.get("keep", True) and x.get("role") != "broll"]
+        first = " ⚠ This is the first scene – nothing comes before it, so no transition shows (use effect “fade in”)." \
+            if vid and vid[0] is sc else ""
+        return (f"Transition into this scene: {library.TRANSITIONS[tid][0]} ({dur:g} s)"
+                f"{' + ' + snd['name'] if snd else ', no sound'}. Lengths don't change.{first}")
+    # ---- effects
+    if re.fullmatch(r"(?:effects?|fx) (?:off|none|clear|remove all)|no effects?", t):
+        if not sc.get("effects"):
+            return "! This scene has no effects."
+        sc.pop("effects")
+        return "Effects removed."
+    m = re.fullmatch(r"(?:effects?|fx) (?:remove|off) (.+)|no (.+) effect", t)
+    if m:
+        name = _effect_id(m.group(1) or m.group(2)) or "?"
+        eff = [e for e in sc.get("effects") or [] if e != name]
+        if eff == (sc.get("effects") or []):
+            return f'! No "{m.group(1) or m.group(2)}" effect on this scene.'
+        sc["effects"] = eff
+        if not eff:
+            sc.pop("effects")
+        return "Effect removed."
+    m = re.fullmatch(r"(?:effects?|fx) (.+)", t)
+    if m:
+        eid = _effect_id(m.group(1))
+        if not eid:
+            return f'! No effect called "{m.group(1)}". Try: flash, shake, punch-in, glitch, black & white, vintage…'
+        eff = list(sc.get("effects") or [])
+        if eid in eff:
+            return f"{library.EFFECTS[eid][0]} is already on this scene."
+        if len(eff) >= MAX_EFFECTS:
+            return f"! At most {MAX_EFFECTS} effects per scene – remove one first."
+        clash = {"punchin", "slowzoom", "zoomout"}
+        if eid in clash:
+            eff = [e for e in eff if e not in clash]  # one camera zoom at a time
+        sc["effects"] = eff + [eid]
+        return f"Effect: {library.EFFECTS[eid][0]} – {library.EFFECTS[eid][2]}"
+    # ---- stickers
+    if re.fullmatch(r"stickers? (?:off|none|clear|remove all)|no stickers?", t):
+        if not sc.get("stickers"):
+            return "! This scene has no stickers."
+        sc.pop("stickers")
+        return "Stickers removed."
+    m = re.fullmatch(r"sticker (?:remove|delete|off) (\d+)|sticker (\d+) (?:remove|delete|off)", t)
+    if m:
+        i = int(m.group(1) or m.group(2)) - 1
+        lst = sc.get("stickers") or []
+        if not 0 <= i < len(lst):
+            return f"! No sticker {i + 1} on this scene."
+        gone = lst.pop(i)
+        if not lst:
+            sc.pop("stickers")
+        return f'Sticker "{gone.get("name", "")}" removed.'
+    m = re.fullmatch(r"sticker (\d+) (.+)", t)
+    if m:
+        i = int(m.group(1)) - 1
+        lst = sc.get("stickers") or []
+        if not 0 <= i < len(lst):
+            return f"! No sticker {i + 1} on this scene."
+        o, left = _opts(m.group(2))
+        if left or not o:
+            return "! Sticker settings: at 1.5 · for 2 · top-right / center / bottom … · size 25% · pop / bounce / still"
+        return f"Sticker {i + 1}: " + ", ".join(_apply_sticker_opts(lst[i], o)) + "."
+    m = re.fullmatch(r"sticker (.+)", t)
+    if m:
+        o, name = _opts(m.group(1))
+        if re.fullmatch(r"\d+", name or ""):
+            return f"! Say what to change, e.g. sticker {name} at 1.5 · sticker {name} top-left · sticker remove {name}."
+        it = library.find("sticker", name) if name else None
+        if not it:
+            return f'! No sticker called "{name}" in the Library.' + ("" if library.catalog()["stickers"] else
+                                                                       " (The Library is empty – run Library setup.)")
+        lst = sc.setdefault("stickers", [])
+        if len(lst) >= MAX_STICKERS:
+            return f"! At most {MAX_STICKERS} stickers per scene."
+        st = {"file": it["file"], "name": it["name"], "at": 0.3, "dur": 2.0, "pos": "top-right", "size": 0.22, "anim": "pop"}
+        _apply_sticker_opts(st, o)
+        lst.append(st)
+        return f'Sticker "{it["name"]}" ({len(lst)}) at {st["at"]:g} s for {st["dur"]:g} s, {st["pos"]}.'
+    # ---- sound effects
+    if t in ("sound off", "audio off", "sound on", "audio on"):
+        return _scene_cmd(sc, "mute" if t.endswith("off") else "unmute", data)
+    if re.fullmatch(r"(?:sfx|sound effects?|sounds) (?:off|none|clear|remove all)|no (?:sfx|sound effects)", t):
+        if not sc.get("sfx"):
+            return "! This scene has no sound effects."
+        sc.pop("sfx")
+        return "Sound effects removed."
+    m = re.fullmatch(r"(?:sfx|sound) (?:remove|delete|off) (\d+)|(?:sfx|sound) (\d+) (?:remove|delete|off)", t)
+    if m:
+        i = int(m.group(1) or m.group(2)) - 1
+        lst = sc.get("sfx") or []
+        if not 0 <= i < len(lst):
+            return f"! No sound effect {i + 1} on this scene."
+        gone = lst.pop(i)
+        if not lst:
+            sc.pop("sfx")
+        return f'Sound "{gone.get("name", "")}" removed.'
+    m = re.fullmatch(r"(?:sfx|sound) (\d+) (.+)", t)
+    if m:
+        i = int(m.group(1)) - 1
+        lst = sc.get("sfx") or []
+        if not 0 <= i < len(lst):
+            return f"! No sound effect {i + 1} on this scene."
+        o, left = _opts(m.group(2), full=False)
+        if left or not ({"at", "vol"} & set(o)):
+            return "! Sound settings: at 1.5 · vol 80%"
+        if "at" in o:
+            lst[i]["at"] = round(max(0.0, o["at"]), 2)
+        if "vol" in o:
+            lst[i]["vol"] = round(min(2.0, max(0.0, o["vol"] / 100 if o["vol"] > 2 else o["vol"])), 2)
+        return f"Sound {i + 1}: at {lst[i]['at']:g} s, volume {round(lst[i].get('vol', 1) * 100)} %."
+    m = re.fullmatch(r"(sfx|sound effect|sound) (.+)", t)
+    if m:
+        o, name = _opts(m.group(2), full=False)
+        # bare "sound …" is also everyday speech ("sound louder") – only an exact library name counts there
+        it = library.find("sound", name, exact=m.group(1) == "sound") if name else None
+        if not it and m.group(1) == "sound":
+            return None
+        if not it:
+            return f'! No sound called "{name}" in the Library.' + ("" if library.catalog()["sounds"] else
+                                                                     " (The Library is empty – run Library setup.)")
+        lst = sc.setdefault("sfx", [])
+        if len(lst) >= MAX_SFX:
+            return f"! At most {MAX_SFX} sound effects per scene."
+        e = dict(_sound_ref(it), at=round(max(0.0, o.get("at", 0.0)), 2),
+                 vol=round(min(2.0, max(0.0, (o["vol"] / 100 if o["vol"] > 2 else o["vol"]))), 2) if "vol" in o else 1.0)
+        lst.append(e)
+        return f'Sound "{it["name"]}" ({len(lst)}) hits at {e["at"]:g} s into the scene.'
+    return None
+
+
+def _library_global_cmd(data: dict, t: str) -> str | None:
+    m = re.fullmatch(r"transitions? (?:off|none|cut|remove)|no transitions", t)
+    if m:
+        n = sum(1 for s in data["scenes"] if s.pop("transition", None))
+        return f"Transitions removed from {n} scene(s)." if n else "! No scene has a transition."
+    m = re.fullmatch(r"transitions? (?:everywhere |all )?(.+?)(?: " + _TIME + r")?( silent| no sound)?", t)
+    if m:
+        tid = _trans_id(m.group(1))
+        if not tid:
+            return f'! No transition called "{m.group(1)}".'
+        vid = [x for x in data["scenes"] if x.get("keep", True) and x.get("role") != "broll"]
+        n = 0
+        for sc in vid[1:]:
+            r = _library_scene_cmd(data, sc, f"transition {tid}" + (f" {m.group(2)}" if m.group(2) else "") +
+                                   (m.group(3) or ""))
+            n += r is not None and not r.startswith("!")
+        return f"Transition {library.TRANSITIONS[tid][0]} between all {n + 1} scenes ({n} cuts)."
+    for word, key, label in (("stickers", "stickers", "Stickers"), ("sfx", "sfx", "Sound effects"),
+                             ("sound effects", "sfx", "Sound effects"), ("effects", "effects", "Effects")):
+        if t in (f"{word} off", f"no {word}", f"remove all {word}", f"{word} none"):
+            n = sum(1 for s in data["scenes"] if s.pop(key, None))
+            return f"{label} removed from {n} scene(s)." if n else f"! No scene has {label.lower()}."
+    return None
+
+
 def _global_cmd(data: dict, t: str) -> str | None:
     st = data["settings"]
     m = re.fullmatch(r"(?:format|aspect|ratio|make it) (9:16|16:9|1:1|4:5|original|vertical|portrait|landscape|square|reels?|shorts?)", t)
@@ -407,6 +787,26 @@ def _global_cmd(data: dict, t: str) -> str | None:
     if t in ("captions off", "subtitles off", "no captions"):
         st["captions"] = False
         return "Captions off (all scenes without their own setting)."
+    m = re.fullmatch(r"(?:captions?|subtitles?) (?:at|position|pos|place|height|y) (?:([\d.,]+)\s*%?|auto|default)", t)
+    if m:
+        if m.group(1) is not None:
+            x = round(_num(m.group(1)), 1)
+            if not 5 <= x <= 95:
+                return "!Caption height must be between 5 and 95 (% from the top of the screen)."
+        else:
+            x = None
+        st["caption_y"] = x
+        own = [s for s in data["scenes"] if s.get("cap_pos") is not None]
+        for s in own:
+            s.pop("cap_pos", None)
+        cleared = f" ({len(own)} scene(s) had their own position – they follow this now)" if own else ""
+        if x is None:
+            return "Captions follow the look's position in every scene." + cleared
+        seam = float(st.get("split_ratio", 0.44) or 0.44) * 100 if st.get("layout") == "split" else None
+        warn = (" ⚠ Below 80 % Instagram/YouTube put their caption text and buttons over it – 70-78 % is safer." if x > 80
+                else f" ⚠ That is on the top card (the card area ends at {seam:.0f} %)." if seam and x < seam - 2
+                else " ⚠ The very top is covered by the app's header on Reels/Shorts." if x < 10 else "")
+        return f"Captions at {x:g} % from the top in ALL scenes{cleared}.{warn}"
     m = re.fullmatch(r"captions? (upper|uppercase|caps|normal|lower)", t)
     if m:
         st["caption_case"] = "upper" if m.group(1) in ("upper", "uppercase", "caps") else "normal"
@@ -546,7 +946,8 @@ def _caption_lang_cmd(data: dict, raw: str, t: str) -> str | None:
     return None
 
 
-GLOBAL_TO_ALL = re.compile(r"(speed .*|[\d.,]+\s*x.*|slow ?mo.*|slow motion|normal speed|mute|unmute|volume .*|zoom .*|no zoom|punch in)")
+GLOBAL_TO_ALL = re.compile(r"(speed .*|[\d.,]+\s*x.*|slow ?mo.*|slow motion|normal speed|mute|unmute|volume .*|zoom .*|no zoom|punch in|"
+                           r"captions? at (?:head|top|center|centre|middle|below|bottom))")
 
 
 def apply(data: dict, scene_id: str | None, text: str) -> tuple[list[str], list[str], bool]:
@@ -577,9 +978,23 @@ def apply(data: dict, scene_id: str | None, text: str) -> tuple[list[str], list[
                 reply = f'Text overlay: "{sc["text"]}".'
             else:
                 m = re.fullmatch(r"split(?: at| here at)? ([\d.,]+)\s*(?:s|sec|seconds)?", t)
-                reply = _split(data, sc, _num(m.group(1))) if m else _scene_cmd(sc, t, data)
+                d = re.fullmatch(r"(?:duplicate|copy|dup|clone)(?: (?:this )?scene)?|paste(?: scene)? (\d+)(?: here)?", t)
+                if m:
+                    reply = _split(data, sc, _num(m.group(1)))
+                elif d and d.group(1):  # paste scene N = a copy of scene N goes right after the selected scene
+                    k = int(d.group(1))
+                    reply = (_duplicate(data, data["scenes"][k - 1], sc) if 1 <= k <= len(data["scenes"])
+                             else f"!There is no scene {k} (1-{len(data['scenes'])}).")
+                elif d:
+                    reply = _duplicate(data, sc, sc)
+                else:
+                    reply = _library_scene_cmd(data, sc, t)
+                    if reply is None:
+                        reply = _scene_cmd(sc, t, data)
         else:
-            reply = _global_cmd(data, t)
+            reply = _library_global_cmd(data, t)
+            if reply is None:
+                reply = _global_cmd(data, t)
             if reply is None:
                 m = re.fullmatch(r"logo (.+)", raw.strip(), flags=re.I)
                 if m and (core.BRAND / m.group(1).strip()).exists():
