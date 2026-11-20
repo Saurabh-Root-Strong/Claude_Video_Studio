@@ -74,6 +74,11 @@
      Click a WORD to fix how the captions write it.
      HOVER over any button or label to see what it does.
      Command: captions at head / center / below / auto
+     ZOOM MOMENTS: a quick punch-in on a few words, INSIDE the scene -
+     the scene stays one scene. Type  punch 1.2-2.5  (seconds in this
+     scene; add a strength: punch 1.2-2.5 1.2). Shown in the Inspector
+     under Zoom (click x to remove). Claude's storyboard punch-ins are
+     zoom moments too - they never cut your scene into pieces.
      Text on screen never covers the captions - if both want the same
      place, the text moves above/below them. Long text wraps by itself.
      Music-only scenes: the speech recognizer "hears" fake words in

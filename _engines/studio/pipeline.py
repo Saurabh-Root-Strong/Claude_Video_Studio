@@ -387,9 +387,37 @@ def build_scenes(duration: float, cuts: list[float], words: list[dict], silences
     return [(round(a, 3), round(b, 3)) for a, b in final if b - a > 0.05]
 
 
+# HDR phone footage (iPhone default: HLG / Dolby Vision 10-bit; many Androids: HDR10/PQ) turned grey and washed-out
+# when squeezed into normal 8-bit video. Tone-map it to SDR BT.709 first – the look a phone shows when you share.
+HDR_TRC = ("arib-std-b67", "smpte2084")
+_HDR_CACHE: dict = {}
+
+
+def is_hdr(path: Path) -> bool:
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return False
+    key = (str(path), st.st_size, st.st_mtime)
+    if key not in _HDR_CACHE:
+        try:
+            out = run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=color_transfer",
+                       "-of", "default=nw=1:nk=1", path]).strip().lower()
+        except PipelineError:
+            out = ""
+        _HDR_CACHE[key] = any(t in out for t in HDR_TRC)
+    return _HDR_CACHE[key]
+
+
+def hdr_chain() -> list[str]:
+    return ["zscale=t=linear:npl=100", "format=gbrpf32le", "zscale=p=bt709", "tonemap=tonemap=mobius:desat=0",
+            "zscale=t=bt709:m=bt709:r=tv", "format=yuv420p"]
+
+
 def thumbnail(src: Path, t: float, out: Path, width: int = 320) -> None:
+    pre = ",".join(hdr_chain()) + "," if is_hdr(src) else ""
     run([FFMPEG, "-y", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", src, "-frames:v", "1",
-         "-vf", f"scale={width}:-2", "-q:v", "4", out])
+         "-vf", f"{pre}scale={width}:-2", "-q:v", "4", out])
 
 
 STRIP_N = 24  # frames in a clip's film strip (the timeline shows as many as fit the block)
@@ -430,7 +458,8 @@ def make_proxy(src: Path, out: Path, has_audio: bool) -> None:
     """Light 540p H.264 copy for the browser player (plays HEVC/ProRes/MKV sources, easy on 7 GB RAM)."""
     out.parent.mkdir(exist_ok=True)
     tmp = out.with_name(out.stem + ".part.mp4")
-    common = ["-vf", "scale=-2:'min(540,ih)'", "-g", "30", "-pix_fmt", "yuv420p"]
+    pre = ",".join(hdr_chain()) + "," if is_hdr(src) else ""
+    common = ["-vf", f"{pre}scale=-2:'min(540,ih)'", "-g", "30", "-pix_fmt", "yuv420p"]
     audio = ["-c:a", "aac", "-b:a", "96k", "-ac", "2"] if has_audio else ["-an"]
     for venc in (["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "30"], ["-c:v", "libx264", "-preset", "veryfast", "-crf", "30"]):
         try:
@@ -547,6 +576,8 @@ def analyze_project(pid: str, reanalyze: bool = False) -> int:
             failed += 1
             core.job_log(pid, f"{tag}: FAILED – {e}")
             msg = str(e).splitlines()[0][:160] if str(e) else type(e).__name__
+            if "ffprobe" in msg or "Invalid data" in str(e):
+                msg = "can't read this file – it is damaged, still being copied, or not really a video"
             core.mutate(pid, lambda d, f=src["file"], m=msg: (core.source_by_file(d, f) or {}).update(error=m))
     if failed and failed == len(todo):
         raise PipelineError("Every file failed to analyze – see the activity log.")
@@ -561,8 +592,7 @@ def _analyze_one(pid: str, src: dict, tag: str, lang: str, wd: Path) -> None:
         core.job_log(pid, f"{tag}: probing")
         meta = probe(path)
         if not meta["has_video"]:
-            core.job_log(pid, f"{tag}: no video stream – skipped")
-            return
+            raise PipelineError("this file has sound only, no picture – for background music put it in the Brand Kit/music folder")
         if meta["duration"] <= 0.1:
             raise PipelineError("could not read the video length (file damaged or still being copied?)")
         core.set_job(pid, progress=f"{tag}: making preview copy")
@@ -677,9 +707,19 @@ def analyze_reference(pid: str, ref_file: str) -> dict:
 
 def download_reference(pid: str, url: str) -> str:
     out_tpl = str(core.refs_dir(pid) / "%(title).60s [%(id)s].%(ext)s")
-    out = run([YTDLP, "--no-playlist", "-f", "bv*[height<=1080]+ba/b[height<=1080]/b", "--merge-output-format", "mp4",
-               "--restrict-filenames", "-o", out_tpl, "--no-simulate", "-O", "after_move:filepath", url],
-              timeout=60 * 30)
+    try:
+        out = run([YTDLP, "--no-playlist", "-f", "bv*[height<=1080]+ba/b[height<=1080]/b", "--merge-output-format", "mp4",
+                   "--restrict-filenames", "-o", out_tpl, "--no-simulate", "-O", "after_move:filepath", url],
+                  timeout=60 * 30)
+    except PipelineError as e:  # say WHY in plain words – the raw yt-dlp text means nothing to a creator
+        t = str(e).lower()
+        why = ("no internet, or the website can't be reached" if any(k in t for k in ("getaddrinfo", "failed to resolve", "timed out", "connection"))
+               else "the video is private or needs a login" if any(k in t for k in ("private", "sign in", "login", "log in", "cookies", "members"))
+               else "this website isn't supported" if "unsupported url" in t
+               else "the video was removed or the link is wrong" if any(k in t for k in ("404", "not found", "unavailable", "removed"))
+               else "the download failed")
+        raise PipelineError(f"Could not download the reference: {why}. Tip: download the video yourself and drag the "
+                            f"file into References.") from e
     lines = [l.strip() for l in out.splitlines() if l.strip() and Path(l.strip()).suffix and Path(l.strip()).exists()]
     if not lines:
         raise PipelineError("yt-dlp finished but no file path was reported.")
@@ -773,6 +813,52 @@ def _map_time(rel: float, ranges: list[tuple[float, float]], speed: float) -> fl
             return (acc + rel - a) / speed
         acc += b - a
     return None
+
+
+def zoom_windows(scene: dict, ranges, speed: float, out_dur: float, fps: int) -> list[tuple[float, float, float]]:
+    """scene["punches"] = [[src_start, src_end, zoom], ...] (source seconds) -> windows on the segment's OUTPUT
+    timeline (after cuts + speed), sorted, non-overlapping, at least one frame long."""
+    out = []
+    for p in scene.get("punches") or []:
+        try:
+            s, e, z = float(p[0]), float(p[1]), float(p[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        s, e = max(s, scene["in"]), min(e, scene["out"])
+        if e - s < 0.05 or z <= 1.001:
+            continue
+        a = _map_time(s - scene["in"], ranges, speed)
+        b = _map_time(e - scene["in"], ranges, speed)
+        a = out_dur if a is None else a
+        b = out_dur if b is None else b
+        if b - a >= 1.0 / fps:
+            out.append((a, b, min(z, 3.0)))
+    out.sort()
+    clean, t = [], 0.0
+    for a, b, z in out:
+        a = max(a, t)
+        if b - a >= 1.0 / fps:
+            clean.append((a, b, z))
+            t = b
+    return clean
+
+
+def zoom_pieces(windows, geo, base_zoom: float) -> str:
+    """Filter text: split the stream into time pieces, each with its own zoom geometry, joined again – a snap
+    punch-in INSIDE the scene (the scene stays one scene on the timeline)."""
+    segs, t = [], 0.0
+    for a, b, z in windows:
+        if a > t + 1e-3:
+            segs.append((t, a, base_zoom))
+        segs.append((a, b, z))
+        t = b
+    segs.append((t, None, base_zoom))
+    n = len(segs)
+    txt = f"split={n}" + "".join(f"[zq{i}]" for i in range(n))
+    for i, (a, b, z) in enumerate(segs):
+        tr = f"trim=start={a:.4f}" + (f":end={b:.4f}" if b is not None else "")
+        txt += f";[zq{i}]{tr},setpts=PTS-STARTPTS,{','.join(geo(z))}[zr{i}]"
+    return txt + ";" + "".join(f"[zr{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0"
 
 
 def caption_center_y(scene: dict, w: int, h: int, seam_y: int | None) -> int | None:
@@ -957,13 +1043,15 @@ def green_key(pid: str, src_file: str) -> str | None:
     st = src.stat()
     cache = core.work_dir(pid) / f"{src_file}.key.json"
     c = core.read_json(cache, None)
-    if isinstance(c, dict) and c.get("sig") == [st.st_size, st.st_mtime]:
+    hdr = is_hdr(src)  # sample the SAME (tone-mapped) picture the chroma key will see
+    sig = [st.st_size, st.st_mtime] + (["hdr"] if hdr else [])
+    if isinstance(c, dict) and c.get("sig") == sig:
         return c.get("key")
     dur = (probe(src).get("duration") or 2.0)
     samples = []
     for t in (dur * 0.2, dur * 0.5, dur * 0.8):
         r = subprocess.run([FFMPEG, "-v", "error", "-ss", f"{t:.2f}", "-i", str(src), "-frames:v", "1",
-                            "-vf", "scale=16:28", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                            "-vf", (",".join(hdr_chain()) + "," if hdr else "") + "scale=16:28", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                            capture_output=True, timeout=60, creationflags=NO_WINDOW)
         b = r.stdout
         if len(b) < 16 * 28 * 3:
@@ -978,13 +1066,13 @@ def green_key(pid: str, src_file: str) -> str | None:
         greenish = sum(1 for p in samples if p[1] > p[0] * 1.2 and p[1] > p[2] * 1.2 and p[1] > 70) / len(samples)
         if greenish > 0.6:
             key = "%02X%02X%02X" % tuple(med)
-    core._atomic_write(cache, {"sig": [st.st_size, st.st_mtime], "key": key})
+    core._atomic_write(cache, {"sig": sig, "key": key})
     return key
 
 
-def _broll_chain(fps: int, bw: int, bh: int) -> list[str]:
+def _broll_chain(fps: int, bw: int, bh: int, hdr: bool = False) -> list[str]:
     """B-roll footage -> a bw x bh picture (cover + centre crop, like a phone fills the screen)."""
-    return [f"fps={fps}", "setpts=PTS-STARTPTS", f"scale={bw}:{bh}:force_original_aspect_ratio=increase",
+    return (hdr_chain() if hdr else []) + [f"fps={fps}", "setpts=PTS-STARTPTS", f"scale={bw}:{bh}:force_original_aspect_ratio=increase",
             f"crop={bw}:{bh}", "setsar=1", "format=yuv420p"]
 
 
@@ -1015,7 +1103,7 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     # the source file itself and the logo file – so re-analysis or a replaced logo never reuses a stale segment
     key = _seg_hash({k: v for k, v in scene.items() if k not in ("notes", "transcript", "thumb", "sb_applied")}, relevant, caps,
                     w, h, fps, preview, words_in(words, scene["in"], scene["out"]), st.st_size, st.st_mtime,
-                    logo_sig, "nvenc" if nvenc else "x264", gkey, 11)  # bump when caption/card/render logic changes
+                    logo_sig, "nvenc" if nvenc else "x264", gkey, 14)  # bump when caption/card/render logic changes
     out = seg_dir / f"seg_{key}.mp4"
     if out.exists() and out.stat().st_size > 1000:
         return out
@@ -1030,12 +1118,13 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     full = len(ranges) == 1 and ranges[0][0] <= 0.001 and ranges[0][1] >= dur - 0.001
     expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in ranges)
 
-    v = [f"fps={fps}"]
+    v = (hdr_chain() if is_hdr(src_path) else []) + [f"fps={fps}"]
     if not full:
         v += [f"select='{expr}'", f"setpts=N/{fps}/TB"]
     if abs(speed - 1.0) > 1e-3:
         v.append(f"setpts=PTS/{speed:.4f}")
     z = float(scene.get("zoom") or 1.0)
+    zw = zoom_windows(scene, ranges, speed, out_dur, fps)  # zoom moments (punch-ins) inside this scene
     pre = []  # graph parts that must come BEFORE the main [0:v] chain's consumers (split layout)
     top_h = 0
     br = scene.get("_broll") if isinstance(scene.get("_broll"), dict) and Path(scene["_broll"].get("file", "")).is_file() else None
@@ -1045,15 +1134,17 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     if split:
         top_h, bot_h = split_heights(h, settings)
         sw0, sh0 = (src or {}).get("width") or 1080, (src or {}).get("height") or 1920
-        f = max(w / sw0, bot_h / sh0) * z  # cover the panel, punch-in = extra scale
-        S_w, S_h = int(sw0 * f) // 2 * 2, int(sh0 * f) // 2 * 2
-        cx = max(0, (S_w - w) // 2)
-        cy = int(min(max(0.0, float(settings.get("face_y", 0.27)) * S_h - 0.42 * bot_h), S_h - bot_h)) // 2 * 2
+        def geo(zz, sw0=sw0, sh0=sh0, bot_h=bot_h):  # cover the panel; a punch-in is extra scale on the same face point
+            f = max(w / sw0, bot_h / sh0) * zz
+            S_w, S_h = int(sw0 * f) // 2 * 2, int(sh0 * f) // 2 * 2
+            cx = max(0, (S_w - w) // 2)
+            cy = int(min(max(0.0, float(settings.get("face_y", 0.27)) * S_h - 0.42 * bot_h), S_h - bot_h)) // 2 * 2
+            return [f"scale={S_w}:{S_h}", f"crop={w}:{bot_h}:{cx}:{cy}", "setsar=1"]  # pieces must match to concat
         if settings.get("grade", True):
             v.append("eq=brightness=0.03:contrast=1.04")
         if gkey:
             v += ["format=yuva444p", f"chromakey=0x{gkey}:0.08:0.03", "despill=type=green:mix=0.6:expand=0"]
-        v += [f"scale={S_w}:{S_h}", f"crop={w}:{bot_h}:{cx}:{cy}"]
+        v.append(zoom_pieces(zw, geo, z) if zw else ",".join(geo(z)))
         bg = (settings.get("bg_color") or "#F4F1EC").lstrip("#")
         panel = (settings.get("panel_color") or "#0F1B2D").lstrip("#")
         seam = (settings.get("highlight_color") or "#F97316").lstrip("#")
@@ -1066,22 +1157,23 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
             pr, pg, pb = (int(panel[i:i + 2], 16) if len(panel) == 6 else 30 for i in (0, 2, 4))
             dim = [f"lutrgb=r='val*0.45+{pr * 0.55:.1f}':g='val*0.45+{pg * 0.55:.1f}':b='val*0.45+{pb * 0.55:.1f}'",
                    "format=yuv420p"] if card_on else []
-            pre.append(f"[1:v]{','.join(_broll_chain(fps, w, top_h) + dim)}[top]")
+            pre.append(f"[1:v]{','.join(_broll_chain(fps, w, top_h, br.get("hdr")) + dim)}[top]")
         else:
             pre.append(f"color=c=0x{panel}:s={w}x{top_h}:r={fps},format=yuv420p[top]")
         speaker_tail = (f"[bg][sp]overlay=0:0:shortest=1[bot];" if gkey else "") + \
                        f"[top][{'bot' if gkey else 'sp'}]vstack=inputs=2:shortest=1," \
                        f"drawbox=x=0:y={top_h - t // 2}:w={w}:h={t}:color=0x{seam}:t=fill,setsar=1"
         if br_where == "full":  # cutaway hides the whole frame; captions still go on top (post)
-            speaker_tail += f"[comp];[1:v]{','.join(_broll_chain(fps, w, h))}[br];[comp][br]overlay=0:0:shortest=1"
+            speaker_tail += f"[comp];[1:v]{','.join(_broll_chain(fps, w, h, br.get("hdr")))}[br];[comp][br]overlay=0:0:shortest=1"
     else:
-        if z > 1.001:
-            v.append(f"crop=trunc(iw/{z:.3f}/2)*2:trunc(ih/{z:.3f}/2)*2")
-        if settings.get("fit") == "pad":
-            v.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black")
-        else:
-            v.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}")
-        v.append("setsar=1")
+        def geo(zz):
+            g = [f"crop=trunc(iw/{zz:.3f}/2)*2:trunc(ih/{zz:.3f}/2)*2"] if zz > 1.001 else []
+            if settings.get("fit") == "pad":
+                g.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black")
+            else:
+                g.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}")
+            return g + ["setsar=1"]
+        v.append(zoom_pieces(zw, geo, z) if zw else ",".join(geo(z)))
 
     sid = scene["id"]
     post = []  # filters applied to the composed frame
@@ -1123,7 +1215,7 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     if split:
         graph = pre + [f"[0:v]{','.join(v)}[sp]", f"{speaker_tail}{(',' + ','.join(post)) if post else ''}[v0]"]
     elif br:
-        graph = [f"[0:v]{','.join(v)}[sp0]", f"[1:v]{','.join(_broll_chain(fps, w, h))}[br]",
+        graph = [f"[0:v]{','.join(v)}[sp0]", f"[1:v]{','.join(_broll_chain(fps, w, h, br.get("hdr")))}[br]",
                  f"[sp0][br]overlay=0:0:shortest=1{(',' + ','.join(post)) if post else ''}[v0]"]
     else:
         graph = [f"[0:v]{','.join(v + post)}[v0]"]
@@ -1143,8 +1235,22 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
 
     a = []
     if src and src.get("has_audio"):
+        # 32-sample frames FIRST: aselect keeps/drops whole frames (default ~1024 samples = 21 ms), so cuts landed
+        # up to 21 ms off the planned point – off the picture cut and outside the de-click fades
+        a.append("asetnsamples=n=32:p=0")
         if not full:
             a += [f"aselect='{expr}'", "asetpts=N/SR/TB"]
+        # de-click: every join (jump cut, word cut) and both segment ends are hard cuts in the waveform – an audible
+        # click mid-speech. A 5 ms fade on each side of every cut removes it (too short to hear as a dip).
+        # Measured on a 400 Hz tone: click at a jump cut 2347 -> 285 (clean sine step ~154).
+        joins, acc = [], 0.0
+        for ra, rb in ranges[:-1]:
+            acc += rb - ra
+            joins.append(acc)
+        total_in = sum(rb - ra for ra, rb in ranges)
+        F, D = 0.005, 0.001  # 5 ms ramp + 1 ms silence either side: the join lands within one 32-sample frame
+        terms = [f"min(1,t/{F})", f"min(1,max(0,{total_in:.4f}-t)/{F})"] + [f"min(1,max(0,abs(t-{j:.4f})-{D})/{F})" for j in joins[:150]]
+        a += [f"volume='{'*'.join(terms)}':eval=frame"]
         a += _atempo_chain(speed)
         vol = 0.0 if scene.get("mute") else float(scene.get("volume", 1.0))
         if abs(vol - 1.0) > 1e-3:
@@ -1236,7 +1342,8 @@ def with_broll(pid: str, data: dict, scenes: list[dict], cache: dict) -> list[di
         at = at % clip_len if clip_len > 0.2 else 0.0  # past the end: wrap (the input loops anyway)
         st = p.stat()
         where = "top" if split and b.get("where", "top") == "top" else "full"
-        out.append(dict(sc, _broll={"file": str(p), "at": round(at, 3), "where": where, "sig": [st.st_size, st.st_mtime]}))
+        out.append(dict(sc, _broll={"file": str(p), "at": round(at, 3), "where": where, "sig": [st.st_size, st.st_mtime],
+                                         "hdr": is_hdr(p)}))
         prev = b["src"]
         words, sil = cache.get(sc["src"], ([], []))
         t_next = at + estimated_duration(sc, sil, data["settings"])

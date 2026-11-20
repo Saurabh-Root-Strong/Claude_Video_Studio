@@ -144,14 +144,22 @@ def new_id(prefix: str) -> str:
 
 def slugify(name: str) -> str:
     s = re.sub(r"[^A-Za-z0-9]+", "-", name.strip()).strip("-").lower()
-    return s[:40] or "project"
+    s = s[:40].strip("-") or "project"
+    return f"{s}-project" if s.upper() in _WIN_RESERVED else s  # a folder can't be called "con" on Windows
 
 
 def safe_filename(name: str) -> str:
     name = Path(name).name
     stem, ext = os.path.splitext(name)
-    stem = re.sub(r"[^\w\-. ()\[\]]+", "_", stem, flags=re.UNICODE).strip(" .") or "file"
+    # keep any language as written (Hindi vowel signs are Unicode "marks", which \w drops – "मार्केट" became
+    # "म_र_क_ट"); only characters Windows forbids in names, control characters and quotes are replaced
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", stem).strip(" .") or "file"
+    if stem.split(".")[0].upper() in _WIN_RESERVED:  # "con.mp4" / "nul.mov" can't be created on Windows
+        stem = f"_{stem}"
     return f"{stem[:80]}{ext.lower()}"
+
+
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 
 
 def unique_path(folder: Path, name: str) -> Path:
@@ -301,6 +309,35 @@ def brand_settings() -> dict:
     return s
 
 
+class ProjectDamaged(Exception):
+    pass
+
+
+def _recover(pid: str) -> dict:
+    """project.json is unreadable (power cut / disk error / hand edit): restore the last good copy (.bak, written
+    before every save). The damaged file is kept next to it for inspection – never deleted."""
+    pf = _pfile(pid)
+    bak = pf.with_name("project.json.bak")
+    try:
+        with open(bak, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        raise ProjectDamaged(f"Project '{pid}' is damaged and has no readable backup "
+                             f"(Storyboards/{pid}/project.json). Your footage is safe in Raw Footage/{pid}.") from None
+    try:
+        shutil.copyfile(pf, pf.with_name(f"project.json.damaged-{now_iso().replace(':', '')}"))
+    except OSError:
+        pass
+    _atomic_write(pf, data)
+    try:
+        log = data.setdefault("job", {}).setdefault("log", [])
+        log.append(f"{now_iso()[11:19]}  project file was damaged – restored the last good copy (your latest change may be missing)")
+        _atomic_write(pf, data)
+    except Exception:  # noqa: BLE001 – the restore itself already succeeded
+        pass
+    return data
+
+
 def load(pid: str) -> dict:
     # On Windows, opening the file in the instant another process os.replace()s it raises PermissionError,
     # so retry briefly instead of failing a page load or a job.
@@ -310,10 +347,17 @@ def load(pid: str) -> dict:
                 with open(_pfile(pid), "r", encoding="utf-8") as f:
                     data = json.load(f)
             break
-        except (PermissionError, json.JSONDecodeError):
+        except PermissionError:
             if attempt == 19:
                 raise
             time.sleep(0.05)
+        except json.JSONDecodeError:
+            if attempt < 3:  # a write landing right now – retry briefly first
+                time.sleep(0.05)
+                continue
+            with _lock:
+                data = _recover(pid)
+            break
     # forward-fill new settings keys
     for k, v in DEFAULT_SETTINGS.items():
         data.setdefault("settings", {}).setdefault(k, v)
@@ -343,7 +387,14 @@ def save(pid: str, data: dict) -> None:
     with _lock:
         data["version"] = int(data.get("version", 0)) + 1
         data["updated"] = now_iso()
-        _atomic_write(_pfile(pid), data)
+        pf = _pfile(pid)
+        try:  # last good copy for _recover(); only from a file that still parses (never back up damage)
+            with open(pf, "r", encoding="utf-8") as f:
+                json.load(f)
+            shutil.copyfile(pf, pf.with_name("project.json.bak"))
+        except (OSError, json.JSONDecodeError):
+            pass
+        _atomic_write(pf, data)
 
 
 def mutate(pid: str, fn):
@@ -399,8 +450,9 @@ def list_projects() -> list[dict]:
                 p = load(d.name)
                 out.append({"id": p["id"], "name": p["name"], "updated": p.get("updated", p.get("created")),
                             "scenes": len(p.get("scenes", []))})
-            except Exception:  # corrupt / partial file – skip, don't crash listing
-                continue
+            except Exception:  # damaged beyond repair: still LIST it (a vanished project is worse than a broken one)
+                out.append({"id": d.name, "name": f"{d.name} (damaged – can't open)", "updated": "", "scenes": 0,
+                            "damaged": True})
     out.sort(key=lambda x: x.get("updated") or "", reverse=True)
     return out
 

@@ -110,8 +110,16 @@ def _worker():
         except Exception as e:  # report every failure to the UI rather than dying silently
             traceback.print_exc()
             try:
-                core.job_log(pid, f"ERROR: {e}")
-                core.set_job(pid, status="error", error=str(e), progress="Failed", finished=core.now_iso())
+                err = str(e)
+                low = err.lower()
+                if "no space left" in low or "not enough space" in low or "disk full" in low or "errno 28" in low:
+                    err = ("The disk is full – free some space (empty the Recycle Bin, delete old exports or "
+                           "Storyboards/<project>/work/segs) and try again.\n\n" + err)
+                elif "permission denied" in low or "being used by another process" in low:
+                    err = ("A file is open in another program (video player / antivirus scan?) – close it and try "
+                           "again.\n\n" + err)
+                core.job_log(pid, f"ERROR: {err}")
+                core.set_job(pid, status="error", error=err, progress="Failed", finished=core.now_iso())
             except Exception:  # project deleted/unreadable – reporting must never kill the worker thread
                 traceback.print_exc()
         finally:
@@ -256,7 +264,11 @@ def _decorate(data: dict) -> dict:
                        "included": sum(1 for s in data["sources"] if s.get("include", True)),
                        "duration": round(sum(s.get("duration") or 0 for s in data["sources"]), 1),
                        "bytes": sum(s.get("bytes") or 0 for s in data["sources"]),
-                       "new": sum(1 for s in data["sources"] if not s.get("analyzed") and not s.get("missing"))}
+                       "new": sum(1 for s in data["sources"] if not s.get("analyzed") and not s.get("error") and not s.get("missing"))}
+    # an export deleted / moved out of the Exports folder (or a cleaned-up preview): say so, don't show a dead player
+    for r in data.get("renders", []):
+        f = (core.EXPORTS if r.get("kind") == "final" else core.work_dir(data["id"])) / r.get("file", "")
+        r["missing"] = not f.is_file()
     data["inbox"] = sum(1 for c in data.get("commands", []) if c["status"] == "claude")
     data["undo_depth"] = core.history_depth(data["id"])
     sb = core.read_json(storyboard.sb_path(data["id"]), None)
@@ -328,7 +340,10 @@ def api_new_project():
 @app.get("/api/projects/<pid>")
 def api_project(pid):
     _exists(pid)
-    return jsonify(_decorate(core.load(pid)))
+    try:
+        return jsonify(_decorate(core.load(pid)))
+    except core.ProjectDamaged as e:
+        return jsonify(error=str(e), damaged=True), 500
 
 
 @app.get("/api/brandkit")

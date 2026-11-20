@@ -222,19 +222,21 @@ try:
     n_before = len(core.load(pid)["scenes"])
     storyboard.apply(pid)
     d = core.load(pid)
-    z = [s for s in d["scenes"] if s.get("zoom") == 1.1]
-    check("storyboard: dashboard served, review saved, approved punch-in = split + zoom, card set",
+    pz = core.scene_by_id(d, sid0).get("punches") or []
+    check("storyboard: dashboard served, review saved, approved punch-in = a zoom MOMENT inside the scene (NOT split "
+          "into extra scenes), card set",
           page.status_code == 200 and b"Storyboard" in page.data and r.get_json()["status"] == "approved" and
-          len(d["scenes"]) == n_before + 2 and len(z) == 1 and abs(z[0]["in"] - (mid - 0.6)) < 0.01 and
-          d["scenes"][0].get("card", {}).get("text") == "test *card*")
+          len(d["scenes"]) == n_before and len(pz) == 1 and abs(pz[0][0] - (mid - 0.6)) < 0.01 and pz[0][2] == 1.1 and
+          d["scenes"][0].get("card", {}).get("text") == "test *card*", f"{len(d['scenes'])} vs {n_before}, {pz}")
     again = storyboard.apply(pid)
     r409 = post(f"/api/projects/{pid}/storyboard/{sid0}", {"status": "rejected"})
-    check("storyboard apply runs ONCE per beat (no double split); applied beat is locked",
-          len(core.load(pid)["scenes"]) == n_before + 2 and "nothing to apply" in again[0] and r409.status_code == 409)
+    check("storyboard apply runs ONCE per beat (no double zoom moment); applied beat is locked",
+          len(core.scene_by_id(core.load(pid), sid0).get("punches") or []) == 1 and "nothing to apply" in again[0]
+          and r409.status_code == 409)
     post(f"/api/projects/{pid}/undo")
     sbu = client.get(f"/api/projects/{pid}/storyboard").get_json()
     check("storyboard apply is undoable – and after undo the beat can be applied again",
-          len(core.load(pid)["scenes"]) == n_before and sbu["beats"][0]["applied"] is False and
+          not core.scene_by_id(core.load(pid), sid0).get("punches") and sbu["beats"][0]["applied"] is False and
           "applied" in storyboard.apply(pid)[0])
     post(f"/api/projects/{pid}/undo")
     # the page's "Apply to video" button: endpoint applies approved beats without Claude, one undo step,
@@ -840,6 +842,141 @@ try:
         p.wait()
     n = core.load(pid)["counter"]
     check("4 writers x 40 updates, none lost (cross-process lock)", n == 160, f"counter={n}")
+
+    # ---------------------------------------------------------------- audit 2026-11-20
+    # file names: any language kept (Hindi vowel signs survive), Windows-forbidden / reserved names made safe
+    check("file names: Hindi kept as written, forbidden characters + reserved names (con/nul) made safe",
+          core.safe_filename("मार्केट update.MP4") == "मार्केट update.mp4" and core.safe_filename('a<b>:c?.mp4') == "a_b_c_.mp4"
+          and core.safe_filename("con.mp4") == "_con.mp4" and core.slugify("nul") == "nul-project"
+          and core.safe_filename("../../x.mp4") == "x.mp4")
+    # damaged project.json: restored from the last good copy; the damaged file is kept; never silently vanishes
+    pr = post("/api/projects", {"name": "damage test"}).get_json()["id"]
+    post(f"/api/projects/{pr}/brief", {"brief": "first"})
+    post(f"/api/projects/{pr}/brief", {"brief": "second"})  # 2nd save -> .bak holds a good copy
+    pf = core.project_dir(pr) / "project.json"
+    pf.write_text("{ half written", encoding="utf-8")
+    rr = client.get(f"/api/projects/{pr}")
+    kept = [x.name for x in core.project_dir(pr).iterdir() if x.name.startswith("project.json.damaged")]
+    pf.write_text("{ broken", encoding="utf-8")
+    (core.project_dir(pr) / "project.json.bak").write_text("also broken", encoding="utf-8")
+    r2 = client.get(f"/api/projects/{pr}")
+    listed = [x for x in client.get("/api/projects").get_json() if x["id"] == pr]
+    check("damaged project file: restored from backup (damaged copy kept); unrecoverable one still LISTED with a clear error",
+          rr.status_code == 200 and kept and r2.status_code == 500 and "footage is safe" in r2.get_json()["error"]
+          and listed and listed[0].get("damaged"), f"{rr.status_code} {kept} {r2.status_code} {listed}")
+    shutil.rmtree(core.project_dir(pr), ignore_errors=True)
+    # an export deleted from the Exports folder is flagged, not shown as a dead player
+    d_ = core.load(pid)
+    fin = next((r for r in reversed(d_["renders"]) if r["kind"] == "final"), None)
+    if fin:
+        fp_ = core.EXPORTS / fin["file"]
+        moved = fp_.with_name(fp_.name + ".away")
+        fp_.rename(moved)
+        miss = next(r for r in client.get(f"/api/projects/{pid}").get_json()["renders"] if r["file"] == fin["file"])
+        moved.rename(fp_)
+        check("export deleted outside the studio is flagged 'missing'", miss.get("missing") is True)
+    # HDR (iPhone HLG) footage is detected and tone-mapped – not washed out
+    hlg = ROOT / "hlg.mp4"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=1", "-vf",
+                    "zscale=t=arib-std-b67:p=bt2020:m=bt2020nc:r=tv:tin=bt709:pin=bt709:min=bt709,format=yuv420p10le",
+                    "-c:v", "libx265", "-x265-params", "log-level=error:colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+                    str(hlg)], check=True)
+
+    def sat(vf):
+        b = subprocess.run([core.FFMPEG, "-v", "error", "-ss", "0.5", "-i", str(hlg), "-frames:v", "1", "-vf",
+                            vf + "scale=32:18,format=rgb24", "-f", "rawvideo", "-"], capture_output=True).stdout
+        return sum(max(b[i:i + 3]) - min(b[i:i + 3]) for i in range(0, len(b), 3)) / (len(b) / 3)
+    s_naive, s_tm = sat(""), sat(",".join(pipeline.hdr_chain()) + ",")
+    check("HDR (HLG) footage detected and tone-mapped (more colour than a plain conversion)",
+          pipeline.is_hdr(hlg) and not pipeline.is_hdr(ROOT / "redbroll.mp4") and s_tm > s_naive * 1.5,
+          f"naive {s_naive:.0f} tone-mapped {s_tm:.0f}")
+    # a sound-only .mp4 says why instead of staying "not analysed" with no message
+    ao = ROOT / "soundonly.mp4"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=300:d=2", "-c:a", "aac", str(ao)], check=True)
+    pa = post("/api/projects", {"name": "audio only"}).get_json()["id"]
+    with open(ao, "rb") as fh:
+        client.post(f"/api/projects/{pa}/upload?kind=source", data={"files": (fh, "soundonly.mp4")}, content_type="multipart/form-data")
+    post(f"/api/projects/{pa}/analyze")
+    wait_job(pa, "analyze")
+    sa = core.load(pa)["sources"][0]
+    check("sound-only .mp4: clear error ('sound only, no picture'), not a silent 'not analysed'",
+          "sound only" in (sa.get("error") or ""), str(sa.get("error")))
+    # de-click: a jump cut through a tone must not leave a waveform jump (was ~0.8x amplitude)
+    tone = ROOT / "tone.mov"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x568:r=30:d=3", "-f", "lavfi", "-i",
+                    "sine=f=400:d=3:sample_rate=48000", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "pcm_s16le",
+                    "-shortest", str(tone)], check=True)
+    pt = post("/api/projects", {"name": "declick"}).get_json()["id"]
+    with open(tone, "rb") as fh:
+        client.post(f"/api/projects/{pt}/upload?kind=source", data={"files": (fh, "tone.mov")}, content_type="multipart/form-data")
+    post(f"/api/projects/{pt}/analyze")
+    wait_job(pt, "analyze")
+    wait_job(pt, "preview")
+    core.mutate(pt, lambda d: d["scenes"][0].update(cuts=[[1.0013, 1.5071]], captions=False))
+    outp = pipeline.render_project(pt, preview=False)
+    wv = ROOT / "tone.wav"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-i", str(outp), "-ac", "1", "-ar", "48000", str(wv)], check=True)
+    ww = wave.open(str(wv))
+    xs = struct.unpack(f"<{ww.getnframes()}h", ww.readframes(ww.getnframes()))
+    ww.close()
+    ampl = max(abs(v) for v in xs[int(1.6 * 48000):int(2.0 * 48000)])
+    jump = max(abs(xs[i + 1] - xs[i]) for i in range(int(0.9 * 48000), int(1.1 * 48000)))
+    check("jump cut has no click (biggest waveform step < 0.15 x amplitude; hard cut was ~0.8 x)",
+          jump < 0.15 * ampl, f"step {jump} vs amplitude {ampl}")
+    # yt-dlp failures in plain words
+    _orig = pipeline.run
+    pipeline.run = lambda *a, **k: (_ for _ in ()).throw(pipeline.PipelineError("ERROR: Private video. Sign in"))
+    try:
+        pipeline.download_reference(pid, "https://x.example/v")
+        dl = ""
+    except pipeline.PipelineError as e:
+        dl = str(e)
+    finally:
+        pipeline.run = _orig
+    check("reference download errors in plain words (private / login)", "private or needs a login" in dl, dl)
+    # old split pieces glue back: same beat + touching + same settings -> one scene, zoomed piece = zoom moment,
+    # a trimmed piece edge = a cut; a piece the user changed (speed) stays separate
+    mk = lambda i, a, b, oa, ob, z, **k: {"id": i, "src": "f.mp4", "in": a, "out": b, "orig_in": oa, "orig_out": ob,  # noqa: E731
+                                          "zoom": z, "keep": True, "speed": 1.0, "sb_applied": "S", **k}
+    dm = {"scenes": [mk("a", 0.1, 1.6, 0.0, 1.6, 1.12, card={"kind": "title", "text": "x"}), mk("b", 1.6, 3.7, 1.6, 3.7, 1.0),
+                     mk("c", 5.0, 6.0, 3.7, 6.0, 1.0), mk("d", 6.0, 7.0, 6.0, 7.0, 1.0, speed=1.5),
+                     dict(mk("e", 9, 10, 9, 10, 1.0), sb_applied=None), dict(mk("f", 10, 11, 10, 11, 1.0), sb_applied=None)]}
+    nm = storyboard.merge_punch_splits(dm)
+    m0 = dm["scenes"][0]
+    check("merge old punch-in pieces: one scene per beat, zoom moment kept, trimmed edge -> cut, changed piece / "
+          "unrelated scenes untouched",
+          nm == 2 and [x["id"] for x in dm["scenes"]] == ["a", "d", "e", "f"] and m0["in"] == 0.1 and m0["out"] == 6.0
+          and m0["punches"] == [[0.1, 1.6, 1.12]] and m0["zoom"] == 1.0 and m0["cuts"] == [[3.7, 5.0]]
+          and m0["card"]["text"] == "x", str(dm["scenes"]))
+    # zoom moment = punch-in INSIDE one scene: zoomed only during its window, no frames lost, still one scene
+    box = ROOT / "box.mov"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=0xE01010:s=320x568:r=30:d=3,drawbox=x=0:y=0:w=320:h=568:color=white:t=24",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(box)], check=True)
+    pz_ = post("/api/projects", {"name": "zoom moment"}).get_json()["id"]
+    with open(box, "rb") as fh:
+        client.post(f"/api/projects/{pz_}/upload?kind=source", data={"files": (fh, "box.mov")}, content_type="multipart/form-data")
+    post(f"/api/projects/{pz_}/analyze")
+    wait_job(pz_, "analyze")
+    wait_job(pz_, "preview")
+    sz = core.load(pz_)["scenes"][0]["id"]
+    rp = post(f"/api/projects/{pz_}/command", {"scene": sz, "text": "punch 1-2 1.5"}).get_json()
+    split_ok = pipeline.render_project(pz_, preview=True).exists()  # Brand Kit split layout renders with a zoom moment
+    core.mutate(pz_, lambda d: d["settings"].update(layout="full", format="original", captions=False))
+    outz = pipeline.render_project(pz_, preview=False)
+
+    def corner(t):
+        b = subprocess.run([core.FFMPEG, "-v", "error", "-ss", str(t), "-i", str(outz), "-frames:v", "1", "-vf",
+                            "crop=1:1:6:6,format=rgb24", "-f", "rawvideo", "-"], capture_output=True).stdout
+        return tuple(b[:3])
+    c0, c1, c2 = corner(0.5), corner(1.5), corner(2.5)
+    white = lambda c: min(c) > 200  # noqa: E731
+    red = lambda c: c[0] > 150 and c[1] < 90  # noqa: E731
+    check("zoom moment: punch-in only inside its window (border visible before/after, zoomed past it during), "
+          "same length, still ONE scene",
+          white(c0) and red(c1) and white(c2) and abs(pipeline.probe(outz)["duration"] - 3.0) < 0.1
+          and len(core.load(pz_)["scenes"]) == 1 and "stays one scene" in rp["replies"][0] and split_ok,
+          f"{c0} {c1} {c2} {rp['replies']}")
 except Exception:  # sys.exit in `finally` would otherwise swallow the traceback and report "all passed"
     import traceback
     traceback.print_exc()

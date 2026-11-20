@@ -68,7 +68,12 @@ $$("[data-open]").forEach((b) => (b.onclick = () => api(`/api/projects/${PID}/op
 async function refresh(force = false) {
   if (!PID) return;
   let p;
-  try { p = await api(`/api/projects/${encodeURIComponent(PID)}`); } catch (e) { return; }
+  try { p = await api(`/api/projects/${encodeURIComponent(PID)}`); refresh.err = ""; }
+  catch (e) {  // e.g. a damaged project file: say it ONCE (this runs every 2 s), don't leave a silent blank page
+    const msg = e instanceof TypeError ? "Can't reach the studio – is the black Start Studio window still open?" : e.message;
+    if (msg && msg !== refresh.err) { refresh.err = msg; toast(msg, true); }
+    return;
+  }
   const jobChanged = JSON.stringify(p.job) !== JSON.stringify(P?.job);
   if (!force && p.version === lastVersion && !jobChanged) return;
   P = p; lastVersion = p.version;
@@ -110,7 +115,14 @@ function renderAll() {
     // a render just finished while the page was open -> show it in the player
     const newest = latestPreview();
     if (newest && lastRenderFile !== null && newest.file !== lastRenderFile) {
-      if (playerMode === "preview") reloadPreview();
+      const show = SHOW && newest.sig === P.edit_sig && Date.now() - SHOW.at < 120000 ? SHOW : null;
+      if (show && (playerMode === "preview" || show.switchView)) {
+        SHOW = null;
+        if (show.sid && P.scenes.some((x) => x.id === show.sid)) selected = show.sid;
+        playerMode = "preview"; $$(".player-bar .seg button").forEach((x) => x.classList.toggle("active", x.dataset.mode === "preview"));
+        curSrcUrl = ""; renderDetail(); loadPlayer(true);
+        toast("Edited view updated – playing your change.");
+      } else if (playerMode === "preview") reloadPreview();
       else if (AUTO.lastReq !== newest.sig) showRendered();  // a render you asked for: show it
       // auto update while you work in Original footage: stay there (the green pill says it is ready)
     }
@@ -811,6 +823,7 @@ function sceneBadges(s) {
   if (s.mute) b.push(`<span class="badge">muted</span>`);
   else if (s.volume !== undefined && s.volume !== 1) b.push(`<span class="badge">vol ${Math.round(s.volume * 100)}%</span>`);
   if (s.zoom && s.zoom > 1) b.push(`<span class="badge acc">zoom ${s.zoom}x</span>`);
+  if ((s.punches || []).length) b.push(`<span class="badge acc" title="Zoom moments (punch-ins) inside this scene">🔍 ${s.punches.length}</span>`);
   if (s.text) b.push(`<span class="badge acc">text</span>`);
   if (s.card && s.card.kind !== "none") b.push(`<span class="badge acc">${esc(s.card.kind)} card</span>`);
   if (s.captions === false) b.push(s.captions_auto_off ? `<span class="badge" title="No speech detected (music / ambient sound) – captions switched off automatically. Type 'captions on' to bring them back.">no speech · captions off</span>` : `<span class="badge">no captions</span>`);
@@ -979,7 +992,10 @@ function renderDetail() {
         </div>
         <div class="muted small">Seconds removed from the start / end. At the playhead: <button class="lnk" data-key="i" data-tip="Play the original footage, pause where the scene should START, then click (or press I).">I = start here</button> · <button class="lnk" data-key="o" data-tip="Pause where the scene should END, then click (or press O).">O = end here</button> (Original footage view)</div></div>
       <div class="irow">${lab("Speed", "How fast this scene plays. Faster = shorter video and a punchier pace.")}${segBtns("speed", [["0.75", "0.75×"], ["1", "1×"], ["1.25", "1.25×"], ["1.5", "1.5×"], ["2", "2×"]], s.speed || 1)}</div>
-      <div class="irow">${lab("Zoom", "Punch-in zoom on this scene – makes a point stand out and hides jump cuts.")}${segBtns("zoom", [["1", "Off"], ["1.1", "1.1×"], ["1.2", "1.2×"], ["1.3", "1.3×"], ["1.5", "1.5×"]], s.zoom || 1)}</div>
+      <div class="irow">${lab("Zoom", "Zoom for the WHOLE scene. For a zoom on just a few words use a zoom moment below.")}${segBtns("zoom", [["1", "Off"], ["1.1", "1.1×"], ["1.2", "1.2×"], ["1.3", "1.3×"], ["1.5", "1.5×"]], s.zoom || 1)}</div>
+      <div class="irow">${lab("Zoom moments", "A quick punch-in while you say something important – inside this scene, it stays ONE scene. Add one: play the original, then type e.g. punch 1.2-2.5 below.")}
+        ${(s.punches || []).length ? [...s.punches].sort((a, b) => a[0] - b[0]).map((p, i) => `<span class="zchip" data-tip="Zoom ${p[2]}× from ${r2(p[0] - s.in)} s to ${r2(p[1] - s.in)} s of this scene">🔍 ${r2(p[0] - s.in)}–${r2(p[1] - s.in)} s · ${p[2]}× <button class="lnk" data-cmd="punch remove ${i + 1}" data-tip="Remove this zoom moment">✕</button></span>`).join(" ")
+          : `<span class="muted small">none – type <code>punch 1.2-2.5</code> (seconds in this scene) to add one</span>`}</div>
       <div class="irow">${lab("Audio", "Sound of this scene: mute it, or make it louder / quieter.")}
         <button class="btn small ${s.mute ? "primary" : "ghost"}" data-cmd="${s.mute ? "unmute" : "mute"}" data-tip="${s.mute ? "Bring this scene's sound back." : "Silence this scene completely (background music still plays)."}">${s.mute ? "🔇 Muted" : "🔊 Mute"}</button>
         <input type="range" id="volRange" data-tip="Volume of this scene: 100 % = as recorded, 200 % = twice as loud. Applied when you let go." min="0" max="200" step="5" value="${Math.round((s.volume ?? 1) * 100)}" ${s.mute ? "disabled" : ""}>
@@ -1432,7 +1448,13 @@ async function sendCommand(scene, text) {
     const r = await api(`/api/projects/${PID}/command`, { method: "POST", body: { scene, text } });
     const msg = [...r.replies.map((x) => x.replace(/^!/, "")), ...(r.queued.length ? [`Sent to Claude: “${r.queued.join("; ")}”`] : [])].join("  ·  ");
     toast(msg, r.replies.some((x) => x.startsWith("!")));
-    await refresh(true); loadPlayer(false); autoPreviewTick();
+    if (r.replies.length && !r.replies.every((x) => x.startsWith("!"))) {
+      // timeline edits (trim / split / cut) are often made watching the ORIGINAL footage – don't switch away then;
+      // a look change (captions, zoom, card, text, speed…) is only visible in the edited view – go there when ready
+      const timelineEdit = /^(trim|split|reset trim|untrim|cut|keep|restore|delete|remove)\b/i.test(text.trim()) && !/^remove (text|silences?|punch)/i.test(text.trim());
+      SHOW = { sid: scene, switchView: !timelineEdit, at: Date.now() };
+    }
+    await refresh(true); loadPlayer(false); autoPreviewTick(); renderPvBadge();
   } catch (e) { toast(e.message, true); }
 }
 $("#sceneSend").onclick = () => { const s = curScene(); if (!s) return toast("Select a scene first.", true); sendCommand(s.id, $("#sceneCmd").value).then(() => ($("#sceneCmd").value = "")); };
@@ -1462,6 +1484,16 @@ $("#previewBtn").onclick = async () => {
   PENDING_PLAY = st.k !== "fresh";
 };
 let PENDING_PLAY = false;
+let SHOW = null;  // {sid, switchView, at}: the change you just made – shown + played when its update is ready
+function renderPvBadge() {  // ON the video: an update is on its way (else a stale picture looks like "nothing happened")
+  const b = $("#pvBadge"); if (!b || !P) return;
+  const st = editedState();
+  const busy = st.k === "updating" || (st.k === "stale" && AUTO.on);
+  b.hidden = !busy || !(SHOW || playerMode === "preview");
+  if (!b.hidden) b.textContent = SHOW && playerMode !== "preview" ? "⟳ Making the edited view with your change… it plays here in a few seconds"
+    : "⟳ Updating the edited view with your change… a few seconds";
+  if (st.k === "fresh" && SHOW && !SHOW.switchView && playerMode !== "preview") SHOW = null;  // timeline edit in Original view: done
+}
 function editedState() {  // fresh | updating | stale | failed | none
   const pv = latestPreview(), j = P.job || {};
   const rendering = (j.kind === "preview" || j.kind === "final") && (j.status === "running" || j.status === "queued") || (j.pending || []).includes("preview");
@@ -1487,7 +1519,7 @@ $("#finalBtn").onclick = () => api(`/api/projects/${PID}/render`, { method: "POS
 const player = $("#player");
 let curSrcUrl = "";
 // newest render of EITHER kind: after "Export final" the player must show that, not an older preview
-function latestPreview() { const r = P?.renders || []; return r.length ? r[r.length - 1] : null; }
+function latestPreview() { const r = (P?.renders || []).filter((x) => !x.missing); return r.length ? r[r.length - 1] : null; }
 function renderUrl(r) { return r.kind === "final" ? media("exports", r.file) : media("work", r.file); }
 function previewOffset(id) {
   const m = renderTimes(false); if (m && m.has(id)) return m.get(id)[0];
@@ -1557,9 +1589,9 @@ function autoPreviewTick() {
     if (P.edit_sig !== sig || jj.status === "running" || jj.status === "queued") return;
     AUTO.lastReq = sig;
     api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "preview" } }).then(() => refresh(true)).catch(() => {});
-  }, 1500);
+  }, 600);
 }
-setInterval(() => { if (P) { autoPreviewTick(); syncSourcePlayer(); renderEditedState(); } }, 1000);
+setInterval(() => { if (P) { autoPreviewTick(); syncSourcePlayer(); renderEditedState(); renderPvBadge(); } }, 500);
 function reloadPreview() {  // new render while watching "Edited video"
   const playing = !player.paused;
   curSrcUrl = ""; loadPlayer(playing, playing ? player.currentTime : null);
@@ -1590,7 +1622,8 @@ function renderRenders() {
   const latestPv = latestPreview();
   el.innerHTML = rs.filter((r) => r.kind === "final" || r === latestPv).map((r) => `
     <div class="render">
-      <video src="${media(r.kind === "final" ? "exports" : "work", r.file)}" controls preload="metadata"></video>
+      ${r.missing ? `<div class="muted small" style="padding:20px">This file is no longer in the ${r.kind === "final" ? "Exports" : "work"} folder (moved, renamed or deleted).</div>`
+        : `<video src="${media(r.kind === "final" ? "exports" : "work", r.file)}" controls preload="metadata"></video>`}
       <div class="meta"><div><b>${esc(r.file)}</b><div class="muted">${r.kind === "final" ? "Final export" : "Latest preview"} · ${esc(r.size)} · ${fmt(r.duration)} · ${esc(r.created.replace("T", " ").slice(0, 16))}</div></div>
       <span class="badge ${r.kind === "final" ? "ok" : ""}">${r.kind}</span></div>
     </div>`).join("");

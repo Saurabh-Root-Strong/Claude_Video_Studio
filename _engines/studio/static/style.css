@@ -464,3 +464,10 @@ main { padding: 18px; max-width: 1600px; margin: 0 auto; }
 .evstate.fresh { color: #22c55e; }
 .evstate.updating { color: #60a5fa; }
 .evstate.stale, .evstate.failed { color: #f59e0b; }
+
+.zchip { display: inline-flex; gap: 4px; align-items: center; padding: 2px 8px; border: 1px solid var(--line); border-radius: 12px; font-size: 12px; }
+
+.player-wrap { position: relative; }
+.pvbadge { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 5; padding: 6px 12px;
+  border-radius: 14px; background: rgba(15, 27, 45, .88); color: #93c5fd; font-size: 12px; border: 1px solid #3b82f6;
+  pointer-events: none; white-space: nowrap; }

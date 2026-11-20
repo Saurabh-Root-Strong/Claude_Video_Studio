@@ -294,6 +294,35 @@ def _scene_cmd(sc: dict, t: str, data: dict) -> str | None:
             return "!Zoom must be between 1 and 3."
         sc["zoom"] = x
         return f"Zoom {x:g}x."
+    # zoom moments (punch-ins inside the scene; times in seconds from the scene start, like "split at")
+    if t in ("punch off", "no punch", "zoom moments off", "remove punches", "punch clear"):
+        n = len(sc.pop("punches", None) or [])
+        return f"Removed {n} zoom moment(s)." if n else "No zoom moments in this scene."
+    m = re.fullmatch(r"punch remove (\d+)", t)
+    if m:
+        ps = sorted(sc.get("punches") or [])
+        k = int(m.group(1)) - 1
+        if not 0 <= k < len(ps):
+            return f"!There is no zoom moment {k + 1} (this scene has {len(ps)})."
+        ps.pop(k)
+        if ps:
+            sc["punches"] = ps
+        else:
+            sc.pop("punches", None)
+        return f"Zoom moment {k + 1} removed."
+    m = re.fullmatch(r"(?:punch|zoom moment)(?: in)? (?:at |from )?([\d.,]+)\s*(?:-|to)\s*([\d.,]+)(?:\s*s)?(?: (?:zoom |x)?([\d.,]+)x?)?", t)
+    if m:
+        a, b = _num(m.group(1)), _num(m.group(2))
+        z = _num(m.group(3)) if m.group(3) else 1.15
+        if b - a < 0.2:
+            return "!A zoom moment needs at least 0.2 s (e.g. punch 1.2-2.5)."
+        if not 1.02 <= z <= 2.0:
+            return "!Zoom strength must be between 1.02 and 2 (e.g. punch 1.2-2.5 1.2)."
+        s0, e0 = round(sc["in"] + a, 3), round(min(sc["out"], sc["in"] + b), 3)
+        if s0 >= sc["out"] - 0.1:
+            return f"!The scene is only {sc['out'] - sc['in']:.1f}s long."
+        sc["punches"] = sorted([p for p in (sc.get("punches") or []) if p[1] <= s0 or p[0] >= e0] + [[s0, e0, z]])
+        return f"Zoom moment {a:g}–{min(b, sc['out'] - sc['in']):.1f}s at {z:g}× (the scene stays one scene)."
     if t in ("zoom in", "punch in", "punch-in"):
         sc["zoom"] = 1.2
         return "Punch-in zoom 1.2x."

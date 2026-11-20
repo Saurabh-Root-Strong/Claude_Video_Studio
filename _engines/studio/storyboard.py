@@ -327,31 +327,15 @@ def _apply(pid: str) -> list[str]:
                     sc["card"] = it["card"]
                 if b["items_on"].get(it["id"]) and it["type"] == "broll" and it.get("file") and sc.get("role") != "broll":
                     sc["broll"] = {"src": it["file"], **({"where": it["where"]} if it.get("where") else {})}
-            # punch-ins: split off the hook part and zoom it (snap zoom on the cut, like the profile says)
+            # punch-ins: ZOOM MOMENTS inside the scene (snap zoom while the hook is said). The scene is NOT split –
+            # splitting turned 7 scenes into 13 on the user's timeline, which an editor reads as cuts they never made
             punches = sorted((it for it in b["items"] if it["type"] == "punch" and b["items_on"].get(it["id"])),
                              key=lambda it: it["s"])
-            parts = [sc]
-            for p in punches:
-                for t in (p["s"], p["e"]):  # split at the hook's edges (unless within 0.3 s of an existing edge)
-                    host = next((x for x in parts if x["in"] + 0.3 < t < x["out"] - 0.3), None)
-                    if host:
-                        new_sc = copy.deepcopy(host)
-                        new_sc["id"] = core.new_id("sc")
-                        new_sc["in"] = new_sc["orig_in"] = round(t, 3)
-                        host["out"] = host["orig_out"] = round(t, 3)
-                        new_sc.pop("card", None)  # the card keeps showing (inherited), no re-pop
-                        new_sc["zoom"] = 1.0
-                        d["scenes"].insert(d["scenes"].index(host) + 1, new_sc)
-                        parts.append(new_sc)
-                for x in parts:  # the part(s) lying inside the hook get the zoom
-                    if x["in"] >= p["s"] - 0.31 and x["out"] <= p["e"] + 0.31:
-                        x["zoom"] = p["zoom"]
-            for x in parts:
-                if x.get("cuts"):
-                    x["cuts"] = [c for c in x["cuts"] if c[1] > x["in"] and c[0] < x["out"]]
+            if punches:
+                sc["punches"] = sorted((sc.get("punches") or []) +
+                                       [[round(p["s"], 3), round(p["e"], 3), float(p.get("zoom", 1.12))] for p in punches])
             n_on = sum(1 for v in b["items_on"].values() if v)
-            log.append(f"beat {b['no']}: applied {n_on} item(s)" + (f", split into {len(parts)} for punch-ins"
-                                                                     if len(parts) > 1 else ""))
+            log.append(f"beat {b['no']}: applied {n_on} item(s)" + (f", {len(punches)} zoom moment(s)" if punches else ""))
             done_ids.append(b["scene"])
         return True
     core.mutate(pid, fn)
@@ -364,6 +348,56 @@ def _apply(pid: str) -> list[str]:
     core._atomic_write(sb_path(pid), sb)
     write_html(pid, sb)
     return log
+
+
+_SAME = ("src", "keep", "speed", "mute", "volume", "captions", "remove_silence", "role", "text", "text_pos",
+         "cap_pos", "broll", "sb_applied")
+
+
+def merge_punch_splits(d: dict) -> int:
+    """Undo the OLD punch-in method on an existing project: storyboard apply used to split a scene into
+    before / hook / after pieces (7 scenes -> 13). Glue such pieces back into ONE scene with zoom moments.
+    Only merges neighbours that came from the same applied beat (same sb_applied marker), touch in the source
+    (piece.orig_out == next.orig_in) and still agree on every other setting – anything the user changed apart
+    stays apart. A trim on a piece becomes a cut inside the merged scene. Returns how many pieces were merged."""
+    out, merged, i, sc = [], 0, 0, d["scenes"]
+    while i < len(sc):
+        grp = [sc[i]]
+        while (i + len(grp) < len(sc) and grp[0].get("sb_applied")
+               and all(sc[i + len(grp)].get(k) == grp[0].get(k) for k in _SAME)
+               and abs(float(sc[i + len(grp)].get("orig_in", -1)) - float(grp[-1].get("orig_out", -2))) < 0.002):
+            grp.append(sc[i + len(grp)])
+        if len(grp) == 1:
+            out.append(sc[i])
+            i += 1
+            continue
+        base = min(float(g.get("zoom") or 1.0) for g in grp)
+        m = copy.deepcopy(grp[0])
+        m["in"], m["out"] = grp[0]["in"], grp[-1]["out"]
+        m["orig_in"], m["orig_out"] = grp[0].get("orig_in", grp[0]["in"]), grp[-1].get("orig_out", grp[-1]["out"])
+        m["zoom"] = base
+        cuts = [list(c) for g in grp for c in (g.get("cuts") or [])]
+        for a, b in zip(grp, grp[1:]):  # trimmed piece edges = removed footage inside the merged scene
+            if b["in"] - a["out"] > 0.01:
+                cuts.append([round(a["out"], 3), round(b["in"], 3)])
+        if cuts:
+            m["cuts"] = sorted(cuts)
+        punches = [list(p) for p in (m.get("punches") or [])]
+        for g in grp:
+            z = float(g.get("zoom") or 1.0)
+            if z > base + 1e-3:
+                punches.append([round(g["in"], 3), round(g["out"], 3), z])
+        if punches:
+            m["punches"] = sorted(punches)
+        if not m.get("card"):
+            m["card"] = next((g["card"] for g in grp if g.get("card")), None) or m.pop("card", None)
+            if m.get("card") is None:
+                m.pop("card", None)
+        out.append(m)
+        merged += len(grp) - 1
+        i += len(grp)
+    d["scenes"] = out
+    return merged
 
 
 def write_html(pid: str, sb: dict) -> Path:
