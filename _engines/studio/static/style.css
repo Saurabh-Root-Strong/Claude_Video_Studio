@@ -457,3 +457,10 @@ main { padding: 18px; max-width: 1600px; margin: 0 auto; }
 .hastip { cursor: help; text-decoration: underline dotted rgba(150,150,150,.5); text-underline-offset: 3px; }
 
 .insp .irow.dim .iseg, .insp .irow.dim .ilab { opacity: .45; }
+
+.stl-bar .spacer { flex: 1; }
+.stl-bar #previewBtn { align-self: center; }
+.evstate { font-size: 12px; color: var(--muted); align-self: center; cursor: help; }
+.evstate.fresh { color: #22c55e; }
+.evstate.updating { color: #60a5fa; }
+.evstate.stale, .evstate.failed { color: #f59e0b; }

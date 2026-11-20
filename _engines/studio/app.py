@@ -838,9 +838,10 @@ def api_first_cut(pid):
 @app.get("/storyboard/<pid>")
 def storyboard_page(pid):
     _exists(pid)
-    p = storyboard.html_path(pid)
-    if not p.exists():
+    sb = core.read_json(storyboard.sb_path(pid), None)
+    if not sb:
         abort(404, "no storyboard yet – ask Claude to plan the edit")
+    p = storyboard.write_html(pid, sb)  # regenerate from the current template
     return send_file(p, mimetype="text/html", max_age=0)
 
 
@@ -868,6 +869,45 @@ def api_storyboard_submit(pid):
                               "status": "claude", "reply": "", "by": None, "created": core.now_iso()})
     core.mutate(pid, fn)
     return jsonify(ok=True)
+
+
+@app.post("/api/projects/<pid>/storyboard/apply")
+def api_storyboard_apply(pid):
+    """Apply the APPROVED beats to the edit right away (mechanical: trims, cuts, punch-ins, cards, B-roll) – no Claude
+    needed, one undo step. Rejected beats with notes are queued for Claude to rework; pending beats stay as they are."""
+    _exists(pid)
+    sb0 = core.read_json(storyboard.sb_path(pid), None)
+    if not sb0:
+        return jsonify(error="no storyboard yet"), 404
+    try:
+        log = storyboard.apply(pid)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    sb = storyboard.with_stale(pid, core.read_json(storyboard.sb_path(pid), {}) or {})
+    beats = sb.get("beats", [])
+    applied = sum(1 for b in beats if b.get("applied"))
+    rework = [b for b in beats if b["status"] == "rejected" and (b.get("notes") or "").strip()]
+    stale = [b for b in beats if b["status"] == "approved" and b.get("stale") and not b.get("applied")]
+    pending = sum(1 for b in beats if b["status"] == "pending")
+    did = [x for x in log if "applied" in x and "not applied" not in x]
+    reply = (f"Storyboard: {len(did)} beat(s) applied to the edit." if did else "Storyboard: nothing new to apply.") + \
+        (f" {len(rework)} rejected beat(s) sent to Claude to rework." if rework else "") + \
+        (f" {len(stale)} approved beat(s) skipped – their scene changed since planning." if stale else "") + \
+        (f" {pending} beat(s) still pending (not applied)." if pending else "")
+
+    def fn(d):
+        d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "text": "storyboard: apply approved beats",
+                              "status": "done", "reply": reply, "by": "studio", "created": core.now_iso()})
+        if rework or stale:
+            d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "kind": "storyboard",
+                                  "text": "STORYBOARD REWORK – " +
+                                          "; ".join([f"beat {b['no']} rejected: {b['notes'].strip()}" for b in rework] +
+                                                    [f"beat {b['no']} approved but its scene changed – re-plan it" for b in stale]),
+                                  "status": "claude", "reply": "", "by": None, "created": core.now_iso()})
+        _cap_commands(d)
+    core.mutate(pid, fn)
+    return jsonify(ok=True, reply=reply, log=log, applied=applied, newly=len(did), rework=len(rework),
+                   stale=len(stale), pending=pending)
 
 
 @app.post("/api/projects/<pid>/storyboard/<sid>")

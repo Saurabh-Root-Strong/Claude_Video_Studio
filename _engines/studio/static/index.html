@@ -195,7 +195,6 @@
           <button id="sbBtn" class="btn claude" style="display:none" data-tip="Beat-by-beat edit plan – approve before rendering">Storyboard</button>
         </div>
         <div class="grp end">
-          <button id="previewBtn" class="btn" data-tip="Make a quick low-quality version of the edited video to check it. Plays under “Edited video”.">▶ Render preview</button>
           <button id="finalBtn" class="btn primary" data-tip="Make the full-quality video file for upload. Saved in the Exports folder (tab 4).">Export final</button>
         </div>
       </div>
@@ -210,6 +209,9 @@
           <div class="card stl-card">
             <div class="stl-bar">
               <b class="hastip" data-tip="Your edited video from left to right. One block per scene. Drag a block to move it, drag its edge to trim, click to select.">Timeline</b> <span id="stlInfo" class="muted small"></span>
+              <span class="spacer"></span>
+              <span id="evState" class="evstate"></span>
+              <button id="previewBtn" class="btn primary small" data-tip="Watch your video with every edit so far (captions, zoom, cards, cuts) in the player below. If something changed since the last update, it is re-made first – only changed scenes, usually a few seconds.">▶ Edited view</button>
             </div>
             <div id="brollBin" class="broll-bin"></div>
             <div class="stl" id="stl"></div>
@@ -220,7 +222,7 @@
             <div class="player-bar">
               <div class="seg">
                 <button data-mode="source" class="active" data-tip="Your raw camera clip (green screen, no edits)">Original footage</button>
-                <button data-mode="preview" data-tip="Latest render – preview or final export">Edited video</button>
+                <button data-mode="preview" data-tip="Your video with all edits so far (the latest update)">Edited view</button>
               </div>
               <label class="check" data-tip="When on, the selected scene repeats while you watch it (Original footage view)."><input type="checkbox" id="loopScene" checked /> Loop scene</label>
               <label class="check" data-tip="Re-render the Edited video by itself ~2 seconds after every change (only changed scenes are re-made, usually a few seconds). Off = click Render preview yourself."><input type="checkbox" id="autoPrev" checked /> Auto-update preview</label>

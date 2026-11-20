@@ -237,6 +237,28 @@ try:
           len(core.load(pid)["scenes"]) == n_before and sbu["beats"][0]["applied"] is False and
           "applied" in storyboard.apply(pid)[0])
     post(f"/api/projects/{pid}/undo")
+    # the page's "Apply to video" button: endpoint applies approved beats without Claude, one undo step,
+    # rejected-with-notes beats go to Claude; a scene trimmed in the studio after planning is NOT overwritten
+    sbx = client.get(f"/api/projects/{pid}/storyboard").get_json()
+    sid1 = sbx["beats"][1]["scene"]
+    post(f"/api/projects/{pid}/storyboard/{sid1}", {"status": "rejected", "notes": "different card please"})
+    ra = post(f"/api/projects/{pid}/storyboard/apply", {}).get_json()
+    d = core.load(pid)
+    inbox = [c for c in d["commands"] if c["status"] == "claude" and "beat 2 rejected: different card please" in c["text"]]
+    post(f"/api/projects/{pid}/undo")
+    back = len(core.load(pid)["scenes"]) == n_before
+    for c in inbox:  # don't leave a Claude request behind for later checks
+        post(f"/api/projects/{pid}/command/{c['id']}/cancel")
+    sid2 = sbx["beats"][2]["scene"] if len(sbx["beats"]) > 2 else sid0
+    post(f"/api/projects/{pid}/storyboard/{sid1}", {"status": "pending", "notes": ""})
+    post(f"/api/projects/{pid}/command", {"scene": sid2, "text": "trim start 0.3"})
+    stale = next(b for b in client.get(f"/api/projects/{pid}/storyboard").get_json()["beats"] if b["scene"] == sid2)
+    post(f"/api/projects/{pid}/undo")
+    page2 = client.get(f"/storyboard/{pid}")
+    check("'Apply to video': approved beats applied by the studio (no Claude), rejected notes queued for Claude, one "
+          "undo; a scene trimmed after planning is marked stale; page served from the current template",
+          ra.get("ok") and ra["newly"] >= 1 and ra["rework"] == 1 and inbox and back and stale["stale"]
+          and b"applyBtn" in page2.data, f"{ra} inbox={len(inbox)} back={back} stale={stale.get('stale')}")
     sb2 = storyboard.build(pid, {"1": {"card": {"kind": "title", "text": "CHANGED *card*"}}})
     check("reworked beat loses its old approval (user must see the new version)", sb2["beats"][0]["status"] == "pending"
           and sb2["beats"][0]["notes"] == "ok")

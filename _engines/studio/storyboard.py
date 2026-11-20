@@ -61,12 +61,14 @@ def _sig(items: list[dict]) -> str:
 def with_stale(pid: str, sb: dict) -> dict:
     """Sync the plan with the project as it is NOW:
     * applied = the scene still carries this beat's marker (an Undo in the studio removes it -> re-applicable)
-    * stale   = the beat's scene no longer exists (re-analysis / delete since planning)."""
+    * stale   = the beat's scene no longer exists (re-analysis / delete since planning) OR was trimmed / split in
+                the studio since planning: the plan's trims are absolute times, applying them would undo your edit."""
     scenes = {s["id"]: s for s in core.load(pid)["scenes"]}
     for b in sb.get("beats", []):
         sc = scenes.get(b["scene"])
         b["applied"] = bool(sc and sc.get("sb_applied") == b.get("sig"))
-        b["stale"] = sc is None
+        moved = bool(sc) and not b["applied"] and (abs(sc["in"] - b["in"]) > 0.02 or abs(sc["out"] - b["out"]) > 0.02)
+        b["stale"] = sc is None or moved
     return sb
 
 
@@ -236,7 +238,10 @@ def _scene_after(sc: dict, beat: dict) -> dict:
         if not on.get(it["id"]):
             continue
         if it["type"] == "trim":
-            s["in" if it["edge"] == "in" else "out"] = it["to"]
+            k = "in" if it["edge"] == "in" else "out"
+            other = s["out"] if k == "in" else s["in"]
+            if abs(other - it["to"]) >= 0.3:  # never trim a scene below 0.3 s
+                s[k] = it["to"]
         elif it["type"] == "cut":
             s.setdefault("cuts", []).append([it["s"], it["e"]])
     return s
@@ -299,7 +304,7 @@ def _apply(pid: str) -> list[str]:
     with_stale(pid, sb)
     log: list[str] = []
     todo = [b for b in sb["beats"] if b["status"] == "approved" and not b.get("applied") and not b.get("stale")]
-    log += [f"beat {b['no']}: its scene no longer exists (re-analyzed?) – rebuild the storyboard"
+    log += [f"beat {b['no']}: its scene was changed or removed since planning – not applied (ask Claude to re-plan it)"
             for b in sb["beats"] if b["status"] == "approved" and b.get("stale")]
     if not todo:
         return ["nothing to apply (no approved beats that aren't applied yet)"]

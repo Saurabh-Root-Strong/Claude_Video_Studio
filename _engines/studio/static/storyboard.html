@@ -72,14 +72,16 @@ video{width:100%;max-width:420px;border-radius:8px;margin-top:8px;display:none;b
 <body>
 <div class="offline" id="offline">Opened from disk: choices are kept in this browser only. For saving to the project, open it from the studio (Scenes tab → Storyboard), or use “Copy feedback”.</div>
 <header>
+  <button id="backBtn" title="Back to the studio's Scenes page (nothing is applied)">← Scenes</button>
   <h1 id="title">Storyboard</h1>
   <span class="chip" id="durChip"></span>
   <span class="chip" id="cntChip"></span>
   <span class="chip" id="setChip"></span>
   <span class="spacer"></span>
-  <button id="allOk">Approve all pending</button>
-  <button id="copyBtn">Copy feedback</button>
-  <button class="pri" id="sendBtn">Send feedback to Claude</button>
+  <button id="allOk" title="Approve every beat you haven't decided yet – then you can apply them to the video">Approve all pending</button>
+  <button id="copyBtn" title="Copy your decisions + notes as text">Copy feedback</button>
+  <button id="sendBtn" title="Only for REJECTED beats with notes: Claude reworks them (needs Claude Code: 'process studio inbox')">Send notes to Claude</button>
+  <button class="pri" id="applyBtn" title="Apply the approved beats to your video now (one Undo step) and go back to the Scenes page">✓ Apply to video &amp; back to Scenes</button>
 </header>
 <main>
   <p class="summary" id="summary"></p>
@@ -217,14 +219,55 @@ function feedbackText() {
     b.items.filter((i) => i.type !== "pause").map((i) => `\n  [${b.items_on[i.id] ? "x" : " "}] ${i.label}`).join("") +
     (b.notes ? `\n  Notes: ${b.notes}` : "")).join("\n");
 }
-$("#allOk").onclick = async () => { for (const b of SB.beats) if (b.status === "pending") await save(b, { status: "approved" }); toast("All pending beats approved."); };
+// ---- back to the studio: reuse the studio tab that opened this one (it refreshes + shows Scenes), else navigate
+function backToScenes(msg) {
+  try { localStorage.setItem("cve.pid", PID); localStorage.setItem("cve.tab", "scenes"); } catch {}
+  const op = window.opener;
+  if (LIVE && op && !op.closed) {
+    try {
+      op.postMessage({ cve: "storyboard-done", pid: PID, msg: msg || "" }, location.origin);
+      op.focus();
+      window.close();
+    } catch {}
+  }
+  setTimeout(() => { location.href = "/#scenes"; }, 300);  // window.close() refused (tab not opened by the studio)
+}
+let applying = false;
+async function applyAndBack() {
+  if (!LIVE) { toast("Open the storyboard from the studio to apply it (Scenes → Storyboard)."); return; }
+  if (applying) return;
+  const pend = SB.beats.filter((b) => b.status === "pending").length;
+  const todo = SB.beats.filter((b) => b.status === "approved" && !b.applied && !b.stale).length;
+  if (!todo && !SB.beats.some((b) => b.status === "rejected" && (b.notes || "").trim())) {
+    if (confirm("Nothing new to apply (no approved beats that aren't applied yet). Go back to Scenes?")) backToScenes();
+    return;
+  }
+  if (pend && !confirm(`${pend} beat(s) are still pending – they are left as they are. Apply the ${todo} approved beat(s)?`)) return;
+  applying = true; $("#applyBtn").disabled = true; $("#applyBtn").textContent = "Applying…";
+  try {
+    const r = await fetch(`/api/projects/${PID}/storyboard/apply`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    let j = {}; try { j = await r.json(); } catch {}
+    if (!r.ok) { toast(j.error || "Could not apply – is the studio still running?"); return; }
+    toast(j.reply);
+    backToScenes(j.reply);
+  } finally { applying = false; $("#applyBtn").disabled = false; $("#applyBtn").innerHTML = "✓ Apply to video &amp; back to Scenes"; }
+}
+$("#applyBtn").onclick = applyAndBack;
+$("#backBtn").onclick = () => backToScenes();
+$("#allOk").onclick = async () => {
+  const pend = SB.beats.filter((b) => b.status === "pending" && !b.applied && !b.stale);
+  for (const b of pend) await save(b, { status: "approved" });
+  if (!LIVE) { toast("All pending beats approved."); return; }
+  if (confirm(`${pend.length ? `${pend.length} beat(s) approved.` : "All beats are decided."}\n\nApply the approved beats to your video now and go back to the Scenes page?\n(One Undo step – Ctrl+Z in the studio takes it all back.)`)) applyAndBack();
+  else toast("Approved. Click “Apply to video” when you're ready.");
+};
 $("#copyBtn").onclick = async () => { try { await navigator.clipboard.writeText(feedbackText()); toast("Feedback copied – paste it to Claude."); } catch { toast("Copy failed"); } };
 $("#sendBtn").onclick = async () => {
   if (!LIVE) { $("#copyBtn").click(); return; }
   const pend = SB.beats.filter((b) => b.status === "pending").length;
   if (pend && !confirm(`${pend} beat(s) still pending – pending beats are NOT applied. Send anyway?`)) return;
   const r = await fetch(`/api/projects/${PID}/storyboard/submit`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-  toast(r.ok ? "Sent. In VS Code say: process studio inbox" : "Could not send.");
+  toast(r.ok ? "Sent to Claude's inbox (in VS Code: process studio inbox). Approved beats: use “Apply to video” – no Claude needed." : "Could not send.");
 };
 load();
 </script>

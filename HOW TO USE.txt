@@ -55,8 +55,9 @@
 
   TAB 3  SCENES  (the main editor)
      "Look" dropdown at the top = which look this video USES
-     (None, R1, R2...). Change it and click "Render preview".
-     Under the player, "Edited video" plays your latest render;
+     (None, R1, R2...). Change it and click "▶ Edited view".
+     "▶ Edited view" (above the player, right of the timeline) plays your
+     video with every edit so far - it updates itself after each change;
      "Original footage" plays the raw camera clip.
 
      TIMELINE (under the player): one block per scene, as long as it
@@ -150,10 +151,15 @@
      STORYBOARD (when Claude has planned the edit): click the orange
      "Storyboard" button. Each beat shows the planned frame, cuts,
      zooms and cards. Tick/untick items, click Approve or Reject, write
-     notes, then "Send feedback to Claude". Nothing is rendered before.
+     notes. Then click "✓ Apply to video & back to Scenes": the
+     approved beats are put into your edit right away (no Claude needed,
+     one Undo step) and you are back on the Scenes page, where the
+     preview updates by itself. "Approve all pending" offers the same.
+     Rejected beats with notes go to Claude to rework.
+     "← Scenes" goes back without changing anything.
 
      Made a mistake?  Click  "Undo".
-     Want to see the result?  Click  "Render preview".
+     Want to see the result?  Click  "▶ Edited view".
      Happy with it?  Click  "Export final".
 
   TAB 4  EXPORTS

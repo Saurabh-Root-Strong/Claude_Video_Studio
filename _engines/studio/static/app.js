@@ -131,7 +131,7 @@ function renderJob() {
   pill.title = j.error || "";
   $("#jobLog").textContent = (j.log || []).join("\n") + (j.error ? `\n\n${j.error}` : "");
   const busy = j.status === "running" || j.status === "queued";
-  ["#analyzeBtn", "#previewBtn", "#finalBtn"].forEach((s) => ($(s).disabled = busy));
+  ["#analyzeBtn", "#finalBtn"].forEach((s) => ($(s).disabled = busy));
 }
 
 /* ---------------- footage ---------------- */
@@ -592,7 +592,7 @@ async function switchLook(id) {
   try {
     const r = await api(`/api/projects/${PID}/style_source`, { method: "POST", body: { source: id } });
     lastSig.refs = null; await refresh(true);
-    toast(`The video now uses ${lookName(id)}.${r.notes && r.notes.length ? " " + r.notes.join(", ") + "." : ""} Click Render preview to see it. (Undo reverts.)`);
+    toast(`The video now uses ${lookName(id)}.${r.notes && r.notes.length ? " " + r.notes.join(", ") + "." : ""} Click ▶ Edited view to see it. (Undo reverts.)`);
   } catch (e) { toast(e.message, true); renderLookPick(); }
 }
 $("#lookSelect").onchange = (e) => switchLook(e.target.value);
@@ -1448,7 +1448,39 @@ $$("#quickChips button").forEach((b) => { b.dataset.tip = CHIP_TIP[b.textContent
   b.onclick = () => { const s = curScene(); if (s) sendCommand(s.id, b.textContent); }; });
 $("#undoBtn").onclick = () => api(`/api/projects/${PID}/undo`, { method: "POST" }).then((r) => { toast(r.ok ? "Undone." : "Nothing to undo."); refresh(true); });
 $("#sbBtn").onclick = () => window.open(`/storyboard/${PID}`, "_blank");
-$("#previewBtn").onclick =() => api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "preview" } }).then(() => toast("Rendering preview… (only changed scenes are re-rendered)")).catch((e) => toast(e.message, true));
+// "▶ Edited view": show the edited video in the player; make it first if it is missing or out of date
+$("#previewBtn").onclick = async () => {
+  if (!P) return;
+  const st = editedState();
+  if (st.k === "none" && !P.scenes.some((x) => inVid(x) && !x.src_skipped)) return toast("No scenes in the video yet.", true);
+  if (st.k === "stale" || st.k === "none" || st.k === "failed") {
+    try { await api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "preview" } }); AUTO.lastReq = P.edit_sig; await refresh(true); }
+    catch (e) { return toast(e.message, true); }
+  }
+  if (latestPreview()) { playerMode = "preview"; $$(".player-bar .seg button").forEach((x) => x.classList.toggle("active", x.dataset.mode === "preview")); curSrcUrl = ""; loadPlayer(true); }
+  else toast("Making the edited view… it plays here when ready.");
+  PENDING_PLAY = st.k !== "fresh";
+};
+let PENDING_PLAY = false;
+function editedState() {  // fresh | updating | stale | failed | none
+  const pv = latestPreview(), j = P.job || {};
+  const rendering = (j.kind === "preview" || j.kind === "final") && (j.status === "running" || j.status === "queued") || (j.pending || []).includes("preview");
+  if (rendering) return { k: "updating", t: `⟳ updating… ${j.kind === "preview" && j.progress ? esc(j.progress) : ""}` };
+  if (j.kind === "preview" && j.status === "error" && (!pv || pv.sig !== P.edit_sig)) return { k: "failed", t: "⚠ last update failed – see Activity" };
+  if (!pv) return { k: "none", t: "not made yet" };
+  if (pv.sig && pv.sig === P.edit_sig) return { k: "fresh", t: "✓ up to date" };
+  return { k: "stale", t: AUTO.on ? "⟳ will update…" : "⚠ has changes not shown yet" };
+}
+function renderEditedState() {
+  const el = $("#evState"); if (!el || !P) return;
+  const st = editedState();
+  el.className = `evstate ${st.k}`; el.innerHTML = st.t;
+  el.dataset.tip = { fresh: "The edited view shows all your changes.", updating: "Re-making the changed scenes – it plays automatically when ready.",
+    stale: "You changed something after the last update.", failed: "The last update failed – open the Activity box (Footage tab) for the reason.",
+    none: "Click ▶ Edited view to make it." }[st.k];
+  // asked to watch while it was being made: start playing as soon as the new version is in
+  if (PENDING_PLAY && st.k === "fresh") { PENDING_PLAY = false; playerMode = "preview"; $$(".player-bar .seg button").forEach((x) => x.classList.toggle("active", x.dataset.mode === "preview")); curSrcUrl = ""; loadPlayer(true); }
+}
 $("#finalBtn").onclick = () => api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "final" } }).then(() => toast("Exporting full quality to the Exports folder…")).catch((e) => toast(e.message, true));
 
 /* ---------------- player ---------------- */
@@ -1466,17 +1498,17 @@ function loadPlayer(play, keepTime = null) {
   let url, start;
   if (playerMode === "preview") {
     const pv = latestPreview();
-    if (!pv) { $("#playerInfo").textContent = "Nothing rendered yet — click Render preview."; return; }
+    if (!pv) { $("#playerInfo").textContent = "Not made yet — click ▶ Edited view (above the player)."; return; }
     url = renderUrl(pv); start = inVid(s) ? previewOffset(s.id) : 0;
     const stale = pv.sig && P.edit_sig && pv.sig !== P.edit_sig;
     $("#playerInfo").innerHTML = `${pv.kind === "final" ? "Final export" : "Preview"} ${esc(pv.file)} · ${fmt(pv.duration)} · ${pv.created.slice(11, 16)}${s.keep ? "" : " · this scene is cut"}` +
-      (stale || !pv.sig ? ` · <span class="stale" data-tip="Scenes, clips or settings changed after this render – this video does not show them yet.">⚠ ${AUTO.on ? "edited – updating preview…" : "edited since this render – click Render preview"}</span>` : "");
+      (stale || !pv.sig ? ` · <span class="stale" data-tip="Scenes, clips or settings changed after this render – this video does not show them yet.">⚠ ${AUTO.on ? "edited – updating…" : "has changes not shown yet – click ▶ Edited view"}</span>` : "");
     setRate(1, false);
   } else {
     const src = P.sources.find((x) => x.file === s.src);
     url = src && src.proxy ? media("proxy", src.proxy) : media("raw", s.src); start = s.in;
     setRate(s.speed || 1, !!s.mute);
-    $("#playerInfo").textContent = `Original footage · plays at the scene's speed ${s.speed || 1}×${s.mute ? " · muted" : ""} · captions, zoom and cards show in “Edited video”`;
+    $("#playerInfo").textContent = `Original footage · plays at the scene's speed ${s.speed || 1}×${s.mute ? " · muted" : ""} · captions, zoom and cards show in “Edited view”`;
   }
   const rate = player.defaultPlaybackRate;
   const go = () => { player.playbackRate = rate; player.currentTime = keepTime != null ? Math.min(keepTime, Math.max(0, (player.duration || 1e9) - 0.1)) : start; if (play) player.play().catch(() => {}); };
@@ -1501,7 +1533,7 @@ function syncSourcePlayer() {
   const s = curScene(); if (!s) return;
   if (player.playbackRate !== (s.speed || 1) || player.muted !== !!s.mute) {
     setRate(s.speed || 1, !!s.mute);
-    $("#playerInfo").textContent = `Original footage · plays at the scene's speed ${s.speed || 1}×${s.mute ? " · muted" : ""} · captions, zoom and cards show in “Edited video”`;
+    $("#playerInfo").textContent = `Original footage · plays at the scene's speed ${s.speed || 1}×${s.mute ? " · muted" : ""} · captions, zoom and cards show in “Edited view”`;
   }
 }
 /* Auto-update preview: every edit changes P.edit_sig; when it differs from the newest render, render again
@@ -1527,7 +1559,7 @@ function autoPreviewTick() {
     api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "preview" } }).then(() => refresh(true)).catch(() => {});
   }, 1500);
 }
-setInterval(() => { if (P) { autoPreviewTick(); syncSourcePlayer(); } }, 1000);
+setInterval(() => { if (P) { autoPreviewTick(); syncSourcePlayer(); renderEditedState(); } }, 1000);
 function reloadPreview() {  // new render while watching "Edited video"
   const playing = !player.paused;
   curSrcUrl = ""; loadPlayer(playing, playing ? player.currentTime : null);
@@ -1580,6 +1612,15 @@ $("#inboxClose").onclick = () => $("#inbox").classList.add("hidden");
 $("#copyPhrase").onclick = () => navigator.clipboard?.writeText($("#inboxPhrase").textContent).then(() => toast("Copied."));
 
 /* ---------------- boot ---------------- */
+window.addEventListener("message", (e) => {
+  if (e.origin !== location.origin || !e.data || e.data.cve !== "storyboard-done") return;
+  if (e.data.pid && e.data.pid !== PID && [...$("#projectSelect").options].some((o) => o.value === e.data.pid)) {
+    $("#projectSelect").value = e.data.pid; $("#projectSelect").onchange({ target: $("#projectSelect") });
+  }
+  switchTab("scenes");
+  refresh(true).then(() => { if (typeof autoPreviewTick === "function") autoPreviewTick(); });
+  if (e.data.msg) toast(`${e.data.msg} (Undo takes it back)`);
+});
 const hashTab = location.hash.slice(1);
 switchTab(["footage", "refs", "scenes", "exports"].includes(hashTab) ? hashTab : store.get("cve.tab") || "footage");
 loadBrandKit();
