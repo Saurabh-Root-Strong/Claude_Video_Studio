@@ -85,11 +85,15 @@ def _build(pid: str, creative: dict | None = None) -> dict:
     beats, total_before, total_after = [], 0.0, 0.0
     cache: dict[str, tuple] = {}
     for no, sc in enumerate(data["scenes"], 1):
+        if sc.get("role") == "broll":
+            continue  # B-roll footage is not a beat: it shows up as a cutaway item on the scenes it covers
         if sc["src"] not in cache:
             cache[sc["src"]] = (core.read_json(core.work_file(pid, sc["src"], "words.json"), []) or [],
                                 pipeline.load_silences(pid, sc["src"]))
         words, sil = cache[sc["src"]]
         sw = [w for w in words if sc["in"] <= (w["s"] + w["e"]) / 2 < sc["out"]]
+        if sc.get("no_speech") and sc.get("captions") is not True:
+            sw = []  # music / ambience: guessed words would plan fake "dead air" trims and filler cuts
         items = []
         # head / tail dead air
         if sw:
@@ -136,12 +140,15 @@ def _build(pid: str, creative: dict | None = None) -> dict:
         card = cr.get("card") or sc.get("card")
         if card and cards.valid(card):
             items.append({"id": "card", "type": "card", "card": card, "label": _card_label(card)})
-        av = assets(pid)
+        # B-roll: a file in Raw Footage/<pid>/Assets OR one of the project's own clips (e.g. a B-roll clip)
+        av = assets(pid) + [s["file"] for s in data["sources"] if s["file"] != sc["src"]]
         if cr.get("broll"):
             ok = cr["broll"].get("file") in av
+            where = cr["broll"].get("where") if cr["broll"].get("where") in ("top", "full") else None  # None = follow the look
             items.append({"id": "broll", "type": "broll", "file": cr["broll"].get("file") if ok else None,
-                          "want": cr["broll"].get("want", ""),
-                          "label": (f"B-roll: {cr['broll']['file']}" if ok else
+                          "want": cr["broll"].get("want", ""), "where": where,
+                          "label": (f"B-roll cutaway: {cr['broll']['file']} ({'full screen' if where == 'full' else 'top panel' if where else 'placed by the look'})"
+                                    f" – voice keeps playing" if ok else
                                     f"B-roll slot: {cr['broll'].get('want', '')} – no Assets file yet, card stands in"),
                           "default": ok})
         for it in items:
@@ -313,6 +320,8 @@ def _apply(pid: str) -> list[str]:
             for it in b["items"]:
                 if b["items_on"].get(it["id"]) and it["type"] == "card":
                     sc["card"] = it["card"]
+                if b["items_on"].get(it["id"]) and it["type"] == "broll" and it.get("file") and sc.get("role") != "broll":
+                    sc["broll"] = {"src": it["file"], **({"where": it["where"]} if it.get("where") else {})}
             # punch-ins: split off the hook part and zoom it (snap zoom on the cut, like the profile says)
             punches = sorted((it for it in b["items"] if it["type"] == "punch" and b["items_on"].get(it["id"])),
                              key=lambda it: it["s"])

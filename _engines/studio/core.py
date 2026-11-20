@@ -212,6 +212,9 @@ def new_project(name: str) -> dict:
         "commands": [],
         "renders": [],
         "job": None,
+        # starts in the Brand Kit look (if there is one); "None · simple" = truly plain settings
+        "style_source": BRANDKIT if brandkit_look() else "none",
+        "looks": {"none": style_of(DEFAULT_SETTINGS)} if brandkit_look() else {},
     }
     save(pid, data)
     return data
@@ -253,7 +256,8 @@ def derive_look(base: dict, ref: dict) -> tuple[dict, list[str]]:
     return look, notes
 
 
-_SIG_SKIP = {"thumb", "transcript", "notes", "no", "dur", "est", "caption_view", "src_skipped", "sb_applied"}
+_SIG_SKIP = {"thumb", "transcript", "notes", "no", "dur", "est", "caption_view", "src_skipped", "sb_applied",
+             "broll_view", "start_at"}
 
 
 def edit_sig(d: dict) -> str:
@@ -264,6 +268,24 @@ def edit_sig(d: dict) -> str:
     srcs = [(s.get("file"), s.get("include", True)) for s in d.get("sources", [])]
     blob = json.dumps([scenes, d.get("settings", {}), srcs], sort_keys=True, default=str)
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
+
+
+BRANDKIT = "brandkit"  # the Brand Kit as a look: read-only, read live from Brand Kit/brand-kit.json
+
+
+def brandkit_look() -> dict | None:
+    """Style values of the Brand Kit (validated), or None if there is no usable brand-kit.json.
+    It is shared by every project, so the studio never edits it from a project page."""
+    kit = read_json(BRAND / "brand-kit.json", None)
+    if not isinstance(kit, dict) or not isinstance(kit.get("settings"), dict):
+        return None
+    look = style_of(DEFAULT_SETTINGS)
+    for k, v in kit["settings"].items():
+        if k in STYLE_KEYS:
+            ok, val = clean_setting(k, v)
+            if ok:
+                look[k] = val
+    return look
 
 
 def brand_settings() -> dict:
@@ -517,6 +539,19 @@ def source_by_file(data: dict, file: str) -> dict | None:
         if s["file"] == file:
             return s
     return None
+
+
+def broll_path(pid: str, data: dict, name: str | None) -> Path | None:
+    """File behind a scene's B-roll cutaway: a project clip (not skipped, still on disk) or Raw Footage/<pid>/Assets/<name>.
+    None = the cutaway can't be shown (the scene then renders without it)."""
+    if not name or not isinstance(name, str):
+        return None
+    s = source_by_file(data, name)
+    if s is not None:
+        p = raw_dir(pid) / name
+        return p if s.get("include", True) is not False and p.is_file() else None
+    p = raw_dir(pid) / "Assets" / Path(name).name
+    return p if p.is_file() else None
 
 
 def scene_by_id(data: dict, sid: str) -> dict | None:

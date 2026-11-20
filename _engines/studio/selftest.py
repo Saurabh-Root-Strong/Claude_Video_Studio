@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -142,6 +143,12 @@ try:
     check("undo reverts split", r["ok"] and len(core.load(pid)["scenes"]) == n_scenes)
     r = post(f"/api/projects/{pid}/command", {"scene": s1, "text": "speed 9"}).get_json()
     check("bad command rejected", r["replies"] and r["replies"][0].startswith("!"))
+    vols = []
+    for v in ("volume 3%", "volume 150", "volume 1.5", "volume 0%"):
+        post(f"/api/projects/{pid}/command", {"scene": s1, "text": v})
+        vols.append(core.scene_by_id(core.load(pid), s1)["volume"])
+    post(f"/api/projects/{pid}/command", {"scene": s1, "text": "volume 100%"})
+    check("volume: '3%' = 3 % (not 300 %), '150' = 150 %, '1.5' = 1.5x, '0%' = silent", vols == [0.03, 1.5, 1.5, 0.0], str(vols))
     r = post(f"/api/projects/{pid}/command", {"scene": s1, "text": "add a glitch transition"}).get_json()
     check("unknown command goes to Claude inbox", r["queued"] == ["add a glitch transition"])
     post(f"/api/projects/{pid}/command", {"scene": None, "text": "remove silences"})
@@ -153,6 +160,53 @@ try:
     post(f"/api/projects/{pid}/command", {"scene": scenes[3]["id"], "text": "reset trim"})
     sc4 = core.scene_by_id(core.load(pid), scenes[3]["id"])
     check("reset trim restores full length", sc4["out"] == sc4["orig_out"])
+    # on-screen text vs captions: a long centred text + centred captions in one scene (the final export below
+    # renders it – multi-line drawtext must work); unit checks of the layout rule
+    post(f"/api/projects/{pid}/command", {"scene": scenes[4]["id"],
+                                          "text": "text: Nifty 50 closes at a record high as banks and IT stocks rally into the close"})
+    post(f"/api/projects/{pid}/command", {"scene": scenes[4]["id"], "text": "text center"})
+    post(f"/api/projects/{pid}/command", {"scene": scenes[4]["id"], "text": "captions at center"})
+    W_, H_ = 1080, 1920
+    bandc = pipeline.caption_band({"cap_pos": "center"}, {}, W_, H_, None)
+    tl, tfs, ty, mv = pipeline.text_layout("Nifty at record high", "center", W_, H_, bandc, round(H_ * 0.06))
+    th = len(tl) * round(tfs * 1.55)
+    no_hit = ty + th <= bandc[0] or ty >= bandc[1]
+    lng, lfs, ly, _ = pipeline.text_layout("Nifty 50 closes at a record high as banks and IT stocks rally into the close",
+                                           "top", W_, H_, None, 100)
+    xl, xfs, _, _ = pipeline.text_layout("Nifty 50 closes at a record high as banks and IT stocks rally into the close "
+                                         "while midcaps lag and the rupee firms against the dollar", "top", W_, H_, None, 100)
+    fits = (all(len(x) * lfs * 0.56 <= W_ * 0.9 for x in lng) and len(lng) <= 3
+            and all(len(x) * xfs * 0.56 <= W_ * 0.9 for x in xl) and xfs >= round(W_ * 0.038))
+    bands = pipeline.caption_band({}, {}, W_, H_, 845)          # split, captions on the seam
+    _, sfs, sy, smv = pipeline.text_layout("Nifty up", "center", W_, H_, bands, 845 + 38)
+    _, _, by, bmv = pipeline.text_layout("Nifty up", "bottom", W_, H_, pipeline.caption_band({}, {"caption_position": "bottom"}, W_, H_, None), 100)
+    check("on-screen text never sits on the captions (moves to the free side), long text wraps to <=3 lines inside the "
+          "frame, split layout never pushes it onto the card",
+          mv and no_hit and fits and smv and sy >= 845 + 38 and bmv and by + round(sfs * 1.55) <= H_ * 0.8 + 1,
+          f"center y={ty} band={bandc} lines={lng} split y={sy} bottom y={by}")
+    # speech re-check after split/trim: a silent tail turns captions off automatically, speech brings them back;
+    # an explicit captions choice is never touched
+    wds = [{"w": x, "s": 0.2 + i * 0.4, "e": 0.5 + i * 0.4} for i, x in enumerate("aaj market upar hai dosto".split())]
+    tail = {"in": 3.0, "out": 9.0, "captions": None}
+    pipeline.update_speech_flag(tail, wds, {"speech": True})
+    head_ = dict(tail, **{"in": 0.0, "out": 2.5})
+    pipeline.update_speech_flag(head_, wds, {"speech": True})
+    expl = {"in": 3.0, "out": 9.0, "captions": True}
+    pipeline.update_speech_flag(expl, wds, {"speech": True})
+    check("speech re-check after split: silent tail -> captions auto-off, speech -> back to auto, explicit On kept",
+          tail["no_speech"] and tail["captions"] is False and tail.get("captions_auto_off")
+          and not head_["no_speech"] and head_["captions"] is None and "captions_auto_off" not in head_
+          and expl["captions"] is True, f"{tail} {head_} {expl}")
+    # music scene: whisper's guesses are NOT shown as words (kept in `heard`); shown again once captions are On
+    sid0 = scenes[0]["id"]
+    core.mutate(pid, lambda d: core.scene_by_id(d, sid0).update(no_speech=True, captions=False, captions_auto_off=True))
+    v0 = next(x for x in client.get(f"/api/projects/{pid}").get_json()["scenes"] if x["id"] == sid0)
+    core.mutate(pid, lambda d: core.scene_by_id(d, sid0).update(captions=True))
+    v1 = next(x for x in client.get(f"/api/projects/{pid}").get_json()["scenes"] if x["id"] == sid0)
+    core.mutate(pid, lambda d: core.scene_by_id(d, sid0).update(no_speech=False, captions=None, captions_auto_off=False))
+    check("no-speech scene: guessed words hidden (in 'heard'), visible again when captions are switched On",
+          v0["transcript"] == "" and v0.get("heard") and "caption_view" not in v0 and v1["transcript"] and not v1.get("heard"),
+          f"{v0.get('transcript')!r} {v0.get('heard')!r} / {v1.get('transcript')!r}")
 
     # ---------------------------------------------------------------- storyboard: plan -> review -> apply
     import storyboard
@@ -283,6 +337,17 @@ try:
     j = wait_job(pid, "final")
     check("final export renders", j["status"] == "done", j.get("error") or j.get("progress"))
     out = core.EXPORTS / core.load(pid)["renders"][-1]["file"]
+    rec = core.load(pid)["renders"][-1]
+    tms = rec.get("times") or []
+    check("render records REAL per-scene start/length (sum = file length +-0.15 s, starts increasing)",
+          tms and abs(sum(x[2] for x in tms) - rec["duration"]) < 0.15 and all(tms[i][1] < tms[i + 1][1] for i in range(len(tms) - 1)),
+          f"{tms} vs {rec['duration']}")
+    # a second waiting preview/export is dropped (auto-preview from two tabs, double clicks)
+    core.mutate(pid, lambda d: d.update(job={"kind": "analyze", "status": "running", "pending": ["preview"], "log": []}))
+    appmod.enqueue(pid, "preview")
+    pend = core.load(pid)["job"]["pending"]
+    core.mutate(pid, lambda d: d.update(job={"kind": "final", "status": "done", "pending": [], "log": []}))
+    check("only ONE waiting preview is queued", pend == ["preview"] and appmod._jobs.qsize() == 0, f"{pend} q={appmod._jobs.qsize()}")
 
     def sdur(path, sel):
         o = subprocess.run([core.FFPROBE, "-v", "error", "-select_streams", sel, "-show_entries", "stream=duration",
@@ -455,6 +520,30 @@ try:
     st3 = core.load(p3)["settings"]
     check("new project starts from the Brand Kit (bad/unknown keys ignored)",
           st3["layout"] == "split" and st3["music"] == "auto" and st3["silence_min"] == 0.6 and "bogus_key" not in st3)
+    d3n = core.load(p3)
+    check("new project starts ON the ★ Brand Kit look; 'None · simple' is truly plain",
+          d3n["style_source"] == "brandkit" and d3n["looks"]["none"]["layout"] == "full")
+    rp = post(f"/api/projects/{p3}/first_cut")
+    check("plan the edit refused before analysis (no scenes)", rp.status_code == 400)
+    # ★ Brand Kit is read-only from a project: style edits ignored, its brief + footage keys still save
+    r = post(f"/api/projects/{p3}/brief", {"look": "brandkit", "look_brief": "calm brand look",
+                                            "settings": {"layout": "full", "face_y": 0.33}})
+    d3n = core.load(p3)
+    cli_bk = subprocess.run([sys.executable, str(HERE / "studio_cli.py"), "look", p3, "brandkit", "layout=full"],
+                            env={**os.environ, "CVE_ROOT": str(ROOT)}, capture_output=True, text=True)
+    check("★ Brand Kit is read-only: style edits ignored (page and CLI), its brief and footage keys save",
+          r.status_code == 200 and d3n["settings"]["layout"] == "split" and d3n["settings"]["face_y"] == 0.33 and
+          d3n["look_briefs"]["brandkit"] == "calm brand look" and cli_bk.returncode != 0)
+    post(f"/api/projects/{p3}/style_source", {"source": "none"})
+    kit = json.loads((core.BRAND / "brand-kit.json").read_text(encoding="utf-8"))
+    kit["settings"]["caption_words"] = 2
+    (core.BRAND / "brand-kit.json").write_text(json.dumps(kit), encoding="utf-8")
+    post(f"/api/projects/{p3}/style_source", {"source": "brandkit"})
+    post(f"/api/projects/{p3}/command", {"scene": None, "text": "words 6"})
+    rr = post(f"/api/projects/{p3}/style_source", {"source": "none"}).get_json()
+    post(f"/api/projects/{p3}/style_source", {"source": "brandkit"})
+    check("picking ★ Brand Kit loads the LATEST file; changes made while it was active aren't stored into it",
+          core.load(p3)["settings"]["caption_words"] == 2 and any("not kept" in n for n in rr.get("notes", [])))
     with open(green, "rb") as f:
         client.post(f"/api/projects/{p3}/upload?kind=source", data={"files": (f, "green.mp4")},
                     content_type="multipart/form-data")
@@ -462,6 +551,15 @@ try:
     wait_job(p3, "analyze")
     check("green screen detected", pipeline.green_key(p3, "green.mp4") is not None and
           pipeline.green_key(pid, core.load(pid)["sources"][0]["file"]) is None)
+    pa = post(f"/api/projects/{p3}/first_cut").get_json()
+    pb = post(f"/api/projects/{p3}/first_cut").get_json()
+    plan_cmds = [c for c in core.load(p3)["commands"] if c.get("kind") == "plan_edit" and c["status"] == "claude"]
+    core.set_job(p3, status="running", kind="analyze")
+    pc = post(f"/api/projects/{p3}/first_cut")
+    core.set_job(p3, status="done", kind="analyze")
+    check("✨ plan the edit: one storyboard request (names the look), no duplicates, refused while analyzing",
+          pa["ok"] and not pa["already"] and pb["already"] and len(plan_cmds) == 1 and "★ Brand Kit" in plan_cmds[0]["text"]
+          and pc.status_code == 409)
     d3 = core.load(p3)
     post(f"/api/projects/{p3}/command", {"scene": None, "text": "headline: test *card*"})
     r = post(f"/api/projects/{p3}/command", {"scene": d3["scenes"][-1]["id"], "text": "card: number 2x | gain"}).get_json()
@@ -520,6 +618,185 @@ try:
         check("music ducks ~18 dB under dialogue (+-2.5)", 15.5 <= depth <= 20.5, f"{depth:.1f} dB")
         fd = abs(sdur(o3, "a:0") - sdur(o3, "v:0")) * 1000
         check("split export A/V lengths match (<=60 ms)", fd <= 60, f"{fd:.0f} ms")
+
+    # ---------------------------------------------------------------- B-roll cutaways (Scenes page)
+    d2 = core.load(p2)
+    mov = [s for s in d2["scenes"] if s["src"] == "clip.mov"]
+    check("no-speech clip stays a normal scene in the video (B-roll is opt-in)",
+          mov and all(not s.get("role") and not s.get("broll") for s in d2["scenes"]),
+          f"{[(s['src'], s.get('role'), s.get('broll')) for s in d2['scenes']]}")
+    post(f"/api/projects/{p2}/command", {"scene": mov[0]["id"], "text": "role broll"})
+    d2 = core.load(p2)
+    mov = [s for s in d2["scenes"] if s["src"] == "clip.mov"]
+    cov = [s for s in d2["scenes"] if (s.get("broll") or {}).get("src") == "clip.mov"]
+    pj = client.get(f"/api/projects/{p2}").get_json()
+    check("'role broll' makes the no-speech clip B-roll and covers a speaker scene (full layout: full screen)",
+          mov and all(s.get("role") == "broll" for s in mov) and cov and
+          all("where" not in s["broll"] for s in cov) and
+          all(s["broll_view"]["where"] == "full" for s in pj["scenes"] if s.get("broll")) and
+          all(s["est"] == 0 for s in pj["scenes"] if s["src"] == "clip.mov")
+          and pj["broll_clips"] and pj["broll_clips"][0]["file"] == "clip.mov" and pj["broll_clips"][0]["used_by"],
+          f"{[(s['src'], s.get('role'), s.get('broll')) for s in d2['scenes']]}")
+    sc1 = cov[0]["id"]
+    r_top = post(f"/api/projects/{p2}/command", {"scene": sc1, "text": "b-roll top"}).get_json()
+    r_at = post(f"/api/projects/{p2}/command", {"scene": sc1, "text": "broll from 1.5"}).get_json()
+    b1 = core.scene_by_id(core.load(p2), sc1)["broll"]
+    check("B-roll commands: top panel warns without split layout; 'broll from 1.5' sets the clip start",
+          "split layout" in r_top["replies"][0] and b1["where"] == "top" and b1["at"] == 1.5, str(r_top))
+    r_self = post(f"/api/projects/{p2}/command", {"scene": mov[0]["id"], "text": "broll clip.mp4"}).get_json()
+    r_sp = post(f"/api/projects/{p2}/command", {"scene": mov[0]["id"], "text": "role speaker"}).get_json()
+    left = [s for s in core.load(p2)["scenes"] if s.get("broll")]
+    r_br = post(f"/api/projects/{p2}/command", {"scene": mov[0]["id"], "text": "role broll"}).get_json()
+    again = [s for s in core.load(p2)["scenes"] if (s.get("broll") or {}).get("src") == "clip.mov"]
+    check("B-roll footage can't take a cutaway; Role: Speaker drops its cutaways; Role: B-roll places it again",
+          r_self["replies"][0].startswith("!") and not left and "no longer covers" in r_sp["replies"][0]
+          and again and "covers" in r_br["replies"][0], f"{r_sp} {r_br}")
+    r_off = post(f"/api/projects/{p2}/command", {"scene": None, "text": "broll off"}).get_json()
+    n_off = sum(1 for s in core.load(p2)["scenes"] if s.get("broll"))
+    r_auto = post(f"/api/projects/{p2}/command", {"scene": None, "text": "broll auto"}).get_json()
+    check("whole-video 'broll off' / 'broll auto'", n_off == 0 and "removed" in r_off["replies"][0] and
+          any(s.get("broll") for s in core.load(p2)["scenes"]), str(r_auto))
+    # continuity: two scenes covered by one clip continue its footage (no replay after a split)
+    fake = {"settings": {"layout": "full"}, "sources": [{"file": "clip.mov", "duration": 30.0}], "id": p2}
+    sa = {"id": "a", "src": "clip.mp4", "in": 0.0, "out": 2.0, "broll": {"src": "clip.mov"}}
+    sb_ = {"id": "b", "src": "clip.mp4", "in": 2.0, "out": 3.5, "broll": {"src": "clip.mov"}}
+    sc_ = {"id": "c", "src": "clip.mp4", "in": 3.5, "out": 4.0, "broll": {"src": "clip.mov", "at": 20}}
+    wb = pipeline.with_broll(p2, fake, [sa, sb_, sc_], {})
+    check("consecutive cutaways continue the clip; an explicit start restarts it",
+          [x["_broll"]["at"] for x in wb] == [0.0, 2.0, 20.0], str([x.get("_broll") for x in wb]))
+    # timeline B-roll drag/drop endpoint: many scenes in ONE undo step; any bad entry -> nothing changes
+    d2 = core.load(p2)
+    spk = [s for s in d2["scenes"] if s.get("role") != "broll"]
+    depth0 = core.history_depth(p2)
+    rb = post(f"/api/projects/{p2}/broll", {"set": {spk[0]["id"]: None, spk[1]["id"]: {"src": "clip.mov", "where": "full"},
+                                                    spk[2]["id"]: {"src": "clip.mov", "at": 1}}})
+    d2b = core.load(p2)
+    g = lambda d, s: core.scene_by_id(d, s["id"]).get("broll")  # noqa: E731
+    bad_own = post(f"/api/projects/{p2}/broll", {"set": {spk[0]["id"]: {"src": "clip.mov"}, spk[3]["id"]: {"src": "clip.mp4"}}})
+    bad_br = post(f"/api/projects/{p2}/broll", {"set": {mov[0]["id"]: {"src": "clip.mp4"}}})
+    bad_nf = post(f"/api/projects/{p2}/broll", {"set": {spk[0]["id"]: {"src": "nope.mp4"}}})
+    same = post(f"/api/projects/{p2}/broll", {"set": {spk[1]["id"]: {"src": "clip.mov", "where": "full"}}}).get_json()
+    check("timeline B-roll move: several scenes in one undo step; own clip / B-roll target / unknown clip refused, nothing changed",
+          rb.status_code == 200 and g(d2b, spk[0]) is None and g(d2b, spk[1]) == {"src": "clip.mov", "where": "full"} and
+          g(d2b, spk[2]) == {"src": "clip.mov", "at": 1.0} and core.history_depth(p2) == depth0 + 1 and
+          bad_own.status_code == 400 and bad_br.status_code == 400 and bad_nf.status_code == 400 and
+          g(core.load(p2), spk[0]) is None and same["unchanged"] and core.history_depth(p2) == depth0 + 1,
+          f"{rb.get_json()} {bad_own.get_json()}")
+    post(f"/api/projects/{p2}/undo")
+    check("undo reverts the whole drag", [g(core.load(p2), s) for s in spk[:3]] == [g(d2, s) for s in spk[:3]])
+    # B-roll clip inserted INTO the video as its own scene (intro), its cutaways removed; undo puts it back
+    d2 = core.load(p2)
+    first_spk = next(s for s in d2["scenes"] if s.get("role") != "broll")
+    post(f"/api/projects/{p2}/broll", {"set": {first_spk["id"]: {"src": "clip.mov"}}})
+    ri = post(f"/api/projects/{p2}/broll/insert", {"file": "clip.mov", "before": first_spk["id"]})
+    d2i = core.load(p2)
+    ids_i = [s["id"] for s in d2i["scenes"]]
+    movs = [s for s in d2i["scenes"] if s["src"] == "clip.mov"]
+    again_i = post(f"/api/projects/{p2}/broll/insert", {"file": "clip.mov", "before": "end"})
+    check("drop a B-roll clip on a scene edge -> it becomes its own scene there (cutaways removed); twice refused",
+          ri.status_code == 200 and all("role" not in s for s in movs) and ids_i.index(movs[0]["id"]) < ids_i.index(first_spk["id"])
+          and not any((s.get("broll") or {}).get("src") == "clip.mov" for s in d2i["scenes"]) and again_i.status_code == 400,
+          str(ri.get_json()))
+    post(f"/api/projects/{p2}/undo")
+    post(f"/api/projects/{p2}/undo")
+    check("undo returns it to B-roll footage", all(s.get("role") == "broll" for s in core.load(p2)["scenes"] if s["src"] == "clip.mov"))
+    # trim to / captions auto / drag reorder
+    s0 = core.load(p2)["scenes"][0]
+    post(f"/api/projects/{p2}/command", {"scene": s0["id"], "text": "trim start to 0.25"})
+    t1 = core.scene_by_id(core.load(p2), s0["id"])
+    post(f"/api/projects/{p2}/command", {"scene": s0["id"], "text": "trim start to 0"})
+    t2 = core.scene_by_id(core.load(p2), s0["id"])
+    big = post(f"/api/projects/{p2}/command", {"scene": s0["id"], "text": f"trim start to {s0['out'] - s0['orig_in']}"}).get_json()
+    check("absolute trim (timeline handles): 'trim start to 0.25' / back to 0 / too large refused",
+          abs(t1["in"] - (s0["orig_in"] + 0.25)) < 1e-6 and t2["in"] == s0["orig_in"] and big["replies"][0].startswith("!"))
+    talk = next(s for s in core.load(p2)["scenes"] if not s.get("no_speech"))
+    post(f"/api/projects/{p2}/command", {"scene": talk["id"], "text": "captions off"})
+    post(f"/api/projects/{p2}/command", {"scene": talk["id"], "text": "captions auto"})
+    post(f"/api/projects/{p2}/command", {"scene": mov[0]["id"], "text": "captions on"})
+    post(f"/api/projects/{p2}/command", {"scene": mov[0]["id"], "text": "captions auto"})
+    ms = core.scene_by_id(core.load(p2), mov[0]["id"])
+    check("'captions auto' follows the video setting (and stays off where nobody speaks)",
+          core.scene_by_id(core.load(p2), talk["id"])["captions"] is None and ms["captions"] is False
+          and ms.get("captions_auto_off"))
+    ids = [s["id"] for s in core.load(p2)["scenes"]]
+    post(f"/api/projects/{p2}/scene/{ids[-1]}/move", {"to": ids[0]})
+    moved = [s["id"] for s in core.load(p2)["scenes"]]
+    post(f"/api/projects/{p2}/scene/{ids[0]}/move", {"to": "end"})
+    post(f"/api/projects/{p2}/scene/{ids[0]}/move", {"to": "gone"})
+    post(f"/api/projects/{p2}/undo")
+    post(f"/api/projects/{p2}/undo")
+    check("timeline drag: move a scene before another / to the end; unknown target ignored; undoable",
+          moved == [ids[-1]] + ids[:-1] and [s["id"] for s in core.load(p2)["scenes"]] == ids, str(moved))
+    # per-scene caption position: head / center / below / auto (command + where libass puts it)
+    r_cp = post(f"/api/projects/{p2}/command", {"scene": ids[0], "text": "captions at bottom"}).get_json()
+    cp1 = core.scene_by_id(core.load(p2), ids[0]).get("cap_pos")
+    post(f"/api/projects/{p2}/command", {"scene": ids[0], "text": "captions at auto"})
+    cp2 = core.scene_by_id(core.load(p2), ids[0]).get("cap_pos", "none")
+    wl = [{"w": "aaj", "s": 0.1, "e": 0.5}, {"w": "market", "s": 0.6, "e": 1.0}]
+    ys = {}
+    for pos, seam in (("head", None), ("center", None), ("below", None), ("head", 800), ("center", 800), ("below", 800)):
+        pa = ROOT / "cp.ass"
+        pipeline.write_ass(pa, {"in": 0, "out": 2, "cap_pos": pos}, wl, [(0, 2)], {}, 1080, 1920, seam_y=seam)
+        m = re.search(r"\\pos\(540,(\d+)\)", pa.read_text(encoding="utf-8-sig"))
+        ys[(pos, seam)] = int(m.group(1)) if m else None
+    check("caption position per scene: 'captions at bottom' = below, 'auto' clears; head < center < below; split head just under the seam",
+          cp1 == "below" and cp2 == "none" and ys[("head", None)] < ys[("center", None)] < ys[("below", None)]
+          and 800 < ys[("head", 800)] < 1000 and ys[("center", 800)] < ys[("below", 800)] <= round(1920 * 0.8), f"{r_cp} {cp1} {cp2} {ys}")
+    # split layout: B-roll in the top panel (dimmed under the card), then full screen; it never adds length
+    red = ROOT / "redbroll.mp4"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0xE01010:s=640x360:r=30:d=3",
+                    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "3", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", "-shortest", str(red)], check=True)
+    with open(red, "rb") as f:
+        client.post(f"/api/projects/{p3}/upload?kind=source", data={"files": (f, "redbroll.mp4")},
+                    content_type="multipart/form-data")
+    est_before = client.get(f"/api/projects/{p3}").get_json()["totals"]["est"]
+    post(f"/api/projects/{p3}/analyze")
+    wait_job(p3, "analyze")
+    wait_job(p3, "preview")
+    pj3 = client.get(f"/api/projects/{p3}").get_json()
+    redsc = [s for s in pj3["scenes"] if s["src"] == "redbroll.mp4"]
+    check("new no-speech clip plays as its own scene (edit grows by its length)",
+          redsc and not redsc[0].get("role") and pj3["totals"]["est"] - est_before > 2.5,
+          f"{est_before} -> {pj3['totals']['est']}")
+    for x in redsc:
+        post(f"/api/projects/{p3}/command", {"scene": x["id"], "text": "role broll"})
+    pj3 = client.get(f"/api/projects/{p3}").get_json()
+    covd = [s for s in pj3["scenes"] if (s.get("broll") or {}).get("src") == "redbroll.mp4"]
+    check("split layout: 'role broll' puts the clip in the TOP panel, edit length back to before",
+          covd and covd[0]["broll_view"]["where"] == "top" and abs(pj3["totals"]["est"] - est_before) < 0.05,
+          f"{est_before} -> {pj3['totals']['est']}")
+
+    def frame_px(path, x, y, t):
+        b = subprocess.run([core.FFMPEG, "-v", "error", "-ss", str(t), "-i", str(path), "-frames:v", "1", "-vf",
+                            f"format=rgb24,crop=1:1:{x}:{y}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                           capture_output=True).stdout
+        return tuple(b[:3])
+    for where in ("top", "full"):
+        post(f"/api/projects/{p3}/command", {"scene": None, "text": f"broll {where}"})
+        post(f"/api/projects/{p3}/render", {"kind": "preview"})
+        jr = wait_job(p3, "preview")
+        d3 = core.load(p3)
+        pv = core.work_dir(p3) / d3["renders"][-1]["file"]
+        w3, h3 = pipeline.target_size(d3, True)
+        th, _ = pipeline.split_heights(h3, d3["settings"])
+        at = client.get(f"/api/projects/{p3}").get_json()
+        t0 = next(s["start_at"] for s in at["scenes"] if (s.get("broll") or {}).get("src") == "redbroll.mp4") + 0.4
+        top_px, low_px = frame_px(pv, 20, 20, t0), frame_px(pv, 20, th + 60, t0)
+        if where == "top":
+            check("B-roll shows in the top panel (red, dimmed under the card), speaker area untouched",
+                  jr["status"] == "done" and top_px[0] > top_px[1] + 50 and not (low_px[0] > low_px[1] + 80),
+                  f"top {top_px} low {low_px} {jr.get('error') or ''}")
+        else:
+            check("B-roll 'full' covers the whole frame (voice continues)",
+                  jr["status"] == "done" and low_px[0] > low_px[1] + 80 and top_px[0] > top_px[1] + 80,
+                  f"top {top_px} low {low_px} {jr.get('error') or ''}")
+    core.mutate(p3, lambda d: [s.update(keep=False) for s in d["scenes"] if s.get("role") != "broll"])
+    post(f"/api/projects/{p3}/render", {"kind": "preview"})
+    jx = wait_job(p3, "preview")
+    check("only B-roll left -> clear error, not an empty video", jx["status"] == "error" and "B-roll" in (jx.get("error") or ""),
+          jx.get("error") or "")
+    core.mutate(p3, lambda d: [s.update(keep=True) for s in d["scenes"]])
 
     # ---------------------------------------------------------------- security
     check("foreign Host header blocked", client.get("/api/projects", headers={"Host": "evil.com"}).status_code == 403)

@@ -28,6 +28,15 @@ app.config["MAX_CONTENT_LENGTH"] = None
 _ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}", "localhost"}  # bare 'localhost' = Flask test client
 
 
+@app.after_request
+def _no_stale_ui(resp):
+    """The page, its script and stylesheet must never come from the browser cache: after an update the user would
+    keep running old code (seen: new '?' help buttons missing until Ctrl+F5). 'no-cache' = always revalidate."""
+    if request.path == "/" or request.path.startswith("/static/") or request.path.startswith("/storyboard/"):
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return resp
+
+
 @app.before_request
 def _local_only():
     """Block DNS-rebinding and cross-site requests: any web page you visit could otherwise POST here."""
@@ -113,16 +122,24 @@ threading.Thread(target=_worker, daemon=True).start()
 
 
 def enqueue(pid: str, kind: str, **args):
+    dup = {}
+
     def fn(d):
         job = d.get("job") or {}
         if core.job_busy(d):          # don't clobber the running job's status – just note it's waiting
+            # a preview/export already WAITING renders the newest edits when it starts – a second one is pure waste
+            # (auto-preview from two open tabs, double clicks)
+            if kind in ("preview", "final") and kind in (job.get("pending") or []):
+                dup["skip"] = True
+                return
             job.setdefault("pending", []).append(kind)
             d["job"] = job
         else:
             d["job"] = {"kind": kind, "status": "queued", "progress": "Queued", "error": None,
                         "log": job.get("log", []), "pending": []}
     core.mutate(pid, fn)
-    _jobs.put((pid, kind, args))
+    if not dup:
+        _jobs.put((pid, kind, args))
 
 
 # ----------------------------------------------------------------- helpers
@@ -160,19 +177,38 @@ def _decorate(data: dict) -> dict:
             view[lid], notes = core.derive_look(base, ref) if lid != "none" else (base, [])
             if ref and not ref.get("look_notes"):
                 ref["look_notes"] = notes
+    bk = core.brandkit_look()  # read live: the Brand Kit file is shared by every project
+    if bk:
+        view[core.BRANDKIT] = bk
+    data["brandkit"] = {"available": bool(bk), "missing_but_used": active == core.BRANDKIT and not bk}
     data["looks_view"] = view
     sil_cache: dict[str, list] = {}
     total_orig = total_est = 0.0
     skipped = {s["file"] for s in data["sources"] if s.get("include") is False}
     per_src: dict[str, dict] = {}
+    t_edit = 0.0
+    split = data["settings"].get("layout") == "split"
     for i, sc in enumerate(data["scenes"], 1):
         if sc["src"] not in sil_cache:
             sil_cache[sc["src"]] = core.read_json(core.work_file(data["id"], sc["src"], "silences.json"), []) or []
         sc["no"] = i
         sc["dur"] = round(sc["out"] - sc["in"], 2)
-        sc["est"] = 0.0 if sc["src"] in skipped else \
+        # B-roll scenes add no length: they only show as cutaways over speaker scenes
+        sc["est"] = 0.0 if sc["src"] in skipped or sc.get("role") == "broll" else \
             pipeline.estimated_duration(sc, sil_cache[sc["src"]], data["settings"])
         sc["src_skipped"] = sc["src"] in skipped
+        sc["start_at"] = round(t_edit, 3)  # where this scene starts in the edited video (timeline / preview seek)
+        t_edit += sc["est"]
+        b = sc.get("broll") if isinstance(sc.get("broll"), dict) else None
+        if b:
+            ok = core.broll_path(data["id"], data, b.get("src")) is not None and b.get("src") != sc["src"]
+            src_b = core.source_by_file(data, b.get("src"))
+            sc["broll_view"] = {"src": b.get("src"), "where": "top" if split and b.get("where", "top") == "top" else "full",
+                                "at": b.get("at"), "ok": ok,
+                                "why": "" if ok else ("this clip is set to Skip in Footage" if src_b and src_b.get("include") is False
+                                                      else "the file is missing")}
+        else:
+            sc.pop("broll_view", None)
         ps = per_src.setdefault(sc["src"], {"scenes": 0, "kept": 0, "est": 0.0, "thumb": sc.get("thumb")})
         ps["scenes"] += 1
         ps["kept"] += 1 if sc.get("keep", True) else 0
@@ -183,11 +219,27 @@ def _decorate(data: dict) -> dict:
             sc["caption_view"] = hinglish.caption_text((sc.get("transcript") or "").split(), st)
         else:
             sc.pop("caption_view", None)
+        # no real speech (music / ambience): the "words" are whisper guessing – don't show them as if spoken.
+        # Kept in `heard` (the Inspector can reveal them); shown normally only if captions are switched ON here
+        if sc.get("no_speech") and sc.get("captions") is not True and (sc.get("transcript") or "").strip():
+            sc["heard"] = sc.get("caption_view", sc["transcript"])
+            sc["transcript"] = ""
+            sc.pop("caption_view", None)
         total_orig += sc["dur"]
         total_est += sc["est"]
     data["totals"] = {"orig": round(total_orig, 1), "est": round(total_est, 1),
-                      "kept": sum(1 for s in data["scenes"] if s.get("keep", True) and s["src"] not in skipped),
-                      "count": len(data["scenes"])}
+                      "kept": sum(1 for s in data["scenes"] if s.get("keep", True) and s["src"] not in skipped
+                                  and s.get("role") != "broll"),
+                      "count": len(data["scenes"]),
+                      "broll": sum(1 for s in data["scenes"] if s.get("role") == "broll")}
+    used: dict[str, list[int]] = {}
+    for s in data["scenes"]:
+        if isinstance(s.get("broll"), dict) and s.get("keep", True):
+            used.setdefault(s["broll"].get("src"), []).append(s["no"])
+    data["broll_clips"] = [{"file": f, "duration": (core.source_by_file(data, f) or {}).get("duration"),
+                            "used_by": used.get(f, []),
+                            "thumb": next((x.get("thumb") for x in data["scenes"] if x["src"] == f), None)}
+                           for f in commands.broll_clips(data)]
     raw = core.raw_dir(data["id"])
     for s in data["sources"]:
         ps = per_src.get(s["file"], {})
@@ -222,6 +274,7 @@ def _refresh_scene_meta(pid: str, data: dict, scene_ids: set[str], new_thumbs: s
         if sc["src"] not in words_cache:
             words_cache[sc["src"]] = core.read_json(core.work_file(pid, sc["src"], "words.json"), []) or []
         sc["transcript"] = " ".join(w["w"] for w in pipeline.words_in(words_cache[sc["src"]], sc["in"], sc["out"]))
+        pipeline.update_speech_flag(sc, words_cache[sc["src"]], core.source_by_file(data, sc["src"]))
         if sc["id"] in new_thumbs:
             try:
                 pipeline.thumbnail(core.raw_dir(pid) / sc["src"], sc["in"] + (sc["out"] - sc["in"]) / 2,
@@ -523,14 +576,29 @@ def _switch_style(d: dict, target: str) -> list[str]:
     switching back and forth never loses anything. Returns notes about an auto-derived first look."""
     looks = d.setdefault("looks", {})
     cur = d.get("style_source", "none")
-    looks[cur] = core.style_of(d["settings"])
     notes: list[str] = []
+    if cur == core.BRANDKIT:
+        # the Brand Kit is read-only (shared by all projects): never store a project's copy of it.
+        # Scene commands may have changed the video's settings while it was active – those don't travel back.
+        bk = core.brandkit_look()
+        if bk and core.style_of(d["settings"]) != bk:
+            notes.append("changes made while ★ Brand Kit was active were not kept (it's shared and read-only)")
+    else:
+        looks[cur] = core.style_of(d["settings"])
+    if target == core.BRANDKIT:
+        bk = core.brandkit_look()
+        if not bk:
+            raise ValueError("There is no Brand Kit (Brand Kit/brand-kit.json is missing or invalid).")
+        d["settings"].update(copy.deepcopy(bk))  # always the LATEST file
+        d["style_source"] = target
+        return notes
     if target not in looks:
         ref = next((r for r in d["references"] if r["id"] == target), None)
-        look, notes = core.derive_look(looks.get("none") or core.style_of(d["settings"]), ref or {})
+        look, dnotes = core.derive_look(looks.get("none") or core.style_of(d["settings"]), ref or {})
+        notes += dnotes
         looks[target] = look
         if ref is not None:
-            ref["look_notes"] = notes
+            ref["look_notes"] = dnotes
     d["settings"].update(copy.deepcopy(looks[target]))
     d["style_source"] = target
     return notes
@@ -544,7 +612,11 @@ def api_style_source(pid):
     out = {}
 
     def fn(d):
-        if target != "none" and not any(r["id"] == target for r in d["references"]):
+        if target == core.BRANDKIT:
+            if not core.brandkit_look():
+                out["error"] = "There is no Brand Kit (Brand Kit/brand-kit.json is missing or invalid)."
+                return
+        elif target != "none" and not any(r["id"] == target for r in d["references"]):
             out["error"] = "That reference no longer exists."
             return
         if d.get("style_source", "none") == target:
@@ -609,13 +681,15 @@ def api_brief(pid):
         if "brief" in body:
             d["brief"] = str(body["brief"])[:20000]  # about this video – shared by every look
         if "look_brief" in body and look:
-            if look == "none" or any(r["id"] == look for r in d["references"]):
+            if look in ("none", core.BRANDKIT) or any(r["id"] == look for r in d["references"]):
                 d.setdefault("look_briefs", {})[look] = str(body["look_brief"])[:20000]  # how this look should feel
         if "name" in body and str(body["name"]).strip():
             d["name"] = str(body["name"]).strip()[:120]
         active = d.get("style_source", "none")
         target = d["settings"]
-        if look and look != active:
+        if look == core.BRANDKIT:
+            target = None  # read-only: shared by every project – its style keys are never written from a project
+        elif look and look != active:
             if look != "none" and not any(r["id"] == look for r in d["references"]):
                 rejected.append("look (reference no longer exists)")
                 return
@@ -623,8 +697,11 @@ def api_brief(pid):
         for k, v in (body.get("settings") or {}).items():
             ok, clean = core.clean_setting(k, v)
             if ok:
-                (target if k in core.STYLE_KEYS else d["settings"])[k] = clean  # footage keys stay project-wide
-            elif k in core.DEFAULT_SETTINGS:
+                if k not in core.STYLE_KEYS:
+                    d["settings"][k] = clean  # footage keys stay project-wide
+                elif target is not None:
+                    target[k] = clean
+            elif k in core.DEFAULT_SETTINGS and (target is not None or k not in core.STYLE_KEYS):
                 rejected.append(k)
     core.mutate(pid, fn)
     if rejected:
@@ -722,14 +799,38 @@ def api_command(pid):
 
 @app.post("/api/projects/<pid>/first_cut")
 def api_first_cut(pid):
+    """'✨ Claude: plan the edit' – asks Claude for a STORYBOARD of the whole edit (beats, cuts, cards, punch-ins).
+    Nothing is edited or rendered until the user approves beats on the storyboard page."""
     _exists(pid)
+    res = {}
 
     def fn(d):
-        d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "kind": "first_cut",
-                              "text": "FIRST CUT – edit the whole video following the brief and references.",
-                              "status": "claude", "reply": "", "by": None, "created": core.now_iso()})
+        j = d.get("job") or {}
+        if j.get("kind") == "analyze" and j.get("status") in ("running", "queued"):
+            res["error"], res["code"] = "Wait for the analysis to finish – the scenes are about to change.", 409
+            return
+        if not d["scenes"]:
+            res["error"], res["code"] = "Analyze your footage first (Footage tab).", 400
+            return
+        if any(c.get("kind") in ("plan_edit", "first_cut") and c["status"] == "claude" for c in d["commands"]):
+            res["already"] = True  # one request at a time
+            return
+        act = d.get("style_source", "none")
+        refs = d.get("references", [])
+        look = ("★ Brand Kit" if act == core.BRANDKIT else "None (simple)" if act == "none"
+                else next((f"R{i + 1}" for i, r in enumerate(refs) if r["id"] == act), act))
+        not_analyzed = sum(1 for s in d["sources"] if not s.get("analyzed"))
+        d["commands"].append({
+            "id": core.new_id("cmd"), "scene": None, "scene_no": None, "kind": "plan_edit",
+            "text": (f"PLAN THE EDIT – storyboard for {len(d['scenes'])} scenes using look {look}: follow 'About this "
+                     f"video'{'' if (d.get('brief') or '').strip() else ' (empty)'} and the {look} brief. User approves "
+                     f"beats before anything renders." + (f" ({not_analyzed} clip(s) not analyzed – not in the plan.)"
+                                                          if not_analyzed else "")),
+            "status": "claude", "reply": "", "by": None, "created": core.now_iso()})
     core.mutate(pid, fn)
-    return jsonify(ok=True)
+    if res.get("error"):
+        return jsonify(error=res["error"]), res["code"]
+    return jsonify(ok=True, already=res.get("already", False))
 
 
 # ----------------------------------------------------------------- storyboard review (plan before render)
@@ -792,16 +893,143 @@ def api_cancel_command(pid, cid):
     return jsonify(ok=True)
 
 
+@app.post("/api/projects/<pid>/broll")
+def api_broll(pid):
+    """Timeline B-roll drags in ONE undo step: {"set": {scene_id: {"src", "where"?, "at"?} | null}}.
+    Refused (400, nothing changed) if any entry is invalid: unknown scene, a B-roll scene as target, the scene's own
+    clip, an unknown clip, a bad where/at."""
+    _exists(pid)
+    body = request.json or {}
+    changes = body.get("set")
+    if not isinstance(changes, dict) or not changes or len(changes) > 500:
+        return jsonify(error="nothing to change"), 400
+    res = {}
+
+    def fn(d):
+        clean = {}
+        for sid, b in changes.items():
+            sc = core.scene_by_id(d, sid)
+            if not sc:
+                res["error"] = "A scene no longer exists – the page will refresh."
+                return
+            if b is None:
+                clean[sid] = None
+                continue
+            if not isinstance(b, dict) or not isinstance(b.get("src"), str):
+                res["error"] = "bad B-roll entry"
+                return
+            if sc.get("role") == "broll":
+                res["error"] = f"Scene {d['scenes'].index(sc) + 1} is B-roll footage itself – it can't be covered."
+                return
+            src = b["src"]
+            if src == sc["src"]:
+                res["error"] = f"Scene {d['scenes'].index(sc) + 1} can't use its own clip as B-roll."
+                return
+            if not core.source_by_file(d, src) and not (core.raw_dir(pid) / "Assets" / Path(src).name).is_file():
+                res["error"] = f'No clip called "{src}".'
+                return
+            e = {"src": src if core.source_by_file(d, src) else Path(src).name}
+            if b.get("where") in ("top", "full"):
+                e["where"] = b["where"]
+            if b.get("at") is not None:
+                try:
+                    e["at"] = round(max(0.0, float(b["at"])), 2)
+                except (TypeError, ValueError):
+                    res["error"] = "bad B-roll start"
+                    return
+            clean[sid] = e
+        if all((core.scene_by_id(d, sid).get("broll") or None) == v for sid, v in clean.items()):
+            res["unchanged"] = True
+            return
+        core.snapshot(pid, d)
+        for sid, v in clean.items():
+            sc = core.scene_by_id(d, sid)
+            if v is None:
+                sc.pop("broll", None)
+            else:
+                sc["broll"] = v
+        on = sorted(d["scenes"].index(core.scene_by_id(d, s)) + 1 for s, v in clean.items() if v)
+        off = sorted(d["scenes"].index(core.scene_by_id(d, s)) + 1 for s, v in clean.items() if v is None)
+        msg = (f"B-roll now on scene(s) {', '.join(map(str, on))}." if on else "") + \
+              (f" Removed from scene(s) {', '.join(map(str, off))}." if off else "")
+        d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "text": "timeline: B-roll",
+                              "status": "done", "reply": msg.strip(), "by": "studio", "created": core.now_iso()})
+        _cap_commands(d)
+        res["reply"] = msg.strip()
+    core.mutate(pid, fn)
+    if res.get("error"):
+        return jsonify(error=res["error"]), 400
+    return jsonify(ok=True, reply=res.get("reply", ""), unchanged=res.get("unchanged", False))
+
+
+@app.post("/api/projects/<pid>/broll/insert")
+def api_broll_insert(pid):
+    """Put a B-roll clip INTO the video as its own scene(s) (e.g. an intro), before scene `before` (or "end").
+    Its B-roll scenes become normal scenes (own picture + sound) and its cutaways elsewhere are removed (the same
+    footage would show twice). One undo step."""
+    _exists(pid)
+    body = request.json or {}
+    f, before = body.get("file"), body.get("before")
+    res = {}
+
+    def fn(d):
+        mine = [s for s in d["scenes"] if s["src"] == f and s.get("role") == "broll"]
+        if not mine:
+            res["error"] = ("That clip is already in the video – drag its scenes in the Video lane to move them."
+                            if core.source_by_file(d, f) else f'No clip called "{f}".')
+            return
+        rest = [s for s in d["scenes"] if s not in mine]
+        if before in (None, "end"):
+            at = len(rest)
+        else:
+            at = next((i for i, s in enumerate(rest) if s["id"] == before), None)
+            if at is None:
+                res["error"] = "That scene no longer exists – the page will refresh."
+                return
+        core.snapshot(pid, d)
+        for s in mine:
+            s.pop("role", None)
+            s.pop("role_auto", None)
+        n = 0
+        for s in rest:
+            if isinstance(s.get("broll"), dict) and s["broll"].get("src") == f:
+                s.pop("broll")
+                n += 1
+        d["scenes"] = rest[:at] + mine + rest[at:]
+        no = d["scenes"].index(mine[0]) + 1
+        res["reply"] = (f'"{f}" is now scene {no} – it plays on its own with its own sound.' +
+                        (f" Its B-roll on {n} other scene(s) was removed (same footage twice)." if n else ""))
+        d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "text": "timeline: insert clip",
+                              "status": "done", "reply": res["reply"], "by": "studio", "created": core.now_iso()})
+        _cap_commands(d)
+    core.mutate(pid, fn)
+    if res.get("error"):
+        return jsonify(error=res["error"]), 400
+    return jsonify(ok=True, reply=res["reply"])
+
+
 @app.post("/api/projects/<pid>/scene/<sid>/move")
 def api_move(pid, sid):
     _exists(pid)
-    direction = (request.json or {}).get("dir", "up")
+    body = request.json or {}
+    direction = body.get("dir", "up")
+    to = body.get("to")  # timeline drag: the scene id it is dropped BEFORE (None/"end" = after the last scene)
 
     def fn(d):
         sc = core.scene_by_id(d, sid)
         if not sc:
             return
         i = d["scenes"].index(sc)
+        if "to" in body:
+            if to == sid:
+                return
+            rest = [x for x in d["scenes"] if x["id"] != sid]
+            tgt = next((k for k, x in enumerate(rest) if x["id"] == to), None) if to not in (None, "end") else len(rest)
+            if tgt is None or rest[:tgt] + [sc] + rest[tgt:] == d["scenes"]:
+                return  # unknown target (scene vanished) or no change: no undo step
+            core.snapshot(pid, d)
+            d["scenes"] = rest[:tgt] + [sc] + rest[tgt:]
+            return
         j = i - 1 if direction == "up" else i + 1
         if 0 <= j < len(d["scenes"]):
             core.snapshot(pid, d)

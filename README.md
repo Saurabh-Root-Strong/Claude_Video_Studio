@@ -86,13 +86,20 @@ _engines/README.md        engine notes and test results
 - HyperFrames: run `init` with `--skip-skills`. Set `HYPERFRAMES_NO_TELEMETRY=1` if you don't want usage data sent.
 
 ## Brand Kit
-`Brand Kit/brand-kit.md` is the approved editing profile ("Clean Split": cards on top, speaker on a keyed off-white background below, captions on an orange seam, ducked music, -14 LUFS). `brand-kit.json` holds its settings: new projects start from it, and **Apply Brand Kit** (tab 2) applies it to an existing project. Poppins (OFL) is bundled in `_engines/studio/fonts/`.
+`Brand Kit/brand-kit.md` is the approved editing profile ("Clean Split": cards on top, speaker on a keyed off-white background below, captions on an orange seam, ducked music, -14 LUFS). `brand-kit.json` holds its settings: it is the read-only look **★ Brand Kit** – new projects start on it, any project can pick it in Scenes → Look. Poppins (OFL) is bundled in `_engines/studio/fonts/`.
 
 ## Storyboard review
 Before rendering, Claude can plan the edit beat by beat (`studio_cli.py storyboard build <pid> <plan.json>`): dead-air trims, pause shortening, filler/false-start cuts (word timings verified), punch-in zooms on hooks, cards and B-roll slots. The review dashboard (Scenes tab → **Storyboard**, or `/storyboard/<pid>`; also saved as `Storyboards/<pid>/storyboard.html`) shows each beat as a planned frame with a timeline and per-item switches, plus Approve / Reject / Notes. *Send feedback to Claude* puts it in the inbox; `storyboard apply <pid>` applies approved beats once (undoable).
 
 ## Footage bin & timeline
 Tab 1 is a media bin: add many clips (natural name order, duplicates refused), reorder by drag / arrows / sort (name, recording time, length), Skip a clip without deleting it, and a timeline with film strips, waveforms, multi-select, drag-to-reorder and back-to-back playback. Clip order drives scene order; analysing a new clip never reshuffles a hand-made scene order. After analysis a preview of the complete video renders automatically and **Next: Scenes →** leads on. Clips/scenes with no real speech (< 0.5 words/s, e.g. Whisper hearing words in music) get captions off automatically.
+
+## Scenes editor
+Timeline (blocks sized by edited length: click, drag to move, drag an edge to trim; B-roll and card lanes; keyboard
+Space / arrows / S / Delete / I / O / Ctrl+Z) + Inspector (role, trim, speed, zoom, audio, captions, pauses, B-roll,
+card, text, click-a-word caption fixes). **B-roll cutaways**: clips without speech become B-roll automatically and cover
+speaker scenes while the voice keeps playing (top panel in the split layout, full screen otherwise; consecutive scenes
+continue the clip's footage). Every control sends a normal command, so it is undoable and scriptable.
 
 ## Looks (one style per reference)
 Every reference (R1, R2…) has its own look (all style settings) and its own brief; *None* is the simple settings. Page 2 edits any look without touching the video; the **Look** dropdown on the Scenes page chooses which look the video uses. Footage facts (language, face position, headline, spellings) stay project-wide. Each style setting has a **?** explaining what it does, why, and the recommended value.

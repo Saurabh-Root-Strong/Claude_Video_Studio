@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import re
+from pathlib import Path
 
 import core
 
@@ -29,6 +30,196 @@ def _num(s: str) -> float:
     return float(s.replace(",", "."))
 
 
+# ----------------------------------------------------------------- B-roll (cutaways over the voice)
+# A scene with role "broll" is not part of the main sequence: its clip is footage to cover OTHER scenes with.
+# A speaker scene's cutaway: sc["broll"] = {"src": clip file, "where": "top"|"full", "at": seconds (optional)}.
+# The voice keeps playing, the B-roll is silent and never adds length. Without "at", consecutive scenes covered by
+# the same clip continue its footage (pipeline.with_broll works that out at render time – survives splits/trims).
+
+def is_broll(sc: dict) -> bool:
+    return sc.get("role") == "broll"
+
+
+def broll_clips(data: dict) -> list[str]:
+    """Clip files whose scenes are ALL B-roll (in clip order)."""
+    out = []
+    for s in data.get("sources", []):
+        mine = [x for x in data.get("scenes", []) if x["src"] == s["file"]]
+        if mine and all(is_broll(x) for x in mine):
+            out.append(s["file"])
+    return out
+
+
+def _sc_len(sc: dict) -> float:
+    return max(0.0, (sc["out"] - sc["in"]) / float(sc.get("speed") or 1.0))
+
+
+def auto_broll(data: dict, only: str | None = None) -> list[str]:
+    """Place every B-roll clip that no scene uses yet as a cutaway over the speaker scenes where the clip sits in the
+    timeline (after it; at the end of the video: the scenes before it), covering about the clip's length (split
+    layout, top panel) or at most 6 s (full screen hides the speaker – short cutaways read better)."""
+    replies = []
+    scenes = data["scenes"]
+    split = data["settings"].get("layout") == "split"
+    skipped = {s["file"] for s in data["sources"] if s.get("include") is False}
+    used = {s["broll"].get("src") for s in scenes if isinstance(s.get("broll"), dict)}
+    for f in ([only] if only else broll_clips(data)):
+        if f in used or f in skipped:
+            continue
+        src = core.source_by_file(data, f) or {}
+        mine = [x for x in scenes if x["src"] == f]
+        if not mine:
+            continue
+        clip_len = float(src.get("duration") or sum(x["out"] - x["in"] for x in mine))
+        cap = clip_len if split else min(clip_len, 6.0)
+        pos = scenes.index(mine[0])
+        ok = lambda x: not is_broll(x) and x["src"] not in skipped  # noqa: E731
+        cands = [x for x in scenes[pos:] if ok(x)] or [x for x in reversed(scenes[:pos]) if ok(x)]
+        chosen, acc = [], 0.0
+        for x in cands:
+            if not x.get("keep", True):
+                continue  # a cut scene isn't in the video: look past it
+            if x.get("broll"):
+                break  # never overwrite the user's own cutaway; coverage stays one contiguous run
+            if chosen and acc + _sc_len(x) > cap + 0.5:
+                break
+            chosen.append(x)
+            acc += _sc_len(x)
+        if not chosen:
+            continue
+        for x in chosen:
+            x["broll"] = {"src": f}  # no "where": follows the look (split -> top panel, full layout -> full screen)
+        nos = sorted(scenes.index(x) + 1 for x in chosen)
+        where = "in the top panel" if split else "full screen"
+        replies.append(f'B-roll "{f}" covers scene{"s" if len(nos) > 1 else ""} '
+                       f'{nos[0]}{f"–{nos[-1]}" if len(nos) > 1 else ""} {where} – your voice keeps playing.')
+        used.add(f)
+    return replies
+
+
+def _match_clip(data: dict, name: str) -> str | None:
+    name = name.strip().strip("\"'")
+    files = [s["file"] for s in data["sources"]]
+    m = re.fullmatch(r"clip (\d+)", name, flags=re.I)
+    if m:
+        i = int(m.group(1)) - 1
+        return files[i] if 0 <= i < len(files) else None
+    for f in files:
+        if f.lower() == name.lower():
+            return f
+    hits = [f for f in files if name.lower() in f.lower()]
+    if len(hits) == 1:
+        return hits[0]
+    if data.get("id") and (core.raw_dir(data["id"]) / "Assets" / Path(name).name).is_file():
+        return Path(name).name  # a file in Raw Footage/<project>/Assets (storyboard B-roll slots)
+    return None
+
+
+def _broll_scene_cmd(data: dict, sc: dict, raw: str, t: str) -> str | None:
+    t = re.sub(r"\bb[- ]?roll\b", "broll", t)
+    raw_n = re.sub(r"(?i)\bb[- ]?roll\b", "broll", raw)
+    split = data["settings"].get("layout") == "split"
+    if re.fullmatch(r"(?:role|make it|make this|set as|mark as|as|this is) (?:broll|cutaway)(?: clip| footage| scene)?", t):
+        if is_broll(sc):
+            return "This scene is already B-roll."
+        sc["role"] = "broll"
+        sc.pop("broll", None)  # B-roll footage can't itself be covered
+        msg = "Scene is now B-roll: it leaves the main video and can cover other scenes (your voice keeps playing)."
+        if (sc.get("transcript") or "").strip() and not sc.get("no_speech"):
+            msg += " ⚠ It had speech – those words are no longer in the video (role speaker brings it back)."
+        if sc["src"] in broll_clips(data):
+            placed = auto_broll(data, only=sc["src"])
+            msg += " " + (" ".join(placed) if placed else "Pick a speaker scene and choose this clip under B-roll.")
+        return msg
+    if re.fullmatch(r"(?:role|make it|make this|set as|mark as|as|this is) (?:speaker|main|talking|a-?roll|normal)(?: scene| clip)?", t):
+        if not is_broll(sc):
+            return "This scene is already a speaker scene."
+        sc.pop("role", None)
+        msg = "Scene is back in the main video."
+        if sc["src"] not in broll_clips(data):
+            n = 0
+            for x in data["scenes"]:
+                if isinstance(x.get("broll"), dict) and x["broll"].get("src") == sc["src"]:
+                    x.pop("broll")
+                    n += 1
+            if n:
+                msg += f" Its clip no longer covers {n} scene(s) (the same footage would show twice)."
+        return msg
+    if not t.startswith(("broll", "cutaway", "no broll", "remove broll")):
+        return None
+    if t in ("broll off", "no broll", "remove broll", "broll none", "broll remove", "cutaway off"):
+        if not sc.get("broll"):
+            return "! This scene has no B-roll."
+        sc.pop("broll")
+        return "B-roll removed from this scene."
+    if t == "broll auto":
+        return None  # handled as a whole-video command by apply()
+    if is_broll(sc):
+        return "! This scene IS B-roll footage – select a speaker scene to cover it with B-roll."
+    m = re.fullmatch(r"broll (top|panel|top panel|full|fullscreen|full screen)", t)
+    if m:
+        if not sc.get("broll"):
+            return "! No B-roll on this scene yet – first: broll <clip name>"
+        where = "full" if m.group(1).startswith("full") else "top"
+        sc["broll"] = dict(sc["broll"], where=where)
+        return f"B-roll {'full screen (hides you, voice continues)' if where == 'full' else 'in the top panel'}." + \
+            ("" if split or where == "full" else " (The top panel needs the split layout – it shows full screen now.)")
+    m = re.fullmatch(r"broll (?:from|at|starts? at|start) ([\d.,]+)\s*(?:s|sec|seconds)?", t)
+    if m:
+        if not sc.get("broll"):
+            return "! No B-roll on this scene yet – first: broll <clip name>"
+        sc["broll"] = dict(sc["broll"], at=round(_num(m.group(1)), 2))
+        return f"B-roll starts {sc['broll']['at']:g}s into its clip."
+    if re.fullmatch(r"broll (?:continue|auto start|follow)", t):
+        if not sc.get("broll"):
+            return "! No B-roll on this scene yet."
+        sc["broll"].pop("at", None)
+        return "B-roll continues from the previous scene's footage."
+    m = re.fullmatch(r"(?:broll|cutaway)(?:\s+(.+))?", raw_n.strip(), flags=re.I | re.S)
+    if not m:
+        return None
+    name = (m.group(1) or "").strip()
+    if name:
+        f = _match_clip(data, name)
+        if not f:
+            return f'! No clip called "{name}". B-roll clips: {", ".join(broll_clips(data)) or "none yet"}'
+    else:
+        cl = broll_clips(data)
+        if not cl:
+            return "! No B-roll clip yet – select a scene of the B-roll clip and set Role: B-roll first."
+        f = cl[0]
+    if f == sc["src"]:
+        return "! A scene can't use its own clip as B-roll."
+    old = sc.get("broll") if isinstance(sc.get("broll"), dict) else {}
+    sc["broll"] = {"src": f, **({"where": old["where"]} if old.get("where") else {})}  # explicit choice kept, else follows the look
+    shown = "top panel" if split and sc["broll"].get("where", "top") == "top" else "full screen"
+    return f'B-roll "{f}" over this scene ({shown}) – your voice keeps playing.'
+
+
+def _broll_global_cmd(data: dict, t: str) -> str | None:
+    t = re.sub(r"\bb[- ]?roll\b", "broll", t)
+    if t in ("broll auto", "auto broll", "place broll", "broll place"):
+        r = auto_broll(data)
+        return " ".join(r) if r else "! Nothing to place – every B-roll clip is already used, or there is none " \
+                                      "(set a clip's scene to Role: B-roll first)."
+    if t in ("broll off", "no broll", "remove broll", "remove all broll", "broll none"):
+        n = 0
+        for s in data["scenes"]:
+            if s.pop("broll", None):
+                n += 1
+        return f"B-roll removed from {n} scene(s)." if n else "! No scene has B-roll."
+    m = re.fullmatch(r"broll (top|panel|top panel|full|fullscreen|full screen)", t)
+    if m:
+        where = "full" if m.group(1).startswith("full") else "top"
+        n = 0
+        for s in data["scenes"]:
+            if isinstance(s.get("broll"), dict):
+                s["broll"] = dict(s["broll"], where=where)
+                n += 1
+        return f"All B-roll ({n} scene(s)) {'full screen' if where == 'full' else 'in the top panel'}." if n else "! No scene has B-roll."
+    return None
+
+
 def _scene_cmd(sc: dict, t: str, data: dict) -> str | None:
     """Apply one scene-level command. Returns reply text, or None if not understood."""
     if re.fullmatch(r"(cut|delete|remove|drop)( (this|this scene|scene|it))?", t):
@@ -37,6 +228,23 @@ def _scene_cmd(sc: dict, t: str, data: dict) -> str | None:
     if re.fullmatch(r"(keep|restore|undo cut|uncut|bring back)( (this|this scene|scene|it))?", t):
         sc["keep"] = True
         return "Scene restored."
+    # absolute trim (Inspector / timeline handles): "trim start to 0.4" = start 0.4 s after the scene's original start
+    m = re.fullmatch(r"trim (start|end) to ([\d.,]+)\s*(?:s|sec|secs|seconds)?", t)
+    if m:
+        x = _num(m.group(2))
+        o_in, o_out = sc.get("orig_in", sc["in"]), sc.get("orig_out", sc["out"])
+        if m.group(1) == "start":
+            new_in = round(o_in + x, 3)
+            if sc["out"] - new_in < 0.3:
+                return "!Trim too large – the scene would be shorter than 0.3 s."
+            sc["in"] = new_in
+        else:
+            new_out = round(o_out - x, 3)
+            if new_out - sc["in"] < 0.3:
+                return "!Trim too large – the scene would be shorter than 0.3 s."
+            sc["out"] = new_out
+        return f"{'Start' if m.group(1) == 'start' else 'End'} trimmed by {x:g}s." if x else \
+            f"{'Start' if m.group(1) == 'start' else 'End'} back to the original."
     m = re.fullmatch(r"trim (start|begin|beginning|front|head|end|back|tail) (?:by )?([\d.,]+)\s*(?:s|sec|secs|seconds)?", t)
     if m:
         x = _num(m.group(2))
@@ -71,10 +279,11 @@ def _scene_cmd(sc: dict, t: str, data: dict) -> str | None:
     if t in ("unmute", "audio on", "sound on"):
         sc["mute"] = False
         return "Unmuted."
-    m = re.fullmatch(r"(?:volume|vol) ([\d.,]+)\s*%?", t)
+    m = re.fullmatch(r"(?:volume|vol) ([\d.,]+)\s*(%?)", t)
     if m:
         x = _num(m.group(1))
-        x = x / 100 if x > 4 else x
+        # "volume 3%" is 3 % (was read as 3x = 300 %); without % a number above 4 is still a percentage
+        x = x / 100 if (m.group(2) or x > 4) else x
         sc["volume"] = round(max(0.0, min(x, 4.0)), 3)
         sc["mute"] = False
         return f"Volume {sc['volume'] * 100:.0f}%."
@@ -99,6 +308,25 @@ def _scene_cmd(sc: dict, t: str, data: dict) -> str | None:
         sc.pop("captions_auto_off", None)
         sc["captions"] = False
         return "Captions off for this scene."
+    m = re.fullmatch(r"(?:captions?|subtitles?) (?:at|position|pos|place) (head|top|center|centre|middle|below|bottom|auto|default)", t)
+    if m:
+        v = {"top": "head", "centre": "center", "middle": "center", "bottom": "below", "default": "auto"}.get(m.group(1), m.group(1))
+        if v == "auto":
+            sc.pop("cap_pos", None)
+            return "Caption position follows the look (split layout: on the seam above your head)."
+        sc["cap_pos"] = v
+        return {"head": "Captions near the head (top) in this scene.", "center": "Captions in the middle in this scene.",
+                "below": "Captions low (bottom) in this scene."}[v]
+    if t in ("captions auto", "captions default", "subtitles auto"):
+        sc.pop("captions_auto_off", None)
+        if sc.get("no_speech"):
+            sc["captions"], sc["captions_auto_off"] = False, True
+            return "Captions follow the video – off here (no speech detected)."
+        sc["captions"] = None
+        return "Captions follow the whole-video setting."
+    if t in ("silences auto", "jump cuts auto", "silence auto", "silences default"):
+        sc["remove_silence"] = None
+        return "Pause cutting follows the whole-video setting."
     if t in ("remove silences", "remove silence", "cut silences", "cut silence", "jump cut", "jump cuts"):
         sc["remove_silence"] = True
         return "Silences will be cut from this scene."
@@ -305,6 +533,10 @@ def apply(data: dict, scene_id: str | None, text: str) -> tuple[list[str], list[
         reply = _caption_lang_cmd(data, raw.strip(), t)  # works from the scene box and the whole-video box
         if reply is None:
             reply = _layout_cmd(data, raw.strip(), t)
+        if reply is None and (sc is None or re.sub(r"\bb[- ]?roll\b", "broll", t) in ("broll auto", "auto broll")):
+            reply = _broll_global_cmd(data, t)  # "broll auto" from either box; others only from the whole-video box
+        if reply is None and sc is not None:
+            reply = _broll_scene_cmd(data, sc, raw.strip(), t)
         if reply is not None:
             pass
         elif sc is not None and re.match(r"(card[:\-\s]|no card$)", t):

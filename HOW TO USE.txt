@@ -58,7 +58,52 @@
      (None, R1, R2...). Change it and click "Render preview".
      Under the player, "Edited video" plays your latest render;
      "Original footage" plays the raw camera clip.
-     Click a scene to play it. Type a command in the box and press Enter,
+
+     TIMELINE (under the player): one block per scene, as long as it
+     is in the edited video. Click = select. Drag a block = move it.
+     Drag a block's EDGE = trim it. Cut scenes show as small striped
+     blocks. The "B-roll" lane shows cutaways, "Cards" the top cards.
+     Keys: Space play · arrows next/previous scene · S split ·
+     Delete cut/restore · I / O trim start/end to the playhead ·
+     Ctrl+Z undo.
+
+     INSPECTOR (right): buttons for the selected scene - cut, role,
+     trim, speed, zoom, mute/volume, captions, caption POSITION
+     (Auto / Head / Center / Below), pauses, B-roll, card, text.
+     Click a WORD to fix how the captions write it.
+     HOVER over any button or label to see what it does.
+     Command: captions at head / center / below / auto
+     Text on screen never covers the captions - if both want the same
+     place, the text moves above/below them. Long text wraps by itself.
+     Music-only scenes: the speech recognizer "hears" fake words in
+     music. They are hidden ("No speech detected") and captions stay
+     off - unless you set Captions to On for that scene.
+
+     EVERY scene of every clip is a block on the Video lane - also clips
+     with nobody speaking (market footage etc.). Drag any block left or
+     right to put it before/after another scene. That's all you need.
+
+     B-ROLL (optional): a clip can instead COVER a speaker scene while
+     your voice keeps playing (top panel in the split layout, full
+     screen otherwise). B-roll scenes show as small blue 🎞 blocks;
+     drag one back to a place in the video to play it there again.
+     ON THE TIMELINE: all your clips are shown as chips above it.
+        - drag a clip chip ONTO the middle of a scene -> it covers the scene
+          (your voice keeps playing)
+        - drag a B-roll clip chip onto the EDGE of a scene (orange line)
+          -> it goes INTO the video as its own scene there, with its own
+          sound - e.g. an intro before scene 2
+        - drag a video block UP into the B-roll lane -> it becomes B-roll
+        - drag a blue B-roll block left/right -> move it to other scenes
+        - drag its left/right EDGE -> cover more or fewer scenes
+        - hover it and click x -> remove it
+     B-roll always covers whole scenes; to cover only part of one,
+     split that scene first (S). Every drag can be undone (Ctrl+Z).
+     Or in the Inspector: "Cover with B-roll" on the selected scene.
+     ("This scene is... B-roll footage" at the bottom takes a scene OUT
+     of the video to use its picture as B-roll - it asks first.)
+
+     Or type a command in the box and press Enter,
      or click the quick buttons. Examples:
 
         cut                  remove this scene
@@ -94,6 +139,14 @@
         card off                               empty top panel
         remove silences      cut pauses everywhere
 
+     B-roll commands:
+        broll Stock Market Sensex.mp4   cover this scene with that clip
+        broll top / broll full          top panel or full screen
+        broll from 3                    start 3 s into the clip
+        broll off                       remove it from this scene
+        role broll / role speaker       what this scene IS
+        broll auto   (whole video box)  place unused B-roll clips
+
      STORYBOARD (when Claude has planned the edit): click the orange
      "Storyboard" button. Each beat shows the planned frame, cuts,
      zooms and cards. Tick/untick items, click Approve or Reject, write
@@ -110,7 +163,7 @@
  3. ASKING CLAUDE (AI) TO EDIT
 ---------------------------------------------------------------------
   Anything that is not in the list above - for example
-  "make it 30 seconds" or "Ask Claude for the first cut" -
+  "make it 30 seconds" or "✨ Claude: plan the edit" (Scenes) -
   goes to the orange "Claude inbox" at the top right.
 
   These wait until someone with Claude Code (in VS Code) types:

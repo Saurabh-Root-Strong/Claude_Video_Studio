@@ -1,7 +1,7 @@
 # Brand Kit — "Clean Split" editing profile
 
 Status: **APPROVED 2026-11-19**, audio/pause numbers updated by Prompt 3 the same day · for: Hindi finance reels (9:16) · machine-readable twin: `brand-kit.json`
-(new projects start from it; existing projects: **Apply Brand Kit** button in tab 2, undoable)
+(it is a look called **★ Brand Kit**: new projects start on it; pick it in Scenes → Look for any project. Read-only from projects – change it here)
 
 ---
 
@@ -47,5 +47,5 @@ Fixed parts of the look:
 
 ## 4. Not built yet
 - B-roll video clips in the top panel. You chose cards, so only cards are supported for now.
-- Retake removal is done by Claude in a first cut ("Ask Claude for the first cut"), not automatically.
+- Retake removal is done by Claude's plan ("✨ Claude: plan the edit" on the Scenes page → storyboard you approve), not automatically.
 - A count-up animation on number cards.

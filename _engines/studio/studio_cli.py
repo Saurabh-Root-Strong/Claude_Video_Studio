@@ -49,7 +49,7 @@ def inbox():
             if c.get("scene"):
                 sc = core.scene_by_id(d, c["scene"])
                 if sc:
-                    print(f"      {sc['src']} {sc['in']:.2f}-{sc['out']:.2f}s keep={sc['keep']} | {sc['transcript'][:160]}")
+                    print(f"      {sc['src']} {sc['in']:.2f}-{sc['out']:.2f}s keep={sc['keep']} | {'(no speech – music/ambient)' if sc.get('no_speech') else sc['transcript'][:160]}")
                     print(f"      thumb: {core.work_dir(d['id']) / 'thumbs' / sc['thumb']}")
     print(f"\n{n} pending command(s)." if n else "Inbox empty.")
 
@@ -76,7 +76,7 @@ def show(pid):
             flags.append("mute")
         if s.get("text"):
             flags.append(f"text={s['text']!r}")
-        print(f"{i:>3} {s['id']} {s['in']:7.2f}-{s['out']:7.2f} ({s['out'] - s['in']:.1f}s→{est}s) {' '.join(flags)} | {s['transcript'][:110]}")
+        print(f"{i:>3} {s['id']} {s['in']:7.2f}-{s['out']:7.2f} ({s['out'] - s['in']:.1f}s→{est}s) {' '.join(flags)} | {'(no speech – music/ambient)' if s.get('no_speech') else s['transcript'][:110]}")
 
 
 def caption_words(pid):
@@ -102,6 +102,9 @@ def set_look(pid, which, pairs):
     too (they ARE the active look). Validated like the UI; non-style keys are refused."""
     def fn(d):
         refs = d["references"]
+        if which.lower() in (core.BRANDKIT, "brand", "brand kit"):
+            raise SystemExit("★ Brand Kit is shared by every project and read-only here – edit "
+                             "Brand Kit/brand-kit.json (and brand-kit.md) instead.")
         if which.lower() == "none":
             rid = "none"
         elif which.upper().startswith("R") and which[1:].isdigit() and 0 < int(which[1:]) <= len(refs):

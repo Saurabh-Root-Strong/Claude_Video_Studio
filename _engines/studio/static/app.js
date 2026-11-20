@@ -59,6 +59,7 @@ function switchTab(name) {
   // the timeline measures its width – it can only do that while visible; stop footage playback when leaving
   if (name === "footage") { if (typeof renderTimeline === "function" && P) setTimeout(renderTimeline, 0); }
   else if (typeof seqStop === "function") seqStop();
+  if (name === "scenes" && P && typeof renderSceneTimeline === "function") setTimeout(renderSceneTimeline, 0);
 }
 $$("#tabs button").forEach((b) => (b.onclick = () => switchTab(b.dataset.tab)));
 $$("[data-open]").forEach((b) => (b.onclick = () => api(`/api/projects/${PID}/open`, { method: "POST", body: { which: b.dataset.open } })));
@@ -86,6 +87,7 @@ function changed(key, value) {
 function renderAll() {
   renderJob();
   renderNext();
+  renderPlanBtn();
   // project picker label ("Name · N scenes") goes stale as clips/scenes change
   const opt = [...$("#projectSelect").options].find((o) => o.value === PID);
   if (opt) { const t = `${P.name} · ${P.scenes.length} scene${P.scenes.length === 1 ? "" : "s"}`; if (opt.textContent !== t) opt.textContent = t; }
@@ -101,12 +103,17 @@ function renderAll() {
   if (changed("refs", refSig)) { renderRefs(); renderLooks(); }
   renderBrief();
   if (changed("scenes", [P.scenes, P.settings, P.storyboard, P.commands.filter((c) => c.status === "claude").map((c) => c.scene), selected])) renderScenes();
-  if (changed("detail", [curScene(), P.commands.length, P.commands.map((c) => c.status).join()])) renderDetail();
+  if (changed("detail", [curScene(), P.commands.length, P.commands.map((c) => c.status).join(), P.settings.layout,
+    P.settings.remove_silence, P.broll_clips, P.sources.map((s) => s.file)])) renderDetail();
   if (changed("renders", P.renders)) {
     renderRenders();
     // a render just finished while the page was open -> show it in the player
     const newest = latestPreview();
-    if (newest && lastRenderFile !== null && newest.file !== lastRenderFile) showRendered();
+    if (newest && lastRenderFile !== null && newest.file !== lastRenderFile) {
+      if (playerMode === "preview") reloadPreview();
+      else if (AUTO.lastReq !== newest.sig) showRendered();  // a render you asked for: show it
+      // auto update while you work in Original footage: stay there (the green pill says it is ready)
+    }
     lastRenderFile = newest ? newest.file : "";
   }
   if (changed("inbox", P.commands.map((c) => c.id + c.status + c.reply).join())) renderInbox();
@@ -415,7 +422,7 @@ function advance() {
 $("#seqPlay").onclick = () => (SEQ.playing ? seqStop() : seqPlay(false));
 document.addEventListener("keydown", (e) => {
   if (!$("#tab-footage").classList.contains("active") || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
-  if (e.code === "Space") { e.preventDefault(); SEQ.playing ? seqStop() : seqPlay(false); }
+  if (e.code === "Space") { if (e.target.tagName === "VIDEO") return; e.preventDefault(); SEQ.playing ? seqStop() : seqPlay(false); }
   if (e.key === "Escape") { TL.sel.clear(); renderTimeline(); }
 });
 // ---- step flow: Footage -> Next: Scenes
@@ -533,9 +540,10 @@ function renderRefs() {
 // ---- looks. Page 2 = the look LIBRARY: pick a look to edit (doesn't change the video).
 //      Scenes page = the Look dropdown: which look the video USES (style_source).
 let editLook = null;  // look shown in the page-2 form; null = follow the one the video uses
-const lookName = (id) => { if (id === "none") return "None · simple"; const i = P.references.findIndex((r) => r.id === id); return i < 0 ? "?" : `R${i + 1}`; };
+const BK = "brandkit";
+const lookName = (id) => { if (id === "none") return "None · simple"; if (id === BK) return "★ Brand Kit"; const i = P.references.findIndex((r) => r.id === id); return i < 0 ? "?" : `R${i + 1}`; };
 function curEditLook() {
-  const ids = ["none", ...P.references.map((r) => r.id)];
+  const ids = ["none", ...(P.brandkit?.available ? [BK] : []), ...P.references.map((r) => r.id)];
   if (!editLook || !ids.includes(editLook)) editLook = store.get(`cve.editlook.${PID}`) || P.style_source || "none";
   if (!ids.includes(editLook)) editLook = P.style_source || "none";
   return editLook;
@@ -543,14 +551,18 @@ function curEditLook() {
 function renderLooks() {
   const refs = P.references || [], used = P.style_source || "none", ed = curEditLook();
   const chip = (id, label, title) => `<button class="lookchip ${ed === id ? "on" : ""} ${used === id ? "used" : ""}" data-look="${esc(id)}" title="${esc(title)}${used === id ? " – used by the video" : ""}">${used === id ? "▶ " : ""}${label}</button>`;
-  $("#lookBar").innerHTML = `<span class="muted small">Edit look</span>` + chip("none", "None · simple", "Your own simple settings, no reference") +
+  $("#lookBar").innerHTML = `<span class="muted small">Edit look</span>` + chip("none", "None · simple", "Plain simple settings, no reference") +
+    (P.brandkit?.available ? chip(BK, "★ Brand Kit", "Your approved brand look – shared by all projects (read-only here)") : "") +
     refs.map((r, i) => chip(r.id, `R${i + 1}`, r.file || r.url)).join("");
   $$("[data-look]", $("#lookBar")).forEach((b) => (b.onclick = () => setEditLook(b.dataset.look)));
   const i = refs.findIndex((r) => r.id === ed), r = refs[i];
-  $("#lookTitle").innerHTML = `· editing ${r ? `look <b>R${i + 1}</b> (${esc((r.file || r.url || "").slice(0, 40))})` : "<b>your simple settings</b>"} ` +
+  $("#lookTitle").innerHTML = `· ${ed === BK ? "viewing <b>★ Brand Kit</b>" : `editing ${r ? `look <b>R${i + 1}</b> (${esc((r.file || r.url || "").slice(0, 40))})` : "<b>your simple settings</b>"}`} ` +
     (ed === used ? `<span class="badge ok">▶ used by the video</span>` : `<span class="badge">not used by the video – choose it in Scenes → Look</span>`);
   const note = $("#lookNote");
-  if (r) {
+  if (ed === BK) {
+    note.innerHTML = `<b>★ Brand Kit is shared by all your projects</b>, so it's read-only here (settings greyed out) – changing it would change every project. To change it, edit <code>Brand Kit\brand-kit.md</code> or ask Claude. Its brief below can still be written.`;
+    note.classList.remove("hidden");
+  } else if (r) {
     const auto = (r.look_notes || []).length ? `Auto-detected from the reference: ${r.look_notes.map(esc).join(" · ")}.` : "Started from your simple settings.";
     note.innerHTML = `${auto} ${r.studied ? "<b>Claude studied this reference.</b>" : "For the full look (fonts, captions, pacing, audio) click <b>Ask Claude to study</b> on its card."}`;
     note.classList.remove("hidden");
@@ -566,7 +578,9 @@ async function setEditLook(id) {
 // Scenes page: which look the video uses
 function renderLookPick() {
   const sel = $("#lookSelect"), used = P.style_source || "none";
-  const opts = [["none", "None · simple settings"], ...P.references.map((r, i) => [r.id, `R${i + 1} · ${(r.file || r.url || "").slice(0, 42)}`])];
+  const opts = [["none", "None · simple settings"], ...(P.brandkit?.available ? [[BK, "★ Brand Kit (your brand look)"]] : []),
+    ...P.references.map((r, i) => [r.id, `R${i + 1} · ${(r.file || r.url || "").slice(0, 42)}`])];
+  if (!opts.some(([id]) => id === used)) opts.push([used, used === BK ? "★ Brand Kit (file missing – settings kept)" : "(look no longer exists)"]);
   const html = opts.map(([id, l]) => `<option value="${esc(id)}">${esc(l)}</option>`).join("");
   if (sel.dataset.h !== html) { sel.innerHTML = html; sel.dataset.h = html; }
   sel.value = used;
@@ -595,107 +609,115 @@ async function loadBrandKit() {
   const files = await api("/api/brandkit").catch(() => []);
   $("#logoSelect").innerHTML = `<option value="">None</option>` + files.filter((f) => /\.(png|jpe?g|webp)$/i.test(f)).map((f) => `<option>${esc(f)}</option>`).join("");
 }
-/* ---------------- "?" help for every style setting: what it does, why/when, recommended ---------------- */
+/* ---------------- "?" help: simple, short, with an example ---------------- */
+// [title, what it is (1 line), how it works / why it matters (2-3 simple sentences), example, best for you]
 const HELP = {
-  format: ["The shape of the finished video.",
-    "Match where you post: 9:16 (tall) for Instagram Reels, YouTube Shorts and WhatsApp status; 16:9 (wide) for normal YouTube; 1:1 (square) for feeds. 'Original' keeps your camera's shape.",
-    "9:16 for reels."],
-  fit: ["What happens when your footage's shape differs from the video's shape.",
-    "'Crop to fill' zooms in so there are no black bars (best for faces – you lose a little of the edges). 'Fit with bars' shows the whole frame with black bars – use it for screen recordings or charts where every part matters.",
-    "Crop to fill."],
-  captions: ["Burned-in subtitles on the video.",
-    "Most people watch reels with the sound off – captions keep them watching. Scenes with no speech switch captions off by themselves.",
-    "On."],
-  caption_script: ["How Hindi speech is written in the captions.",
-    "Hinglish (English letters: 'aap kaise ho') reads fastest for most Indian social media viewers. Hindi script (आप कैसे हो) suits a Hindi-reading audience. Wrong word? Type 'spell daval as double' in Scenes.",
-    "Hinglish."],
-  caption_position: ["Where the captions sit on screen.",
-    "Bottom is classic; Center grabs attention; Top avoids covering things at the bottom. In the split layout this is ignored – captions sit on the orange line between the two halves, clear of the app's buttons.",
-    "Bottom (full screen) – automatic in the split layout."],
-  caption_case: ["Normal or ALL CAPITAL letters.",
-    "UPPERCASE looks bold and energetic (hype / motivation reels) but is slower to read. Normal case is calmer and easier for longer sentences.",
-    "Normal."],
-  caption_words: ["How many words are on screen at once.",
-    "Fewer words (2–3) = faster, punchier, easier on a phone. More words (5–6) = calmer, fewer caption changes. The spoken word is always highlighted.",
-    "3–4."],
-  caption_color: ["Colour of the caption words.",
-    "White with a dark outline is readable on any background. Change it only for a brand look.",
-    "White."],
-  highlight_color: ["Colour of the word being spoken right now (also the line between the two panels).",
-    "The moving highlight guides the eye and makes captions feel alive. Use your brand colour so every video is recognisably yours.",
-    "Your brand orange #F97316."],
-  caption_font: ["Font of the captions.",
-    "Poppins is bundled with the studio and works for both English letters and Hindi script. Another font only works if it's installed on this PC.",
-    "Poppins."],
-  remove_silence: ["Automatically cut pauses (jump cuts).",
-    "Removes dead air so the video feels tight and energetic – the biggest single improvement for talking-head reels. Turn it off for slow, emotional or storytelling pieces where pauses matter.",
-    "Yes for reels."],
-  silence_min: ["The shortest pause that gets cut, in seconds.",
-    "Lower (0.3) = tighter, faster video. Higher (0.6–1.0) = more breathing room. A cut pause still keeps a short breath (~0.24 s) so it never sounds chopped.",
-    "0.35."],
-  language: ["The language spoken in your footage.",
-    "Tells Whisper (the speech-to-text engine) what to listen for. 'Auto detect' can mistake Hindi for Urdu – choose Hindi for Hindi videos, then Re-analyze.",
-    "Hindi."],
-  logo: ["Your logo on top of the video (a PNG in the Brand Kit folder).",
-    "Builds brand recognition and discourages reposting without credit. Keep it small – the studio sizes it automatically.",
-    "Optional."],
-  logo_position: ["Which corner the logo goes in.",
-    "Top-right is the usual spot. Avoid bottom-right on reels – the app's like/comment buttons sit there.",
-    "Top-right."],
-  layout: ["How the screen is arranged.",
-    "'Split' = a card or graphic on top, you below, captions on the line between – great for finance/explainer reels (the number or headline stays visible while you talk). 'Full screen' = only you, the classic talking-head look.",
-    "Split (your Brand Kit)."],
-  headline: ["The title card shown in the top panel when a scene has no card of its own (split layout).",
-    "Put the main hook here, e.g. 'Bajaj *IPO* listing aaj' – a *word* in stars turns orange.",
-    "Your hook, 2–5 words."],
-  bg_mode: ["What happens to a green-screen background (split layout).",
-    "'Replace green screen' swaps the green for a clean warm off-white so it looks like a studio. 'Keep as filmed' leaves it. It only acts when the clip really has a green background.",
-    "Replace."],
-  face_y: ["Where your eyes are in the camera frame (0 = top, 1 = bottom) – used to frame you in the split layout.",
-    "Raise it if your head is cut off at the top, lower it if there's too much empty space above you. Or type 'face up' / 'face down' in Scenes.",
-    "0.27 (eyes in the upper third)."],
-  music: ["Quiet background music under your voice.",
-    "Fills silences and adds energy; it automatically gets quieter while you speak. Put your own track in Brand Kit\\music – otherwise a soft generated tune plays. Use only music you have the rights to.",
-    "Quiet, if it suits the mood."],
-  audio_polish: ["Cleans and levels your voice.",
-    "Removes low rumble and light background noise, evens out loud and soft words, and sets a consistent loudness – every video sounds equally loud and professional.",
-    "Clean voice + loudness."],
-  loudness: ["How loud your speech is in the final video, in LUFS (Loudness Units relative to Full Scale – the standard volume measure).",
-    "-14 LUFS matches the loudest uploads on Reels/Shorts, so you don't sound quieter than the next video. -16 is the common standard; -18 is calm. Closer to 0 = louder.",
-    "-14 for reels."],
-  duck_db: ["How much quieter the music gets while you speak, in dB (decibels).",
-    "A bigger number drops the music further under your voice, so words stay crystal clear. 18 dB is clear without the music disappearing; 0 = the music never dips.",
-    "18."],
+  format: ["Format", "The shape of your video.",
+    "Every app shows videos in its own shape. If your video's shape matches the app, it fills the whole screen. If not, the app adds empty space around it and it looks small.",
+    "9:16 = tall, fills a phone screen (Reels, Shorts).\n16:9 = wide, like TV (normal YouTube).\n1:1 = square.", "9:16"],
+  fit: ["Fit", "What to do when your clip's shape doesn't match the video.",
+    "Your phone clip may be a different shape from the video you're making. The studio can either zoom in until there's no gap, or show the full picture and fill the gap with black.",
+    "Crop to fill → zooms in, no black bars (good for faces).\nFit with bars → whole picture, black bars on the sides (good for charts).", "Crop to fill"],
+  captions: ["Captions", "Words of your speech shown on the video.",
+    "Most people scroll with the sound off – in a bus, at work, late at night. Without captions they don't know what you're saying and scroll away. With captions they read along and keep watching.",
+    "You say: \"Bajaj ka IPO aa chuka hai\"\nScreen shows: Bajaj ka IPO aa chuka hai", "On"],
+  caption_script: ["Caption script", "How Hindi words are written.",
+    "You speak Hindi, but captions can be written two ways. Hinglish uses English letters – most Indian Instagram users read it fastest. Hindi script is better if your viewers read Hindi daily.",
+    "Hinglish → aap kaise ho\nHindi → आप कैसे हो", "Hinglish"],
+  caption_position: ["Caption position", "Where captions sit on the screen.",
+    "Captions should be easy to see but must not cover your face or the app's buttons. In the split layout this setting is ignored – captions always sit on the orange line in the middle.",
+    "Bottom → classic.  Center → eye-catching.  Top → keeps the bottom clear.", "Bottom"],
+  caption_case: ["Caption case", "Normal letters or ALL CAPS.",
+    "CAPITAL letters look bold and loud, good for hype or motivation. But they're slower to read. Normal letters feel calm and are easier to read in longer sentences.",
+    "Normal → aaj market upar hai\nUPPERCASE → AAJ MARKET UPAR HAI", "Normal"],
+  caption_words: ["Words per caption", "How many words show at one time.",
+    "The captions change as you talk. With fewer words, the eye reads them in one glance and the video feels fast. With more words, the captions change less often and feel calmer.",
+    "2 → \"aaj market\"\n4 → \"aaj market upar hai\"\n6 → \"aaj market upar hai, Nifty bhi\"", "3–4"],
+  caption_color: ["Caption colour", "Colour of the caption text.",
+    "Captions sit on top of your video, which can be light or dark. White letters with a black outline stay readable on both. Change the colour only if your brand needs it.",
+    "White → readable on a bright wall and on a dark shirt.", "White"],
+  highlight_color: ["Highlight colour", "Colour of the word being spoken right now.",
+    "While you talk, the word you're saying lights up in this colour. It guides the viewer's eye and makes the captions feel alive. Using your brand colour makes every video look like yours.",
+    "Captions: aaj [market] upar hai\n→ \"market\" turns orange exactly while you say \"market\".", "Your orange #F97316"],
+  caption_font: ["Caption font", "The letter style of captions.",
+    "The font sets the mood: clean, bold, playful. Poppins comes with the studio and works for English letters and Hindi script. Another font only works if it's installed on this PC.",
+    "Poppins → clean and modern.\nArial → plain and simple.", "Poppins"],
+  remove_silence: ["Remove silences", "Cuts the pauses between your sentences.",
+    "When we talk, we pause to think. On camera these pauses feel slow and people scroll away. This setting cuts them out automatically but keeps a tiny breath, so it still sounds natural.",
+    "Before: \"IPO aaya … (1 sec) … aur list hua\"\nAfter:  \"IPO aaya, aur list hua\" – tighter and faster.", "Yes"],
+  silence_min: ["Min silence (s)", "How long a pause must be before it's cut.",
+    "Only pauses longer than this number of seconds get cut. A small number makes the video fast and tight. A bigger number keeps more natural breathing room.",
+    "0.35 → cuts most pauses (fast reel).\n1.0 → only cuts long pauses (relaxed video).", "0.35"],
+  language: ["Language", "The language you speak in the video.",
+    "The studio listens to your voice and writes down every word. It works best when it knows the language. On 'Auto detect' it sometimes confuses Hindi with Urdu and writes the wrong script.",
+    "Hindi → your words come out right: \"Bajaj ka IPO\".\nAuto → may come out in Urdu letters.", "Hindi"],
+  logo: ["Logo", "Your logo on the video.",
+    "A small logo in the corner tells people the video is yours, even when someone reposts it. Put a PNG file of your logo in the Brand Kit folder, then pick it here.",
+    "logo.png in Brand Kit → choose it → it appears small in a corner of every video.", "Optional"],
+  logo_position: ["Logo position", "Which corner the logo goes in.",
+    "Instagram and YouTube put their own buttons on the screen (like, comment, share). Put the logo where those buttons won't cover it.",
+    "Top-right → usual spot.\nBottom-right → avoid: the like/comment buttons cover it.", "Top-right"],
+  layout: ["Layout", "How the screen is arranged.",
+    "Split puts a card (title, number or chart) on top and you below – the key number stays on screen while you explain it. Full screen shows only you, the classic talking-head look.",
+    "Split → top: \"2x+ listing gain\", bottom: you talking.\nFull screen → only you.", "Split"],
+  headline: ["Headline card", "The big title on top (split layout).",
+    "It shows whenever a scene has no card of its own. Write your main hook here. Put stars around a word to make it orange.",
+    "Bajaj *IPO* listing aaj → shows \"Bajaj IPO listing aaj\" with IPO in orange.", "Your hook, 2–5 words"],
+  bg_mode: ["Background", "What to do with a green screen behind you.",
+    "If you film in front of a green cloth, the studio can swap the green for a clean off-white wall so it looks like a real studio. If there's no green behind you, nothing changes.",
+    "Replace → green becomes a clean off-white wall.\nKeep as filmed → stays green.", "Replace"],
+  face_y: ["Face position", "Moves you up or down in the bottom half.",
+    "In the split layout you appear in the bottom half. This number tells the studio where your eyes are in your clip, so it can frame you nicely – not too high, not too low.",
+    "Head cut off at the top? → make the number bigger (0.30).\nToo much space above your head? → smaller (0.22).", "0.27"],
+  music: ["Music", "Soft background music under your voice.",
+    "Music fills silences and adds energy. It automatically gets softer whenever you talk, so your words stay clear. Use your own song by putting it in the Brand Kit\\music folder.",
+    "Quiet → music plays, and gets softer whenever you talk.\nOff → only your voice.", "Quiet"],
+  audio_polish: ["Audio polish", "Makes your voice clean and even.",
+    "Phone recordings often have fan or AC hum, and some words come out louder than others. Audio polish removes the hum, evens out your voice, and makes every video equally loud.",
+    "Before: soft words hard to hear, fan hum.\nAfter: clear, even voice, no hum.", "On"],
+  loudness: ["Speech loudness", "How loud your voice is in the final video.",
+    "Apps play videos one after another. If yours is quieter than the next one, people think the sound is broken. -14 matches the loudest Reels and Shorts. Closer to 0 = louder.",
+    "-14 → as loud as top Reels/Shorts.\n-16 → standard.  -18 → calm.", "-14"],
+  duck_db: ["Music duck (dB)", "How much the music drops when you speak.",
+    "When you start talking, the music automatically goes softer, and comes back up in your pauses. This number is how much softer. Bigger number = music drops more, words clearer.",
+    "0 → music stays loud (words hard to hear).\n18 → music goes soft under your voice, words crystal clear.", "18"],
 };
 let helpOpen = null;
 function setupHelp() {
   for (const lab of $$("#settingsForm label")) {
     const f = lab.querySelector("[name]"); if (!f || !HELP[f.name] || lab.querySelector(".qhelp")) continue;
+    // label text + "?" on ONE row (the label is a vertical flex box, so wrap them together)
+    const row = document.createElement("span");
+    row.className = "lt";
+    [...lab.childNodes].filter((n) => n !== f && n.nodeType === Node.TEXT_NODE).forEach((n) => row.appendChild(n));
     const b = document.createElement("button");
     b.type = "button"; b.className = "qhelp"; b.textContent = "?"; b.dataset.k = f.name;
-    b.title = HELP[f.name][0];
-    b.setAttribute("aria-label", `What is ${f.name.replace(/_/g, " ")}?`);
-    lab.insertBefore(b, f);
+    b.title = HELP[f.name][1];
+    b.setAttribute("aria-label", `What is ${HELP[f.name][0]}?`);
+    row.appendChild(b);
+    lab.insertBefore(row, f);
     b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); helpOpen && helpOpen.btn === b ? closeHelp() : showHelp(b); };
   }
 }
 function showHelp(btn) {
   closeHelp();
-  const k = btn.dataset.k, [what, why, rec] = HELP[k];
+  const k = btn.dataset.k, [title, what, how, example, best] = HELP[k];
   const shared = !STYLE_KEYS.has(k);
   const pop = document.createElement("div");
   pop.className = "helppop"; pop.setAttribute("role", "dialog");
   pop.innerHTML = `<button class="hp-x" aria-label="Close">×</button>
+    <div class="hp-title">${esc(title)}</div>
     <div class="hp-what">${esc(what)}</div>
-    <div class="hp-sec"><b>Why / when</b>${esc(why)}</div>
-    <div class="hp-sec"><b>Recommended</b>${esc(rec)}</div>
-    <div class="hp-tag ${shared ? "shared" : ""}">${shared ? "Same for every look – it belongs to your footage / this video" : "Part of the look – each reference can have its own value"}</div>`;
+    <div class="hp-how">${esc(how)}</div>
+    <div class="hp-ex"><span>Example</span>${esc(example).replace(/\n/g, "<br>")}</div>
+    <div class="hp-best">Best for you: <b>${esc(best)}</b></div>
+    <div class="hp-tag">${shared ? "Same for every look" : "Each look (R1, R2…) can have its own"}</div>`;
   document.body.appendChild(pop);
-  const r = btn.getBoundingClientRect(), pw = Math.min(340, window.innerWidth - 24);
+  const r = btn.getBoundingClientRect(), pw = Math.min(440, window.innerWidth - 24);
   pop.style.width = `${pw}px`;
-  pop.style.left = `${Math.max(12, Math.min(window.innerWidth - pw - 12, r.left - 12))}px`;
-  const below = r.bottom + 8 + pop.offsetHeight < window.innerHeight;
-  pop.style.top = `${window.scrollY + (below ? r.bottom + 8 : Math.max(8, r.top - pop.offsetHeight - 8))}px`;
+  pop.style.left = `${Math.max(12, Math.min(window.innerWidth - pw - 12, r.left - 16))}px`;
+  const below = r.bottom + 10 + pop.offsetHeight < window.innerHeight;
+  pop.style.top = `${window.scrollY + (below ? r.bottom + 10 : Math.max(8, r.top - pop.offsetHeight - 10))}px`;
   pop.querySelector(".hp-x").onclick = closeHelp;
   helpOpen = { pop, btn }; btn.classList.add("on");
 }
@@ -725,6 +747,8 @@ function renderBrief(force) {
       el.value = sv;
     }
   }
+  // ★ Brand Kit is read-only (shared by every project): grey out its style fields; footage fields stay editable
+  for (const el of $$("#settingsForm [name]")) el.disabled = ed === BK && STYLE_KEYS.has(el.name);
   $("#briefState").textContent = briefDirty ? "unsaved changes" : P.updated ? `saved` : "";
 }
 ["#brief", "#lookBrief"].forEach((sel) => $(sel).addEventListener("input", () => { briefDirty = true; $("#briefState").textContent = "unsaved changes"; }));
@@ -732,6 +756,7 @@ $$("#settingsForm [name]").forEach((el) => el.addEventListener("change", () => {
 function collectSettings() {
   const s = {};
   for (const el of $$("#settingsForm [name]")) {
+    if (el.disabled) continue;  // read-only (★ Brand Kit) – not sent
     let v = el.value;
     if (["captions", "remove_silence", "audio_polish"].includes(el.name)) v = v === "true";
     else if (["caption_words"].includes(el.name)) v = parseInt(v || "4", 10);
@@ -748,26 +773,39 @@ async function saveBrief() {
   briefDirty = false; await refresh(true);
 }
 $("#saveBrief").onclick = () => saveBrief().then(() => toast("Saved.")).catch((e) => toast(e.message, true));
-$("#brandBtn").onclick = async () => {
+// ---- ✨ Claude: plan the edit (Scenes page) -> Claude builds a STORYBOARD; nothing renders before you approve
+function planPending() { return P.commands.some((c) => ["plan_edit", "first_cut"].includes(c.kind) && c.status === "claude"); }
+function renderPlanBtn() {
+  const b = $("#planBtn"), j = P.job || {};
+  const analyzing = j.kind === "analyze" && (j.status === "running" || j.status === "queued");
+  const pend = planPending();
+  b.disabled = pend || analyzing || !P.scenes.length;
+  b.textContent = pend ? "✨ Plan requested – say “process studio inbox”" : "✨ Claude: plan the edit";
+  b.title = pend ? "Waiting for Claude: type “process studio inbox” in VS Code. (Cancel it in the Claude inbox.)"
+    : analyzing ? "Wait for the analysis to finish – the scenes are about to change"
+    : !P.scenes.length ? "Analyze your footage first (Footage tab)"
+    : "Claude plans the whole edit beat by beat (cuts, cards, zooms) as a storyboard – you approve before anything renders";
+}
+$("#planBtn").onclick = async () => {
   try {
-    const r = await api(`/api/projects/${PID}/apply_brand`, { method: "POST", body: { look: curEditLook() } });
-    briefDirty = false; await refresh(true);
-    toast(`Brand Kit applied (${r.applied.length} settings). Undo to revert.`);
-  } catch (e) { toast(e.message, true); }
-};
-$("#firstCutBtn").onclick = async () => {
-  try {
-    await saveBrief();
-    if (!P.scenes.length) return toast("Analyze the footage first (tab 1).", true);
-    await api(`/api/projects/${PID}/first_cut`, { method: "POST" });
-    toast("Sent to Claude. Say “process studio inbox” in VS Code.");
-    refresh(true); openInbox();
+    if (briefDirty) await saveBrief();  // unsaved brief on page 2 belongs in the plan
+    const f = P.footage || {};
+    if (f.new && !confirm(`${f.new} clip(s) are not analyzed yet – their scenes won't be in the plan.\n\nPlan the edit anyway?`)) return;
+    if (P.storyboard && P.storyboard.status !== "applied" &&
+        !confirm("A storyboard is already waiting for your review.\nMake a new plan? (Your reviews of beats that don't change are kept.)")) return;
+    const r = await api(`/api/projects/${PID}/first_cut`, { method: "POST" });
+    if (r.already) toast("Already requested – say “process studio inbox” in VS Code.");
+    else toast("Sent to Claude. Say “process studio inbox” in VS Code – a storyboard will appear for you to approve." +
+      (!(P.brief || "").trim() ? " Tip: fill “About this video” on page 2 for a better plan." : ""));
+    refresh(true);
   } catch (e) { toast(e.message, true); }
 };
 
 /* ---------------- scenes ---------------- */
 function sceneBadges(s) {
   const b = [];
+  if (s.role === "broll") b.push(`<span class="badge broll" title="B-roll footage: covers speaker scenes, not played on its own">B-ROLL</span>`);
+  if (s.broll_view) b.push(`<span class="badge ${s.broll_view.ok ? "broll" : "warn"}" title="${esc(s.broll_view.src)}">🎞 ${s.broll_view.where === "full" ? "full" : "top"}</span>`);
   if (!s.keep) b.push(`<span class="badge cut">CUT</span>`);
   if (s.speed && s.speed !== 1) b.push(`<span class="badge acc">${s.speed}x</span>`);
   if (s.mute) b.push(`<span class="badge">muted</span>`);
@@ -802,7 +840,7 @@ function renderScenes() {
       <span class="no">${s.no}</span>
       <div class="info">
         <div class="times">${fmt(s.in)}–${fmt(s.out)} · ${s.dur}s${s.keep && Math.abs(s.est - s.dur) > 0.05 ? ` → ${s.est}s` : ""} ${sceneBadges(s)}</div>
-        <div class="txt">${s.no_speech && s.captions === false ? `<span class="muted">(no speech – music / ambient sound)</span>` : esc(s.caption_view ?? s.transcript) || `<span class="muted">(no speech)</span>`}</div>
+        <div class="txt">${s.heard || (s.no_speech && s.captions === false) ? `<span class="muted">🎵 no speech – music / background sound</span>` : esc(s.caption_view ?? s.transcript) || `<span class="muted">(no speech)</span>`}</div>
       </div>
       <div class="acts">
         <button data-act="up" title="Move up">▲</button><button data-act="down" title="Move down">▼</button>
@@ -819,29 +857,565 @@ function renderScenes() {
       selectScene(card.dataset.id);
     };
   });
-  // re-analysis replaces scene ids: a stale selection must fall back to scene 1, not "Select a scene."
-  if ((!selected || !P.scenes.some((x) => x.id === selected)) && P.scenes.length) selectScene(P.scenes[0].id, false);
+  // re-analysis replaces scene ids: a stale selection must fall back to the first VIDEO scene, not "Select a scene."
+  if ((!selected || !P.scenes.some((x) => x.id === selected)) && P.scenes.length)
+    selectScene((P.scenes.find((x) => !isBroll(x)) || P.scenes[0]).id, false);
+  if (!STL.drag && !STL.busy) renderSceneTimeline();  // never redraw under a drag in progress
 }
 function curScene() { return P?.scenes.find((s) => s.id === selected); }
 function selectScene(id, play = true) {
   selected = id;
   $$(".scene").forEach((c) => c.classList.toggle("sel", c.dataset.id === id));
+  $$(".sblk").forEach((c) => c.classList.toggle("sel", c.dataset.id === id));
   renderDetail(); loadPlayer(play);
 }
+/* ---- Inspector: direct controls for the selected scene. Every control sends a normal command (same grammar as the
+   box below), so it lands in the history, is undoable, and Claude/CLI can do the same thing. */
+const isBroll = (s) => s && s.role === "broll";
+const inVid = (s) => s && s.keep && s.role !== "broll";  // plays in the edited video
+const r2 = (x) => Math.round((+x || 0) * 100) / 100;
+/* Hover help: every Inspector control says what it does (shown by the floating tip box, see initTips) */
+const ITIP = {
+  speed: { "0.75": "Slow motion – the scene plays at 3/4 speed (longer, slower voice).", "1": "Normal speed, as recorded.",
+    "1.25": "A bit faster – removes dead time while the voice still sounds natural. Good for reels.", "1.5": "Fast – noticeably quicker speech. For less important parts.",
+    "2": "Double speed – quick fillers or a fast-forward effect." },
+  zoom: { "1": "No zoom – the full frame.", "1.1": "Slight punch-in (10 %) – subtle emphasis.", "1.2": "Punch-in 20 % – classic jump-cut zoom to highlight a point.",
+    "1.3": "Close-up 30 % – strong emphasis on your face.", "1.5": "Tight close-up 50 % – very dramatic, can look soft on low-resolution footage." },
+  captions: { auto: "Follow the whole video: captions on, except scenes with no speech (those turn off by themselves).",
+    on: "Always show captions in this scene.", off: "Never show captions in this scene (e.g. when a card or B-roll already says it)." },
+  cappos: { auto: "Use the look's position. Split layout: on the line between the card and you, just above your head.",
+    head: "Captions high – over your head (split layout: just under the line, on your forehead/hair). Use when something important is low.",
+    center: "Captions in the middle of the picture – most eye-catching, but can cover your face.",
+    below: "Captions low – near the bottom of the screen, under your chest. Keeps your face clear." },
+  pauses: { auto: "Follow the whole-video setting for cutting pauses (shown on the right).",
+    cut: "Cut the silent pauses out of this scene – jump cuts, faster pace.", keep: "Keep every pause in this scene – natural, calm pace." },
+  bwhere: { top: "Show the B-roll in the top panel (card area); you stay visible below.", full: "Show the B-roll over the whole screen; your voice keeps playing." },
+  role: { speaker: "Normal scene: plays in the video with its picture and sound.",
+    broll: "Take this scene OUT of the video and use its picture only as B-roll over other scenes. Its own sound is not heard." },
+};
+function segBtns(name, opts, cur) {
+  return `<div class="seg iseg" data-name="${name}">${opts.map(([v, label, dis]) =>
+    `<button data-v="${esc(v)}" class="${String(v) === String(cur) ? "active" : ""}" ${dis ? `disabled title="${esc(dis)}"` : `data-tip="${esc((ITIP[name] || {})[v] || "")}"`}>${label}</button>`).join("")}</div>`;
+}
+const lab = (text, tip) => `<span class="ilab hastip" data-tip="${esc(tip)}">${text}</span>`;
+function initTips() {  // one floating tip box for every [data-tip] on the page – fast, never clipped by scrolling panels
+  const box = document.createElement("div"); box.id = "tipbox"; box.hidden = true; document.body.appendChild(box);
+  let cur = null, timer = null;
+  const hide = () => { clearTimeout(timer); box.hidden = true; cur = null; };
+  document.addEventListener("mouseover", (e) => {
+    const t = e.target.closest && e.target.closest("[data-tip]");
+    if (t === cur) return;
+    hide(); if (!t || !t.dataset.tip) return;
+    cur = t;
+    timer = setTimeout(() => {
+      if (!document.body.contains(t)) return;
+      box.textContent = t.dataset.tip; box.hidden = false;
+      const r = t.getBoundingClientRect(), bw = box.offsetWidth, bh = box.offsetHeight;
+      const x = Math.min(window.innerWidth - bw - 8, Math.max(8, r.left + r.width / 2 - bw / 2));
+      let y = r.bottom + 8;
+      if (y + bh > window.innerHeight - 8) y = r.top - bh - 8;
+      box.style.left = `${x}px`; box.style.top = `${y}px`;
+    }, 300);
+  });
+  document.addEventListener("pointerdown", hide, true);
+  window.addEventListener("scroll", hide, true);
+}
+initTips();
+function brollUsers(file) { return P.scenes.filter((x) => x.broll && x.broll.src === file && x.keep).map((x) => x.no); }
+const rangeTxt = (nos) => !nos.length ? "" : nos.length === 1 ? `scene ${nos[0]}` : `scenes ${nos[0]}–${nos[nos.length - 1]}`;
 function renderDetail() {
   const s = curScene(), el = $("#sceneDetail");
-  if (!s) { el.innerHTML = `<p class="muted">Select a scene.</p>`; $("#sceneHistory").innerHTML = ""; return; }
-  el.innerHTML = `
-    <div class="title"><h2>Scene ${s.no}</h2><span class="muted">${esc(s.src)} · ${fmt(s.in)}–${fmt(s.out)} (${s.dur}s${s.keep ? ` → ${s.est}s` : ""})</span> ${sceneBadges(s)}</div>
-    <div class="transcript">${esc(s.transcript) || `<span class="muted">(no speech in this scene)</span>`}</div>
-    ${s.caption_view !== undefined && s.caption_view !== s.transcript ? `<div class="transcript capview"><span class="muted">Captions:</span> ${esc(s.caption_view)}
-      <div class="muted small">Wrong word? Type in the box below:  spell ${esc((s.caption_view.split(" ").find(Boolean)) || "word")} as ...</div></div>` : ""}
-    ${s.text ? `<div class="props"><span class="badge acc">Text: ${esc(s.text)} (${esc(s.text_pos)})</span></div>` : ""}
-    ${s.card ? `<div class="props"><span class="badge acc">Top card: ${esc(s.card.kind === "title" ? s.card.text : s.card.kind === "number" ? `${s.card.value} ${s.card.label || ""}` : s.card.kind === "chart" ? `chart · ${s.card.label || ""}` : "empty")}</span></div>` : ""}`;
+  if (!s) { el.innerHTML = `<p class="muted">Select a scene on the timeline.</p>`; $("#sceneHistory").innerHTML = ""; return; }
+  const split = P.settings.layout === "split";
+  const tStart = r2(s.in - (s.orig_in ?? s.in)), tEnd = r2((s.orig_out ?? s.out) - s.out);
+  const head = `
+    <div class="title"><h2>Scene ${s.no}</h2> ${sceneBadges(s)}
+      <span class="spacer"></span>
+      ${isBroll(s) ? "" : `<button class="btn small ${s.keep ? "ghost" : "primary"}" data-cmd="${s.keep ? "cut" : "keep"}" data-tip="${s.keep ? "Remove this scene from the video (it stays on the timeline, striped – Restore brings it back). Key: Delete" : "Put this scene back into the video. Key: Delete"}">${s.keep ? "✂ Cut scene" : "↺ Restore scene"}</button>`}</div>
+    <div class="muted small">${esc(s.src)} · ${fmt(s.in)}–${fmt(s.out)} · ${s.dur}s${s.keep && !isBroll(s) ? ` → <b>${s.est}s</b> in the video` : ""}</div>
+    ${!s.keep && s.broll_view && !isBroll(s) ? `<div class="warnline">⚠ This scene is cut, so its B-roll is not in the video either. <button class="lnk" data-cmd="keep">Restore scene</button></div>` : ""}`;
+  // "what this scene IS" – deliberately at the bottom and worded so it can't be mistaken for "add B-roll here"
+  const roleRow = `<div class="isec"><div class="ilab hastip" data-tip="Is this scene part of the video, or only footage used OVER other scenes?">This scene is…</div>
+    <div class="irow">${segBtns("role", [["speaker", "🎤 Part of the video"], ["broll", "🎞 B-roll footage (not played itself)"]], isBroll(s) ? "broll" : "speaker")}</div>
+    <div class="muted small">${isBroll(s) ? "Its picture is used to cover other scenes; its own sound and words are not in the video."
+      : "To show B-roll OVER this scene, use “Cover with B-roll” above – not this."}</div></div>`;
+  if (isBroll(s)) {
+    const users = brollUsers(s.src);
+    el.innerHTML = head + `<div class="ibox">
+      <b>B-roll footage</b> – it never plays on its own and adds no length. It covers speaker scenes while your voice keeps playing.<br>
+      ${users.length ? `Now covering <b>${rangeTxt(users)}</b>. Change that on a speaker scene (B-roll ▾).`
+        : `Not used yet. <button class="btn small" data-gcmd="broll auto">Place it automatically</button> or pick a speaker scene → “Cover with B-roll”.`}
+      ${(s.transcript || "").trim() && !s.no_speech ? `<div class="warnline">⚠ This scene has speech (“${esc((s.caption_view ?? s.transcript).split(/\s+/).slice(0, 6).join(" "))}…”) – as B-roll those words are NOT in the video.</div>` : ""}</div>` + roleRow;
+  } else {
+    const bv = s.broll_view;
+    const clipOpts = [...(P.broll_clips || []).map((c) => c.file), ...P.sources.map((x) => x.file).filter((f) => f !== s.src && !(P.broll_clips || []).some((c) => c.file === f))];
+    const c = s.card;
+    const cardKind = !c ? "auto" : c.kind;
+    const words = (s.caption_view ?? s.transcript ?? "").split(/\s+/).filter(Boolean);
+    const capsOn = words.length > 0 && (s.captions === true || (s.captions == null && P.settings.captions !== false));
+    el.innerHTML = head + `
+      <div class="isec bsec"><div class="ilab hastip" data-tip="Show another clip (market footage, charts…) OVER this scene while your voice keeps playing.">🎞 Cover with B-roll <span class="muted small">(footage shows over this scene, your voice keeps playing)</span></div>
+        <div class="irow">
+          <select id="brollSel" data-tip="Pick the clip that covers this scene. None = show yourself."><option value="">None</option>${clipOpts.map((f) => `<option ${bv && bv.src === f ? "selected" : ""}>${esc(f)}</option>`).join("")}</select>
+          ${bv ? segBtns("bwhere", [["top", "Top panel", split ? "" : "Needs the split layout"], ["full", "Full screen"]], bv.where) : ""}
+        </div>
+        ${bv ? `<div class="irow"><span class="muted small">Starts in the clip at</span>
+          <input type="number" id="brollAt" step="0.5" min="0" placeholder="auto" value="${bv.at ?? ""}" title="Empty = continue from the previous scene's B-roll">
+          <span class="muted small">s ${bv.at == null ? "(auto: continues)" : `<button class="lnk" data-cmd="broll continue">auto</button>`}</span></div>` : ""}
+        ${bv && !bv.ok ? `<div class="warnline">⚠ Not shown: ${esc(bv.why)}.</div>` : ""}
+        ${!clipOpts.length ? `<div class="muted small">No other clips. Add another clip in Footage (e.g. market footage) to show it over this scene.</div>` : ""}</div>
+      <div class="isec"><div class="ilab hastip" data-tip="What you say in this scene. Click a word to change how the captions spell it, or to hide it.">Words <span class="muted small">(click a word to fix how it's written)</span></div>
+        ${s.heard ? `<div class="ibox">🎵 <b>No speech detected</b> – music or background sound, so captions stay off here.
+            <button class="lnk" id="showHeard" data-tip="Speech recognition always 'hears' something in music. These are its guesses, not real words.">Show the ${s.heard.split(/\s+/).length} guessed word(s)</button>
+            <div id="heardBox" class="muted small" hidden>“${esc(s.heard)}” – not real speech. To show captions anyway: Captions → On (then fix or hide the words here).</div></div>` : ""}
+        ${s.no_speech && s.captions === true && words.length ? `<div class="warnline">⚠ No real speech was detected here – these words are guesses and WILL appear as captions. Fix or hide them, or set Captions to Auto.</div>` : ""}
+        <div class="words">${words.length ? words.map((w) => `<button class="wd" data-w="${esc(w)}" data-tip="Click to fix how “${esc(w)}” is written in the captions, or hide it.">${esc(w)}</button>`).join("") : s.heard ? "" : `<span class="muted">(no speech in this scene)</span>`}</div>
+        <div id="wordFix" class="wordfix" hidden></div></div>
+      <div class="isec"><div class="ilab hastip" data-tip="Remove seconds from the start or end of this scene (e.g. an “umm” before you start). You can also drag the block's edge on the timeline.">Trim</div>
+        <div class="trim">
+          <label>Start <span class="nud"><button data-nud="start" data-d="-0.1" data-tip="Remove 0.1 s less from the start (scene starts earlier).">−</button><input type="number" id="trimStart" step="0.05" min="0" value="${tStart}"><button data-nud="start" data-d="0.1" data-tip="Remove 0.1 s more from the start.">+</button></span> s</label>
+          <label>End <span class="nud"><button data-nud="end" data-d="-0.1" data-tip="Remove 0.1 s less from the end (scene ends later).">−</button><input type="number" id="trimEnd" step="0.05" min="0" value="${tEnd}"><button data-nud="end" data-d="0.1" data-tip="Remove 0.1 s more from the end.">+</button></span> s</label>
+          <button class="btn ghost small" data-cmd="reset trim" ${tStart || tEnd ? `data-tip="Undo all trimming – the scene gets its full original length back."` : `disabled title="Nothing trimmed yet"`}>Reset</button>
+        </div>
+        <div class="muted small">Seconds removed from the start / end. At the playhead: <button class="lnk" data-key="i" data-tip="Play the original footage, pause where the scene should START, then click (or press I).">I = start here</button> · <button class="lnk" data-key="o" data-tip="Pause where the scene should END, then click (or press O).">O = end here</button> (Original footage view)</div></div>
+      <div class="irow">${lab("Speed", "How fast this scene plays. Faster = shorter video and a punchier pace.")}${segBtns("speed", [["0.75", "0.75×"], ["1", "1×"], ["1.25", "1.25×"], ["1.5", "1.5×"], ["2", "2×"]], s.speed || 1)}</div>
+      <div class="irow">${lab("Zoom", "Punch-in zoom on this scene – makes a point stand out and hides jump cuts.")}${segBtns("zoom", [["1", "Off"], ["1.1", "1.1×"], ["1.2", "1.2×"], ["1.3", "1.3×"], ["1.5", "1.5×"]], s.zoom || 1)}</div>
+      <div class="irow">${lab("Audio", "Sound of this scene: mute it, or make it louder / quieter.")}
+        <button class="btn small ${s.mute ? "primary" : "ghost"}" data-cmd="${s.mute ? "unmute" : "mute"}" data-tip="${s.mute ? "Bring this scene's sound back." : "Silence this scene completely (background music still plays)."}">${s.mute ? "🔇 Muted" : "🔊 Mute"}</button>
+        <input type="range" id="volRange" data-tip="Volume of this scene: 100 % = as recorded, 200 % = twice as loud. Applied when you let go." min="0" max="200" step="5" value="${Math.round((s.volume ?? 1) * 100)}" ${s.mute ? "disabled" : ""}>
+        <span class="muted small" id="volVal">${Math.round((s.volume ?? 1) * 100)}%</span></div>
+      <div class="irow">${lab("Captions", "Show or hide the spoken words on screen in this scene.")}${segBtns("captions", [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
+        s.captions === true ? "on" : s.captions === false && !s.captions_auto_off ? "off" : "auto")}
+        ${s.captions_auto_off ? `<span class="muted small">no speech → off</span>` : ""}</div>
+      <div class="irow ${capsOn ? "" : "dim"}">${lab("Position", "Where the captions sit in THIS scene. Auto = the look's position.")}${segBtns("cappos", [["auto", "Auto"], ["head", "Head"], ["center", "Center"], ["below", "Below"]], s.cap_pos || "auto")}
+        <span class="muted small">${capsOn ? `Auto = ${split ? "on the seam" : { bottom: "below", center: "center", top: "head" }[P.settings.caption_position || "bottom"]}`
+          : `captions are OFF here – ${!words.length ? "no speech in this scene" : "turn them On to see this"}`}</span></div>
+      <div class="irow">${lab("Pauses", "Silent gaps while you think or breathe. Cutting them = jump cuts and a faster video.")}${segBtns("pauses", [["auto", "Auto"], ["cut", "Cut"], ["keep", "Keep"]],
+        s.remove_silence === true ? "cut" : s.remove_silence === false ? "keep" : "auto")}
+        <span class="muted small">Auto = ${P.settings.remove_silence ? "cut" : "keep"} (whole video)</span></div>
+      ${split ? `<div class="isec"><div class="ilab hastip" data-tip="The graphic in the top panel (split layout): a title, a big number or a small chart about what you say.">Top card</div>
+        <div class="irow"><select id="cardKind" data-tip="Previous card = keep showing the last card · Title = text (*word* = orange) · Number = big figure + label · Chart = mini line chart · Empty = no card.">
+          ${[["auto", "Previous card (auto)"], ["title", "Title"], ["number", "Number"], ["chart", "Chart"], ["none", "Empty panel"]].map(([v, l]) => `<option value="${v}" ${v === cardKind ? "selected" : ""}>${l}</option>`).join("")}
+        </select></div>
+        <div id="cardFields" class="cardf"></div></div>` : ""}
+      <div class="isec"><div class="ilab hastip" data-tip="A short line of text shown during this scene (separate from captions), e.g. a headline or a number.">Text on screen</div>
+        <div class="irow"><input id="ovText" data-tip="Type the text to show, then click Set." placeholder="e.g. Nifty at record high" value="${esc(s.text || "")}">
+          <select id="ovPos" data-tip="Where the text appears: top, center or bottom of the screen.">${["top", "center", "bottom"].map((p) => `<option ${p === (s.text_pos || "top") ? "selected" : ""}>${p}</option>`).join("")}</select>
+          <button class="btn small" id="ovApply" data-tip="Show this text in this scene.">Set</button>${s.text ? `<button class="btn ghost small" data-cmd="remove text" data-tip="Remove the text from this scene.">Remove</button>` : ""}</div>
+          ${split && s.text && (s.text_pos || "top") === "top" ? `<div class="warnline">⚠ In the split layout the top is the card – this text covers it. Choose center or bottom, or put it in the card.</div>` : ""}</div>` + roleRow;
+    renderCardFields(c);
+  }
+  bindInspector(s);
   const hist = P.commands.filter((c) => c.scene === s.id).slice(-12).reverse();
   $("#sceneHistory").innerHTML = hist.map(cmdHtml).join("");
   bindCancel($("#sceneHistory"));
 }
+function renderCardFields(c) {
+  const box = $("#cardFields"); if (!box) return;
+  const k = $("#cardKind").value;
+  const v = (f) => esc(c && c.kind === k ? (f === "points" ? (c.points || []).join(", ") : c[f] || "") : "");
+  box.innerHTML = k === "title" ? `<input id="cfText" placeholder="bajaj *IPO* listing aaj  (*word* = orange)" value="${v("text")}">`
+    : k === "number" ? `<input id="cfValue" placeholder="2x+" value="${v("value")}"><input id="cfLabel" placeholder="listing gain" value="${v("label")}">`
+    : k === "chart" ? `<input id="cfPoints" placeholder="10, 12, 11, 15" value="${v("points")}"><input id="cfLabel" placeholder="Nifty 5 days" value="${v("label")}">`
+    : `<span class="muted small">${k === "auto" ? "Keeps showing the card from the scene before (or the headline)." : "Top panel stays empty in this scene."}</span>`;
+  box.innerHTML += `<button class="btn small" id="cardApply">Apply card</button>`;
+  $("#cardApply").onclick = () => {
+    const s = curScene(); if (!s) return;
+    const val = (id) => ($(id)?.value || "").trim();
+    const cmd = k === "auto" ? "card auto" : k === "none" ? "card off" : k === "title" ? `card: title ${val("#cfText")}`
+      : k === "number" ? `card: number ${val("#cfValue")} | ${val("#cfLabel")}` : `card: chart ${val("#cfPoints")} | ${val("#cfLabel")}`;
+    sendCommand(s.id, cmd);
+  };
+}
+function bindInspector(s) {
+  const el = $("#sceneDetail");
+  $$("[data-cmd]", el).forEach((b) => (b.onclick = () => sendCommand(s.id, b.dataset.cmd)));
+  $$("[data-gcmd]", el).forEach((b) => (b.onclick = () => sendCommand(null, b.dataset.gcmd)));
+  $$("[data-key]", el).forEach((b) => (b.onclick = () => trimAtPlayhead(b.dataset.key)));
+  const sh = $("#showHeard", el); if (sh) sh.onclick = () => { const hb = $("#heardBox", el); hb.hidden = !hb.hidden; sh.textContent = hb.hidden ? sh.textContent.replace(/^Hide/, "Show") : sh.textContent.replace(/^Show/, "Hide"); };
+  $$(".iseg", el).forEach((g) => $$("button", g).forEach((b) => (b.onclick = () => {
+    if (b.classList.contains("active")) return;
+    const v = b.dataset.v, n = g.dataset.name;
+    if (n === "role" && v === "broll" && (s.transcript || "").trim() && !s.no_speech &&
+        !confirm(`Scene ${s.no} has speech:\n“${(s.caption_view ?? s.transcript).split(/\s+/).slice(0, 10).join(" ")}…”\n\n` +
+                 `As B-roll footage it LEAVES the video – these words won't be heard.\n\n` +
+                 `Wanted B-roll footage to show OVER this scene instead? Cancel and use “Cover with B-roll”.`)) return;
+    const cmd = { role: `role ${v === "broll" ? "broll" : "speaker"}`, speed: `speed ${v}`, zoom: v === "1" ? "no zoom" : `zoom ${v}`,
+      captions: `captions ${v}`, cappos: `captions at ${v}`, pauses: v === "auto" ? "silences auto" : v === "cut" ? "remove silences" : "keep silences",
+      bwhere: `broll ${v}` }[n];
+    if (cmd) sendCommand(s.id, cmd);
+  })));
+  const trimSet = (edge, x) => { x = Math.max(0, r2(x)); sendCommand(s.id, `trim ${edge} to ${x}`); };
+  $$("[data-nud]", el).forEach((b) => (b.onclick = () => { const inp = b.dataset.nud === "start" ? $("#trimStart") : $("#trimEnd"); trimSet(b.dataset.nud, +inp.value + +b.dataset.d); }));
+  [["#trimStart", "start"], ["#trimEnd", "end"]].forEach(([id, edge]) => { const i = $(id); if (i) i.onchange = () => trimSet(edge, +i.value); });
+  const vol = $("#volRange");
+  if (vol) { vol.oninput = () => ($("#volVal").textContent = `${vol.value}%`); vol.onchange = () => sendCommand(s.id, `volume ${vol.value}%`); }
+  const bs = $("#brollSel");
+  if (bs) bs.onchange = () => sendCommand(s.id, bs.value ? `broll ${bs.value}` : "broll off");
+  const ba = $("#brollAt");
+  if (ba) ba.onchange = () => sendCommand(s.id, ba.value === "" ? "broll continue" : `broll from ${Math.max(0, +ba.value)}`);
+  const ck = $("#cardKind");
+  if (ck) ck.onchange = () => renderCardFields(s.card);
+  const ov = $("#ovApply");
+  if (ov) ov.onclick = () => {
+    const t = $("#ovText").value.trim(); if (!t) return toast("Type the text first.", true);
+    sendCommand(s.id, `text: ${t}`).then(() => { if ($("#ovPos").value !== (s.text_pos || "top")) sendCommand(s.id, `text ${$("#ovPos").value}`); });
+  };
+  $$(".wd", el).forEach((b) => (b.onclick = () => {
+    const w = b.dataset.w.replace(/[.,!?।]+$/, ""), box = $("#wordFix");
+    box.hidden = false;
+    box.innerHTML = `Show “<b>${esc(w)}</b>” as <input id="wfVal" value="${esc(w)}"> <button class="btn small primary" id="wfSave">Save</button>
+      <button class="btn ghost small" id="wfHide" title="Remove this word from the captions">Hide word</button> <span class="muted small">(everywhere in the video)</span>`;
+    const inp = $("#wfVal"); inp.focus(); inp.select();
+    const save = (val) => sendCommand(null, `spell ${w} as ${val}`);
+    $("#wfSave").onclick = () => { if (inp.value.trim() && inp.value.trim() !== w) save(inp.value.trim()); else box.hidden = true; };
+    inp.onkeydown = (e) => { if (e.key === "Enter") $("#wfSave").click(); if (e.key === "Escape") box.hidden = true; };
+    $("#wfHide").onclick = () => save("-");
+  }));
+}
+function trimAtPlayhead(k) {
+  const s = curScene(); if (!s || isBroll(s)) return;
+  if (playerMode !== "source") return toast("Switch to “Original footage” to trim at the playhead.", true);
+  const t = player.currentTime;
+  if (k === "i") { if (t >= s.out - 0.3 || t < (s.orig_in ?? s.in)) return toast("Playhead is outside this scene.", true); sendCommand(s.id, `trim start to ${r2(t - (s.orig_in ?? s.in))}`); }
+  else { if (t <= s.in + 0.3 || t > (s.orig_out ?? s.out)) return toast("Playhead is outside this scene.", true); sendCommand(s.id, `trim end to ${r2((s.orig_out ?? s.out) - t)}`); }
+}
+$$(".rtabs button").forEach((b) => (b.onclick = () => {
+  $$(".rtabs button").forEach((x) => x.classList.toggle("active", x === b));
+  $("#inspPane").hidden = b.dataset.rt !== "insp"; $("#listPane").hidden = b.dataset.rt !== "list";
+}));
+
+/* ---- Scenes timeline: V2 = B-roll cutaways, V1 = the video's scenes (width = edited length), card row (split layout).
+   Click = select · drag block = move · drag edge = trim · playhead follows the player. */
+const STL = { blocks: [], drag: null };
+function effCards(main) {
+  if (P.settings.layout !== "split") return [];
+  const head = (P.settings.headline || "").trim();
+  let shown = head ? { kind: "title", text: head } : null;
+  return main.map((s) => { const c = s.card; if (c && (c.kind === "none" || c.text || c.value || (c.points || []).length >= 2)) shown = c; return shown; });
+}
+const cardLabel = (c) => !c || c.kind === "none" ? "" : c.kind === "title" ? c.text.replace(/\*/g, "") : c.kind === "number" ? `${c.value} ${c.label || ""}` : `📈 ${c.label || "chart"}`;
+function renderSceneTimeline() {
+  const box = $("#stl"); if (!box || !P) return;
+  const main = P.scenes.filter((s) => !s.src_skipped);  // EVERY scene is on the Video lane (B-roll ones as small 🎞 blocks)
+  const bin = P.broll_clips || [];
+  // ALL project clips as chips: drag one onto a scene in the Video lane to cover that scene with it.
+  // B-roll clips first (blue); talking clips too (grey) – e.g. a second camera angle as a cutaway
+  const usedBy = (f) => P.scenes.filter((x) => x.keep && !isBroll(x) && x.broll && x.broll.src === f).map((x) => x.no);
+  const clipChip = (f, isB) => {
+    const src = P.sources.find((x) => x.file === f) || {}, u = usedBy(f);
+    const sc = P.scenes.find((x) => x.src === f && (isB ? isBroll(x) : true));
+    return `<button class="bchip ${isB ? "" : "spk"} ${src.include === false ? "skip" : ""}" data-file="${esc(f)}" data-sel="${sc ? sc.id : ""}"
+      title="Drag onto a scene below to show it OVER that scene (your voice keeps playing). Click = select.${src.include === false ? " This clip is set to Skip in Footage – B-roll from it is not shown." : ""}">
+      ${isB ? "🎞" : "🎤"} ${esc(f)} · ${(src.duration || 0).toFixed(1)}s · ${u.length ? `covers ${rangeTxt(u)}` : `<i>${isB ? "not used" : "speaker clip"}</i>`}</button>`;
+  };
+  const others = P.sources.map((x) => x.file).filter((f) => !bin.some((c) => c.file === f));
+  $("#brollBin").innerHTML = P.sources.length ? `<span class="muted small">Clips <span title="Drag a clip onto a scene to use it as B-roll there">ⓘ drag onto a scene:</span></span> ` +
+    [...bin.map((c) => clipChip(c.file, true)), ...others.map((f) => clipChip(f, false))].join(" ") : "";
+  // B-roll scenes of clips that also have speaker scenes (e.g. a talking scene set to B-roll): off the timeline, so
+  // list them here – every scene must stay findable
+  const loose = [];
+  if (loose.length) $("#brollBin").innerHTML += ` <span class="muted small">Not in the video:</span> ` + loose.map((x) =>
+    `<button class="bchip warn" data-sel="${x.id}" title="Set to B-roll footage – select it and choose “Part of the video” to bring it back">Scene ${x.no} · B-roll footage${(x.transcript || "").trim() && !x.no_speech ? " · has speech!" : ""}</button>`).join(" ");
+  $$(".bchip", $("#brollBin")).forEach((b) => {
+    if (b.dataset.file) b.addEventListener("pointerdown", chipDown);
+    else b.onclick = () => b.dataset.sel && selectScene(b.dataset.sel);
+  });
+  if (!main.length) { box.innerHTML = `<p class="muted small">No scenes yet.</p>`; STL.blocks = []; return; }
+  const W = Math.max(300, box.clientWidth - 70), STUB = 30, GAP = 2;
+  const kept = main.filter(inVid), total = kept.reduce((a, s) => a + s.est, 0) || 1;
+  const stubs = main.length - kept.length;
+  const pps = Math.max(1, (W - stubs * STUB - main.length * GAP) / total);
+  let x = 0; STL.pps = pps;
+  STL.blocks = main.map((s) => { const w = inVid(s) ? Math.max(6, s.est * pps) : STUB; const b = { s, x, w }; x += w + GAP; return b; });
+  const cardsEff = effCards(main);
+  const thumb = (f) => { const c = bin.find((b) => b.file === f); const t = c ? c.thumb : (P.scenes.find((x) => x.src === f) || {}).thumb; return t ? `background-image:url('${media("thumbs", t)}')` : ""; };
+  // merge runs: B-roll by clip, cards by content
+  const runs = (key) => { const out = []; STL.blocks.forEach((b, i) => { const k = key(b, i); if (!k) return; const last = out[out.length - 1];
+    if (last && last.k === k && last.end === i - 1) { last.w = b.x + b.w - last.x; last.end = i; } else out.push({ k, x: b.x, w: b.w, start: i, end: i, b }); }); return out; };
+  const bRuns = runs((b) => inVid(b.s) && b.s.broll_view ? JSON.stringify([b.s.broll_view.src, b.s.broll_view.where, b.s.broll_view.ok, b.s.broll.where || ""]) : "");
+  STL.bRuns = bRuns;
+  const cRuns = runs((b, i) => inVid(b.s) && cardsEff[i] && cardsEff[i].kind !== "none" && !(b.s.broll_view && b.s.broll_view.where === "full") ? JSON.stringify(cardsEff[i]) : "");
+  const step = tickStep(pps);
+  let ticks = "";
+  for (let t = 0; t <= total + 0.01; t += step) ticks += `<span class="tick" style="left:${tlX(t)}px">${tc(t)}</span>`;
+  box.innerHTML = `
+    <div class="stl-heads"><div class="h ruler"></div><div class="h hastip" data-tip="Footage shown OVER the scenes below while your voice plays. Optional – drag a clip chip onto a scene to add one.">B-roll</div><div class="h main hastip" data-tip="Your scenes in playing order. Drag to reorder, drag an edge to trim, striped = cut.">Video</div>${cardsEff.length ? `<div class="h hastip" data-tip="The top-panel card (title / number / chart) shown during each scene – split layout.">Cards</div>` : ""}</div>
+    <div class="stl-lanes" style="width:${x}px">
+      <div class="lane ruler" data-tip="Time in the edited video. Click to jump there.">${ticks}</div>
+      <div class="lane broll">${bRuns.map((r, ri) => { const v = JSON.parse(r.k); return `<div class="bblk ${v[2] ? "" : "bad"}" data-run="${ri}" style="left:${r.x}px;width:${r.w}px;${thumb(v[0])}" title="${esc(v[0])} – ${v[1] === "full" ? "full screen" : "top panel"}${v[2] ? "" : " – NOT SHOWN (skipped or missing)"}
+Drag = move to other scenes · drag an edge = cover more / fewer scenes · × = remove"><i class="hd l"></i><span>🎞 ${esc(v[0])} · ${v[1] === "full" ? "full" : "top"}</span><b class="bx" title="Remove this B-roll">×</b><i class="hd r"></i></div>`; }).join("")}</div>
+      <div class="lane main">${STL.blocks.map((b) => `<div class="sblk ${isBroll(b.s) ? "cut brs" : b.s.keep ? "" : "cut"} ${b.s.id === selected ? "sel" : ""}" data-id="${b.s.id}" style="left:${b.x}px;width:${b.w}px;${inVid(b.s) ? `background-image:url('${media("thumbs", b.s.thumb)}')` : ""}" title="Scene ${b.s.no} · ${isBroll(b.s) ? "B-roll footage, not played – drag it to a place in the video to play it there" : b.s.keep ? `${b.s.est}s` : "cut – click to select, Del to restore"}">
+        ${isBroll(b.s) ? `${b.s.no}🎞` : b.s.keep ? `<i class="hd l"></i><span class="no">${b.s.no}</span>${b.w > 54 ? `<span class="du">${b.s.est}s</span>` : ""}<i class="hd r"></i>` : `${b.s.no}✂${b.s.broll_view ? "🎞" : ""}`}</div>`).join("")}</div>
+      ${cardsEff.length ? `<div class="lane cards">${cRuns.map((r) => `<div class="cblk" style="left:${r.x}px;width:${r.w}px" title="${esc(cardLabel(JSON.parse(r.k)))}">${esc(cardLabel(JSON.parse(r.k)))}</div>`).join("")}</div>` : ""}
+      <div class="stl-head" id="stlHead"></div>
+    </div>`;
+  const nCut = main.length - kept.length, nBr = P.scenes.filter(isBroll).length, nSk = P.scenes.filter((x) => x.src_skipped && !isBroll(x)).length;
+  $("#stlInfo").textContent = `${P.scenes.length} scenes: ${kept.length} in the video (≈ ${fmt(total)})` +
+    (nCut ? ` · ${nCut} cut` : "") + (nBr ? ` · ${nBr} B-roll footage` : "") + (nSk ? ` · ${nSk} in skipped clips` : "") +
+    (bRuns.length ? ` · ${bRuns.length} cutaway${bRuns.length > 1 ? "s" : ""}` : "");
+  $$(".bblk", box).forEach((b) => b.addEventListener("pointerdown", bDown));
+  $(".lane.ruler", box).onclick = (e) => seekEdit((e.clientX - $(".stl-lanes", box).getBoundingClientRect().left));
+  $$(".sblk", box).forEach((el) => el.addEventListener("pointerdown", stlDown));
+  drawStlHead();
+}
+function renderTimes(fresh) {  // id -> [start, dur] measured in the rendered file (null if unknown / stale)
+  const pv = P && latestPreview();
+  if (!pv || !pv.times || (fresh && pv.sig !== P.edit_sig)) return null;
+  return new Map(pv.times.map(([id, a, d]) => [id, [a, d]]));
+}
+const sAt = (s, m) => (m && m.has(s.id) ? m.get(s.id)[0] : s.start_at);
+const sDur = (s, m) => (m && m.has(s.id) ? m.get(s.id)[1] : s.est);
+function tlX(t) {  // edited time -> px (piecewise: blocks have minimum widths)
+  const m = renderTimes(true);
+  for (const b of STL.blocks) if (inVid(b.s) && t <= sAt(b.s, m) + sDur(b.s, m) + 1e-6) return b.x + Math.max(0, t - sAt(b.s, m)) / (sDur(b.s, m) || 1) * b.w;
+  const l = STL.blocks[STL.blocks.length - 1]; return l ? l.x + l.w : 0;
+}
+function seekEdit(px) {
+  const b = STL.blocks.find((k) => px >= k.x && px <= k.x + k.w + 2) || STL.blocks[STL.blocks.length - 1]; if (!b) return;
+  if (!inVid(b.s)) return selectScene(b.s.id, false);
+  const frac = Math.min(1, Math.max(0, (px - b.x) / b.w));
+  if (playerMode === "preview" && latestPreview()) { const m = renderTimes(false); selected = b.s.id; renderDetail(); player.currentTime = sAt(b.s, m) + frac * sDur(b.s, m); drawStlHead(); return; }
+  selectScene(b.s.id, false);
+  const go = () => { player.currentTime = b.s.in + frac * (b.s.out - b.s.in); };
+  if (player.readyState >= 1) setTimeout(go, 50); else player.addEventListener("loadedmetadata", go, { once: true });
+}
+function drawStlHead() {
+  const h = $("#stlHead"); if (!h || !P) return;
+  let t = null;
+  if (playerMode === "preview") t = player.currentTime;
+  else { const s = curScene(); if (s && s.keep && !isBroll(s) && STL.blocks.some((b) => b.s.id === s.id)) t = s.start_at + Math.min(s.est, Math.max(0, (player.currentTime - s.in) / (s.speed || 1))); }
+  h.style.display = t == null ? "none" : "";
+  if (t != null) h.style.transform = `translateX(${tlX(t)}px)`;
+}
+$("#player").addEventListener("timeupdate", drawStlHead);  // (`player` const is declared further down)
+$("#player").addEventListener("seeked", drawStlHead);
+function stlDown(e) {
+  const el = e.currentTarget, id = el.dataset.id, b = STL.blocks.find((k) => k.s.id === id);
+  if (!b || e.button !== 0) return;
+  const edge = e.target.classList.contains("hd") ? (e.target.classList.contains("l") ? "l" : "r") : null;
+  STL.drag = { id, b, el, edge, x0: e.clientX, moved: false };
+  el.setPointerCapture(e.pointerId);
+  el.onpointermove = stlMove; el.onpointerup = stlUp; el.onpointercancel = () => { STL.drag = null; renderSceneTimeline(); };
+}
+function stlMove(e) {
+  const d = STL.drag; if (!d) return;
+  const dx = e.clientX - d.x0;
+  if (!d.moved && Math.abs(dx) < 4) return;
+  d.moved = true;
+  const s = d.b.s, sp = s.speed || 1;
+  if (d.edge) {  // trim: px -> source seconds, clamped to the scene's original range and a 0.3 s minimum
+    const ds = dx / STL.pps * sp;
+    if (d.edge === "l") { d.val = Math.min(s.out - 0.3, Math.max(s.orig_in ?? s.in, s.in + ds)); d.el.style.left = `${d.b.x + (d.val - s.in) / sp * STL.pps}px`; d.el.style.width = `${Math.max(6, d.b.w - (d.val - s.in) / sp * STL.pps)}px`; }
+    else { d.val = Math.max(s.in + 0.3, Math.min(s.orig_out ?? s.out, s.out + ds)); d.el.style.width = `${Math.max(6, d.b.w + (d.val - s.out) / sp * STL.pps)}px`; }
+    const diff = d.edge === "l" ? d.val - s.in : s.out - d.val;
+    $("#stlInfo").textContent = `${d.edge === "l" ? "Start" : "End"}: ${diff >= 0 ? "trim" : "extend"} ${Math.abs(diff).toFixed(2)} s`;
+  } else {
+    // dragged UP onto the B-roll lane = make it B-roll footage (handled on release)
+    const over = document.elementFromPoint(e.clientX, e.clientY);
+    d.toBroll = !!(over && over.closest && over.closest("#stl .lane.broll"));
+    const dy = d.toBroll ? -(d.el.offsetTop + d.el.offsetHeight) + 10 : 0;
+    d.el.style.transform = `translate(${dx}px, ${dy}px)`; d.el.classList.add("dragging");
+    d.el.classList.toggle("tobroll", d.toBroll);
+    $("#stl .lane.broll").classList.toggle("dropzone", d.toBroll);
+    if (d.toBroll) { $$(".sblk", $("#stl")).forEach((x) => x.classList.remove("dropl")); $("#stlInfo").textContent = `Scene ${d.b.s.no} → B-roll footage (leaves the video, its picture can cover other scenes)`; return; }
+    const cx = d.b.x + d.b.w / 2 + dx;
+    d.before = (STL.blocks.find((k) => k.s.id !== d.id && k.x + k.w / 2 > cx) || {}).s;
+    $$(".sblk", $("#stl")).forEach((x) => x.classList.toggle("dropl", d.before && x.dataset.id === d.before.id));
+  }
+}
+async function stlUp() {
+  const d = STL.drag; STL.drag = null; if (!d) return;
+  const s = d.b.s;
+  if (!d.moved) { selectScene(s.id); return; }
+  const bl = $("#stl .lane.broll"); if (bl) bl.classList.remove("dropzone");
+  try {
+    if (!d.edge && d.toBroll && isBroll(s)) { /* already B-roll */ }
+    else if (!d.edge && isBroll(s)) {
+      // a B-roll scene dragged to a place in the video = it plays there as a normal scene (one undo step)
+      const used = usedByFile(s.src);
+      if (used.length && !confirm(`“${s.src}” now covers ${rangeTxt(used)}.
+Playing it as its own scene removes that B-roll (the same footage would show twice). Continue?`)) { renderSceneTimeline(); return; }
+      const r = await api(`/api/projects/${PID}/broll/insert`, { method: "POST", body: { file: s.src, before: d.before ? d.before.id : "end" } });
+      toast(`${r.reply} (Undo reverts it)`); await refresh(true);
+    } else if (!d.edge && d.toBroll) {
+      if (!s.keep) toast(`Scene ${s.no} is cut – restore it first.`, true);
+      else if ((s.transcript || "").trim() && !s.no_speech &&
+               !confirm(`Scene ${s.no} has speech:\n“${(s.caption_view ?? s.transcript).split(/\s+/).slice(0, 10).join(" ")}…”\n\nAs B-roll footage it LEAVES the video – these words won't be heard. Continue?`)) { /* cancelled */ }
+      else await sendCommand(s.id, "role broll");
+    } else if (d.edge && d.val != null) {
+      await sendCommand(s.id, d.edge === "l" ? `trim start to ${r2(d.val - (s.orig_in ?? s.in))}` : `trim end to ${r2((s.orig_out ?? s.out) - d.val)}`);
+    } else if (!d.edge) {
+      // drop position among VIDEO scenes -> the scene id it goes before in the full list (B-roll scenes keep their place)
+      const to = d.before ? d.before.id : "end";
+      await api(`/api/projects/${PID}/scene/${s.id}/move`, { method: "POST", body: { to } });
+      await refresh(true);
+    }
+  } catch (err) { toast(err.message, true); }
+  renderSceneTimeline();
+}
+/* ---- B-roll on the timeline: drag a clip chip onto a scene, drag a B-roll block to move it, drag its edge to cover
+   more/fewer scenes, × removes. Snaps to whole scenes (what the render uses) – split a scene (S) for finer placement.
+   Every drop is ONE server call = one undo step. */
+function blockAt(clientX) {
+  const lanes = $("#stl .stl-lanes"); if (!lanes || !STL.blocks.length) return -1;
+  const px = clientX - lanes.getBoundingClientRect().left;
+  let best = 0, bd = Infinity;
+  STL.blocks.forEach((b, i) => { const d = px < b.x ? b.x - px : px > b.x + b.w ? px - b.x - b.w : 0; if (d < bd) { bd = d; best = i; } });
+  return best;
+}
+function keptFrom(i0, n) {  // the next n scenes that are in the video, starting at block i0 (cut scenes skipped)
+  const out = [];
+  for (let i = Math.max(0, i0); i < STL.blocks.length && out.length < n; i++) if (inVid(STL.blocks[i].s)) out.push(i);
+  return out;
+}
+function usedByFile(f) { return P.scenes.filter((x) => x.keep && x.role !== "broll" && x.broll && x.broll.src === f).map((x) => x.no); }
+function showInsLine(px) {
+  let l = $("#stl .insline");
+  if (px == null) { if (l) l.remove(); return; }
+  if (!l) { l = document.createElement("div"); l.className = "insline"; $("#stl .stl-lanes").appendChild(l); }
+  l.style.left = `${px}px`;
+}
+function markTargets(idx) { $$("#stl .sblk").forEach((el, i) => el.classList.toggle("droptgt", idx.includes(i))); }
+async function sendBroll(set) {
+  try {
+    const r = await api(`/api/projects/${PID}/broll`, { method: "POST", body: { set } });
+    if (!r.unchanged) toast(`${r.reply} (Undo reverts it)`);
+    await refresh(true);
+  } catch (e) { toast(e.message, true); }
+  renderSceneTimeline();
+}
+function chipDown(e) {
+  if (e.button !== 0) return;
+  const chip = e.currentTarget, file = chip.dataset.file, x0 = e.clientX, y0 = e.clientY;
+  const isBclip = (P.broll_clips || []).some((c) => c.file === file);  // only B-roll clips can be inserted as scenes
+  let ghost = null, tgt = null, insertAt = null;
+  chip.setPointerCapture(e.pointerId);
+  STL.busy = true;
+  chip.onpointermove = (ev) => {
+    if (!ghost && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) return;
+    if (!ghost) { ghost = document.createElement("div"); ghost.className = "dragghost"; ghost.textContent = `🎞 ${file}`; document.body.appendChild(ghost); }
+    ghost.style.transform = `translate(${ev.clientX + 12}px, ${ev.clientY + 8}px)`;
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const blk = el && el.closest ? el.closest("#stl .sblk") : null;
+    const inLane = el && el.closest ? el.closest("#stl .lane.main") : null;
+    tgt = blk ? STL.blocks.findIndex((b) => b.s.id === blk.dataset.id) : -1;
+    // near a scene's EDGE (or in a gap / past the end) = insert as its own scene; middle = cover that scene
+    insertAt = null;
+    if (isBclip && (blk || inLane)) {
+      const lanes = $("#stl .stl-lanes").getBoundingClientRect(), px = ev.clientX - lanes.left;
+      if (tgt >= 0) {
+        const b = STL.blocks[tgt], frac = (px - b.x) / b.w, edge = Math.min(18, b.w * 0.25);
+        if (px - b.x < edge || frac < 0.22) insertAt = tgt; else if (b.x + b.w - px < edge || frac > 0.78) insertAt = tgt + 1;
+      } else insertAt = blockAt(ev.clientX) + (px > (STL.blocks[blockAt(ev.clientX)] || { x: 0 }).x ? 1 : 0);
+    }
+    if (insertAt != null) {
+      tgt = -1;
+      const b = STL.blocks[insertAt], last = STL.blocks[STL.blocks.length - 1];
+      showInsLine(b ? b.x - 2 : last.x + last.w + 1);
+      ghost.textContent = `➕ Insert “${file}” as its own scene ${b ? `before scene ${b.s.no}` : "at the end"}`;
+    } else {
+      showInsLine(null);
+      ghost.textContent = tgt >= 0 ? `🎞 Cover scene ${STL.blocks[tgt].s.no} with “${file}” (voice keeps playing)` : `🎞 ${file}`;
+    }
+    markTargets(tgt >= 0 ? [tgt] : []);
+    ghost.classList.toggle("ok", tgt >= 0 || insertAt != null);
+  };
+  const end = () => {
+    chip.onpointermove = chip.onpointerup = chip.onpointercancel = null;
+    STL.busy = false;
+    markTargets([]);
+    showInsLine(null);
+    if (!ghost) { if (chip.dataset.sel) selectScene(chip.dataset.sel); return; }
+    ghost.remove();
+    if (insertAt != null) {
+      const b = STL.blocks[insertAt];
+      const used = usedByFile(file);
+      if (used.length && !confirm(`“${file}” now covers ${rangeTxt(used)}.\nAs its own scene that B-roll is removed (the same footage would show twice). Continue?`)) return;
+      return api(`/api/projects/${PID}/broll/insert`, { method: "POST", body: { file, before: b ? b.s.id : "end" } })
+        .then((r) => { toast(`${r.reply} (Undo reverts it)`); return refresh(true); })
+        .catch((err) => toast(err.message, true)).then(renderSceneTimeline);
+    }
+    if (tgt == null || tgt < 0) return toast("Drop the clip ON a scene (cover it) or on a scene's edge (insert it as its own scene).", true);
+    const s = STL.blocks[tgt].s;
+    if (!inVid(s)) return toast(`Scene ${s.no} ${isBroll(s) ? "is B-roll footage (not played)" : "is cut – restore it first"} – drop on another scene.`, true);
+    if (s.src === file) return toast(`Scene ${s.no} comes from that clip – a scene can't cover itself.`, true);
+    const old = s.broll && s.broll.src !== file ? ` (replaces ${s.broll.src})` : "";
+    sendBroll({ [s.id]: { src: file } }).then(() => old && toast(`B-roll on scene ${s.no}${old}.`));
+  };
+  chip.onpointerup = end; chip.onpointercancel = () => { if (ghost) ghost.remove(); ghost = null; tgt = -1; insertAt = null; end(); };
+}
+function bDown(e) {
+  if (e.button !== 0) return;
+  const el = e.currentTarget, run = STL.bRuns[+el.dataset.run]; if (!run) return;
+  const runIdx = []; for (let i = run.start; i <= run.end; i++) runIdx.push(i);
+  const first = STL.blocks[run.start].s, raw = first.broll || {};
+  const entry = (withAt) => ({ src: raw.src, ...(raw.where ? { where: raw.where } : {}), ...(withAt && raw.at != null ? { at: raw.at } : {}) });
+  if (e.target.classList.contains("bx")) {  // remove the whole run
+    e.stopPropagation();
+    return sendBroll(Object.fromEntries(runIdx.map((i) => [STL.blocks[i].s.id, null])));
+  }
+  const mode = e.target.classList.contains("hd") ? (e.target.classList.contains("l") ? "l" : "r") : "move";
+  const x0 = e.clientX; let moved = false, newIdx = runIdx;
+  el.setPointerCapture(e.pointerId);
+  STL.busy = true;
+  const span = (idx) => { const a = STL.blocks[idx[0]], b = STL.blocks[idx[idx.length - 1]]; return [a.x, b.x + b.w - a.x]; };
+  el.onpointermove = (ev) => {
+    const dx = ev.clientX - x0;
+    if (!moved && Math.abs(dx) < 4) return;
+    moved = true;
+    if (mode === "move") {
+      const i0 = blockAt(run.x + dx + 4 + $("#stl .stl-lanes").getBoundingClientRect().left);
+      newIdx = keptFrom(i0, runIdx.length);
+      el.style.transform = `translateX(${dx}px)`; el.classList.add("dragging");
+    } else {
+      const i = blockAt(ev.clientX);
+      const lo = mode === "l" ? Math.min(i, run.end) : run.start, hi = mode === "r" ? Math.max(i, run.start) : run.end;
+      newIdx = []; for (let k = lo; k <= hi; k++) if (inVid(STL.blocks[k].s)) newIdx.push(k);
+      if (newIdx.length) { const [l, w] = span(newIdx); el.style.left = `${l}px`; el.style.width = `${w}px`; }
+    }
+    markTargets(newIdx);
+    $("#stlInfo").textContent = newIdx.length ? `B-roll → ${rangeTxt(newIdx.map((i) => STL.blocks[i].s.no))}` : "";
+  };
+  el.onpointerup = () => {
+    el.onpointermove = el.onpointerup = el.onpointercancel = null;
+    STL.busy = false;
+    markTargets([]);
+    if (!moved) return selectScene(first.id);
+    if (!newIdx.length || newIdx.join() === runIdx.join()) return renderSceneTimeline();
+    const set = {};
+    runIdx.forEach((i) => { if (!newIdx.includes(i)) set[STL.blocks[i].s.id] = null; });
+    newIdx.forEach((i, k) => {
+      const s = STL.blocks[i].s;
+      if (runIdx.includes(i) && mode !== "move") return;  // resize: scenes already covered stay as they are
+      if (s.src === raw.src) return;                       // never cover a scene with its own clip
+      set[s.id] = entry(k === 0);
+    });
+    const over = newIdx.filter((i) => !runIdx.includes(i)).map((i) => STL.blocks[i].s).filter((s) => s.broll && s.broll.src !== raw.src);
+    if (over.length && !confirm(`Scene ${over.map((s) => s.no).join(", ")} already has other B-roll – replace it?`)) return renderSceneTimeline();
+    sendBroll(set);
+  };
+  el.onpointercancel = () => { el.onpointermove = el.onpointerup = null; STL.busy = false; markTargets([]); renderSceneTimeline(); };
+}
+window.addEventListener("resize", () => { if ($("#tab-scenes").classList.contains("active")) renderSceneTimeline(); });
+document.addEventListener("keydown", (e) => {
+  if (!$("#tab-scenes").classList.contains("active") || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.target.isContentEditable) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); $("#undoBtn").click(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const s = curScene();
+  if (e.code === "Space") { if (e.target.tagName === "VIDEO") return;  // the player's own controls already toggle it
+    e.preventDefault(); player.paused ? player.play().catch(() => {}) : player.pause(); }
+  else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    e.preventDefault();
+    const i = P.scenes.findIndex((x) => x.id === selected), j = i + (e.key === "ArrowRight" ? 1 : -1);
+    if (P.scenes[j]) selectScene(P.scenes[j].id);
+  }
+  else if (e.key === "s" || e.key === "S") $("#splitHere").click();
+  // Delete only – not Backspace: too easy to hit by accident
+  else if (e.key === "Delete" && s && !isBroll(s)) { e.preventDefault(); sendCommand(s.id, s.keep ? "cut" : "keep"); }
+  else if (e.key === "i" || e.key === "I") trimAtPlayhead("i");
+  else if (e.key === "o" || e.key === "O") trimAtPlayhead("o");
+});
 function cmdHtml(c) {
   const who = c.status === "claude" ? `<span class="by-claude">waiting for Claude</span>` : c.by === "claude" ? `<span class="by-claude">Claude</span>` : c.status === "cancelled" ? "cancelled" : "instant";
   return `<div class="cmd ${c.status}">
@@ -858,14 +1432,20 @@ async function sendCommand(scene, text) {
     const r = await api(`/api/projects/${PID}/command`, { method: "POST", body: { scene, text } });
     const msg = [...r.replies.map((x) => x.replace(/^!/, "")), ...(r.queued.length ? [`Sent to Claude: “${r.queued.join("; ")}”`] : [])].join("  ·  ");
     toast(msg, r.replies.some((x) => x.startsWith("!")));
-    await refresh(true); loadPlayer(false);
+    await refresh(true); loadPlayer(false); autoPreviewTick();
   } catch (e) { toast(e.message, true); }
 }
 $("#sceneSend").onclick = () => { const s = curScene(); if (!s) return toast("Select a scene first.", true); sendCommand(s.id, $("#sceneCmd").value).then(() => ($("#sceneCmd").value = "")); };
 $("#sceneCmd").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#sceneSend").click(); });
 $("#globalSend").onclick = () => sendCommand(null, $("#globalCmd").value).then(() => ($("#globalCmd").value = ""));
 $("#globalCmd").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#globalSend").click(); });
-$$("#quickChips button").forEach((b) => (b.onclick = () => { const s = curScene(); if (s) sendCommand(s.id, b.textContent); }));
+const CHIP_TIP = { "cut": "Remove the selected scene from the video.", "keep": "Bring a cut scene back.",
+  "trim start 0.5": "Remove half a second from the start of the scene.", "trim end 0.5": "Remove half a second from the end of the scene.",
+  "speed 1.25": "Play the scene 25 % faster.", "slow mo": "Play the scene in slow motion.", "mute": "Silence the scene's sound.",
+  "zoom in": "Punch-in zoom (1.2×) on the scene.", "remove silences": "Cut the pauses out of the scene (jump cuts).",
+  "captions off": "Hide captions in this scene.", "remove text": "Remove the on-screen text from this scene." };
+$$("#quickChips button").forEach((b) => { b.dataset.tip = CHIP_TIP[b.textContent] || "Send this command to the selected scene.";
+  b.onclick = () => { const s = curScene(); if (s) sendCommand(s.id, b.textContent); }; });
 $("#undoBtn").onclick = () => api(`/api/projects/${PID}/undo`, { method: "POST" }).then((r) => { toast(r.ok ? "Undone." : "Nothing to undo."); refresh(true); });
 $("#sbBtn").onclick = () => window.open(`/storyboard/${PID}`, "_blank");
 $("#previewBtn").onclick =() => api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "preview" } }).then(() => toast("Rendering preview… (only changed scenes are re-rendered)")).catch((e) => toast(e.message, true));
@@ -878,48 +1458,95 @@ let curSrcUrl = "";
 function latestPreview() { const r = P?.renders || []; return r.length ? r[r.length - 1] : null; }
 function renderUrl(r) { return r.kind === "final" ? media("exports", r.file) : media("work", r.file); }
 function previewOffset(id) {
-  let t = 0; for (const s of P.scenes) { if (s.id === id) return t; if (s.keep) t += s.est; } return 0;
+  const m = renderTimes(false); if (m && m.has(id)) return m.get(id)[0];
+  let t = 0; for (const s of P.scenes) { if (s.id === id) return t; if (inVid(s) && !s.src_skipped) t += s.est; } return 0;
 }
-function loadPlayer(play) {
+function loadPlayer(play, keepTime = null) {
   const s = curScene(); if (!s) return;
   let url, start;
   if (playerMode === "preview") {
     const pv = latestPreview();
     if (!pv) { $("#playerInfo").textContent = "Nothing rendered yet — click Render preview."; return; }
-    url = renderUrl(pv); start = s.keep ? previewOffset(s.id) : 0;
+    url = renderUrl(pv); start = inVid(s) ? previewOffset(s.id) : 0;
     const stale = pv.sig && P.edit_sig && pv.sig !== P.edit_sig;
     $("#playerInfo").innerHTML = `${pv.kind === "final" ? "Final export" : "Preview"} ${esc(pv.file)} · ${fmt(pv.duration)} · ${pv.created.slice(11, 16)}${s.keep ? "" : " · this scene is cut"}` +
-      (stale || !pv.sig ? ` · <span class="stale" title="Scenes, clips or settings changed after this render">⚠ edited since this render – click Render preview</span>` : "");
-    player.playbackRate = 1; player.muted = false;
+      (stale || !pv.sig ? ` · <span class="stale" data-tip="Scenes, clips or settings changed after this render – this video does not show them yet.">⚠ ${AUTO.on ? "edited – updating preview…" : "edited since this render – click Render preview"}</span>` : "");
+    setRate(1, false);
   } else {
     const src = P.sources.find((x) => x.file === s.src);
     url = src && src.proxy ? media("proxy", src.proxy) : media("raw", s.src); start = s.in;
-    player.playbackRate = s.speed || 1; player.muted = !!s.mute;
-    $("#playerInfo").textContent = `Source · speed ${s.speed || 1}x${s.mute ? " · muted" : ""}`;
+    setRate(s.speed || 1, !!s.mute);
+    $("#playerInfo").textContent = `Original footage · plays at the scene's speed ${s.speed || 1}×${s.mute ? " · muted" : ""} · captions, zoom and cards show in “Edited video”`;
   }
-  const go = () => { player.currentTime = start; if (play) player.play().catch(() => {}); };
+  const rate = player.defaultPlaybackRate;
+  const go = () => { player.playbackRate = rate; player.currentTime = keepTime != null ? Math.min(keepTime, Math.max(0, (player.duration || 1e9) - 0.1)) : start; if (play) player.play().catch(() => {}); };
   if (curSrcUrl !== url) { curSrcUrl = url; player.src = url; player.addEventListener("loadedmetadata", go, { once: true }); }
   else go();
 }
+let lastT = 0;
+player.addEventListener("seeking", () => { lastT = player.currentTime; });
 player.addEventListener("timeupdate", () => {
-  if (playerMode !== "source") return;
+  const t = player.currentTime, prev = lastT; lastT = t;
+  if (playerMode !== "source" || player.paused) return;
   const s = curScene(); if (!s) return;
-  if (player.currentTime >= s.out - 0.04) {
+  if (prev < s.out - 0.04 && t >= s.out - 0.04 && t - prev < 1) {
     if ($("#loopScene").checked) player.currentTime = s.in; else player.pause();
   }
 });
 let lastRenderFile = null;  // null = page just loaded (don't auto-switch on the first poll)
+function setRate(r, muted) { player.defaultPlaybackRate = r; player.playbackRate = r; player.muted = muted; }
+// a speed / mute change on the selected scene applies to the Original-footage player at once (no reload)
+function syncSourcePlayer() {
+  if (playerMode !== "source") return;
+  const s = curScene(); if (!s) return;
+  if (player.playbackRate !== (s.speed || 1) || player.muted !== !!s.mute) {
+    setRate(s.speed || 1, !!s.mute);
+    $("#playerInfo").textContent = `Original footage · plays at the scene's speed ${s.speed || 1}×${s.mute ? " · muted" : ""} · captions, zoom and cards show in “Edited video”`;
+  }
+}
+/* Auto-update preview: every edit changes P.edit_sig; when it differs from the newest render, render again
+   (only changed scenes are re-encoded, so a speed/caption change takes seconds). Debounced so a burst of clicks is
+   ONE render; waits while any job runs or a drag is in progress; never retries the same edit twice (a failing
+   render must not loop). The server also drops a second waiting preview. */
+const AUTO = { on: (() => { try { return localStorage.getItem("cve_autoprev") !== "0"; } catch (e) { return true; } })(),
+  timer: null, timerSig: null, lastReq: null };
+function autoPreviewTick() {
+  const pv = P && latestPreview(), sig = P && P.edit_sig;
+  const want = AUTO.on && PID && sig && P.scenes.some((x) => inVid(x) && !x.src_skipped) && P.sources.some((x) => x.analyzed)
+    && !(pv && pv.sig === sig) && AUTO.lastReq !== sig;
+  if (!want) { clearTimeout(AUTO.timer); AUTO.timerSig = null; return; }
+  const j = P.job || {};
+  if (j.status === "running" || j.status === "queued" || STL.drag || STL.busy) return;  // checked again in 1 s
+  if (AUTO.timerSig === sig) return;
+  clearTimeout(AUTO.timer); AUTO.timerSig = sig;
+  AUTO.timer = setTimeout(() => {
+    AUTO.timerSig = null;
+    const jj = P.job || {};
+    if (P.edit_sig !== sig || jj.status === "running" || jj.status === "queued") return;
+    AUTO.lastReq = sig;
+    api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "preview" } }).then(() => refresh(true)).catch(() => {});
+  }, 1500);
+}
+setInterval(() => { if (P) { autoPreviewTick(); syncSourcePlayer(); } }, 1000);
+function reloadPreview() {  // new render while watching "Edited video"
+  const playing = !player.paused;
+  curSrcUrl = ""; loadPlayer(playing, playing ? player.currentTime : null);
+}
 function showRendered() {
   playerMode = "preview";
-  $$(".seg button").forEach((x) => x.classList.toggle("active", x.dataset.mode === "preview"));
+  $$(".player-bar .seg button").forEach((x) => x.classList.toggle("active", x.dataset.mode === "preview"));
   curSrcUrl = ""; loadPlayer(false);
 }
-$$(".seg button").forEach((b) => (b.onclick = () => {
-  playerMode = b.dataset.mode; $$(".seg button").forEach((x) => x.classList.toggle("active", x === b)); curSrcUrl = ""; loadPlayer(true);
+$$(".player-bar .seg button").forEach((b) => (b.onclick = () => {
+  playerMode = b.dataset.mode; $$(".player-bar .seg button").forEach((x) => x.classList.toggle("active", x === b)); curSrcUrl = ""; loadPlayer(true);
 }));
+{
+  const cb = $("#autoPrev");
+  if (cb) { cb.checked = AUTO.on; cb.onchange = () => { AUTO.on = cb.checked; AUTO.lastReq = null; try { localStorage.setItem("cve_autoprev", cb.checked ? "1" : "0"); } catch (e) { /* private mode */ } autoPreviewTick(); loadPlayer(false); }; }
+}
 $("#splitHere").onclick = () => {
   const s = curScene(); if (!s) return;
-  if (playerMode !== "source") return toast("Switch to “Source scene” to split.", true);
+  if (playerMode !== "source") return toast("Click “Original footage” under the player first – splits are made on the original clip.", true);
   sendCommand(s.id, `split at ${(player.currentTime - s.in).toFixed(2)}`);
 };
 

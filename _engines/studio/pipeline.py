@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 import cards
+import commands
 import core
 import hinglish
 from core import FFMPEG, FFPROBE, YTDLP
@@ -477,6 +478,19 @@ def mark_no_speech(data: dict, words_by_src: dict) -> list[str]:
     return off
 
 
+def update_speech_flag(s: dict, words: list[dict], src: dict | None) -> None:
+    """Re-check 'is anyone speaking' after a split / trim changed the scene's range (a split often leaves a silent
+    tail where whisper invents words). Only AUTOMATIC caption choices follow; an explicit on/off is kept."""
+    sw = words_in(words or [], s["in"], s["out"])
+    silent = (src or {}).get("speech") is False or not is_speech(len(sw), s["out"] - s["in"])
+    s["no_speech"] = silent
+    if silent and s.get("captions") is None:
+        s["captions"], s["captions_auto_off"] = False, True
+    elif not silent and s.get("captions_auto_off"):
+        s.pop("captions_auto_off", None)
+        s["captions"] = None
+
+
 def place_scenes(scenes: list[dict], new: list[dict], src_file: str, order: list[str]) -> list[dict]:
     """Put a clip's (re)analyzed scenes into the timeline WITHOUT disturbing the user's arrangement:
     re-analysis replaces the clip's scenes where its first old scene was; a new clip goes after the last scene of
@@ -615,12 +629,20 @@ def _analyze_one(pid: str, src: dict, tag: str, lang: str, wd: Path) -> None:
             s["speech"] = clip_speech
             # captions off where nobody speaks (the new scenes are all still on "auto")
             mark_no_speech({"scenes": new_scenes, "sources": d["sources"]}, {src_file: words})
+            # a clip with nobody speaking stays a NORMAL scene (plays in the video, captions off). B-roll cutaways are
+            # opt-in only (role broll / drag onto a scene) – the user wants every clip simply on the timeline.
             # replace this source's scenes, keep position of other sources' scenes
             if any(x["src"] == src_file for x in d["scenes"]):
                 core.snapshot(pid, d)  # re-analysis replaces edited scenes – make it undoable
             d["scenes"] = place_scenes(d["scenes"], new_scenes, src_file, [x["file"] for x in d["sources"]])
+            # B-roll clips the user chose (role broll) that nobody uses yet – e.g. after their speaker scenes were
+            # re-analyzed – get placed again
+            placed.extend(commands.auto_broll(d))
             s.pop("error", None)
+        placed: list[str] = []
         core.mutate(pid, fn)
+        for msg in placed:  # job_log takes the project lock itself – never call it inside mutate()
+            core.job_log(pid, f"{tag}: {msg}")
 
 
 def analyze_reference(pid: str, ref_file: str) -> dict:
@@ -753,6 +775,62 @@ def _map_time(rel: float, ranges: list[tuple[float, float]], speed: float) -> fl
     return None
 
 
+def caption_center_y(scene: dict, w: int, h: int, seam_y: int | None) -> int | None:
+    """Pinned caption centre row (\\an5), or None = the look's style alignment (bottom/center/top margins)."""
+    cp = scene.get("cap_pos")  # per-scene override: head | center | below (None = the look's position / the seam)
+    if cp in ("head", "center", "below"):
+        if seam_y:  # split layout: Auto = ON the seam; head = just under it (over the hair/forehead), middle, low
+            lo = h - seam_y
+            return {"head": seam_y + round(lo * 0.16), "center": seam_y + lo // 2, "below": round(h * 0.78)}[cp]  # 78 %: above the Reels/Shorts UI
+        m = round(h * (0.22 if h > w else 0.14))
+        return {"head": m, "center": h // 2, "below": h - m}[cp]
+    return seam_y or None
+
+
+def caption_band(scene: dict, settings: dict, w: int, h: int, seam_y: int | None) -> tuple[int, int]:
+    """Rows the captions can cover – room for TWO lines (long Hindi words wrap). Mirrors write_ass placement."""
+    portrait = h > w
+    fs = round(min(w, h) * (0.085 if portrait else 0.072))
+    line = round(fs * 1.25)
+    y = caption_center_y(scene, w, h, seam_y)
+    if y is not None:
+        return y - line, y + line                 # \an5: lines grow both ways from the centre
+    pos = settings.get("caption_position", "bottom")
+    mv = round(h * (0.20 if portrait else 0.10))
+    if pos == "center":
+        return h // 2 - line, h // 2 + line
+    if pos == "top":
+        return mv, mv + 2 * line                  # \an8: grows downwards from the top margin
+    return h - mv - 2 * line, h - mv              # \an2: grows upwards from the bottom margin
+
+
+def text_layout(text: str, pos: str, w: int, h: int, band: tuple[int, int] | None,
+                top_limit: int) -> tuple[list[str], int, int, bool]:
+    """On-screen text: wrap to the frame width (drawtext never wraps – long text ran off both edges), shrink if it
+    needs more than 3 lines, and keep it OFF the captions: a collision moves the text to the free side (nearest
+    first) inside [top_limit, 80 % of the height]. Returns (lines, font size, top y, moved)."""
+    import textwrap
+    fs, floor = round(min(w, h) * 0.065), round(min(w, h) * 0.038)
+    while True:
+        per = max(6, int(w * 0.86 / (fs * 0.56)))           # ~0.56 em per bold Latin character
+        lines = textwrap.wrap(text, per, break_long_words=True) or [text]
+        if len(lines) <= 3 or fs <= floor:                   # very long text: more lines rather than unreadable
+            break
+        fs = max(floor, round(fs * 0.88))
+    lh = round(fs * 1.55)                                    # line pitch incl. the box border
+    th = lh * len(lines)
+    y = {"top": round(h * 0.08), "center": (h - th) // 2, "bottom": round(h * 0.80) - th}.get(pos, round(h * 0.08))
+    moved = False
+    gap = round(fs * 0.4)
+    if band and y - gap < band[1] and y + th + gap > band[0]:
+        hi = round(h * 0.80) - th
+        cands = sorted([band[0] - gap - th, band[1] + gap], key=lambda c: abs(c - y))
+        ok = [c for c in cands if top_limit <= c <= hi]
+        y = ok[0] if ok else min(max(cands[0], top_limit), hi)
+        moved = True
+    return lines, fs, y, moved
+
+
 def write_ass(path: Path, scene: dict, words: list[dict], ranges, settings: dict, w: int, h: int,
               seam_y: int | None = None, extra: list[str] | None = None) -> bool:
     """Word-highlight captions (+ optional extra events, e.g. split-layout cards). seam_y = centre captions there."""
@@ -808,7 +886,8 @@ def write_ass(path: Path, scene: dict, words: list[dict], ranges, settings: dict
         "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
     lines += extra or []
-    at = f"{{\\an5\\pos({w // 2},{seam_y})}}" if seam_y else ""
+    y = caption_center_y(scene, w, h, seam_y)
+    at = f"{{\\an5\\pos({w // 2},{y})}}" if y is not None else ""
     events = []
     for ch in chunks:
         for i, m in enumerate(ch):
@@ -903,6 +982,12 @@ def green_key(pid: str, src_file: str) -> str | None:
     return key
 
 
+def _broll_chain(fps: int, bw: int, bh: int) -> list[str]:
+    """B-roll footage -> a bw x bh picture (cover + centre crop, like a phone fills the screen)."""
+    return [f"fps={fps}", "setpts=PTS-STARTPTS", f"scale={bw}:{bh}:force_original_aspect_ratio=increase",
+            f"crop={bw}:{bh}", "setsar=1", "format=yuv420p"]
+
+
 def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h: int,
                    preview: bool, nvenc: bool = True) -> Path:
     settings = data["settings"]
@@ -930,7 +1015,7 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     # the source file itself and the logo file – so re-analysis or a replaced logo never reuses a stale segment
     key = _seg_hash({k: v for k, v in scene.items() if k not in ("notes", "transcript", "thumb", "sb_applied")}, relevant, caps,
                     w, h, fps, preview, words_in(words, scene["in"], scene["out"]), st.st_size, st.st_mtime,
-                    logo_sig, "nvenc" if nvenc else "x264", gkey, 8)  # bump when caption/card/render logic changes
+                    logo_sig, "nvenc" if nvenc else "x264", gkey, 11)  # bump when caption/card/render logic changes
     out = seg_dir / f"seg_{key}.mp4"
     if out.exists() and out.stat().st_size > 1000:
         return out
@@ -953,6 +1038,10 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     z = float(scene.get("zoom") or 1.0)
     pre = []  # graph parts that must come BEFORE the main [0:v] chain's consumers (split layout)
     top_h = 0
+    br = scene.get("_broll") if isinstance(scene.get("_broll"), dict) and Path(scene["_broll"].get("file", "")).is_file() else None
+    br_where = (br["where"] if split else "full") if br else None
+    card = None if br_where == "full" else scene.get("_card")  # a full-screen cutaway covers the top-panel card
+    card_on = split and cards.valid(card) and card.get("kind") != "none"
     if split:
         top_h, bot_h = split_heights(h, settings)
         sw0, sh0 = (src or {}).get("width") or 1080, (src or {}).get("height") or 1920
@@ -971,10 +1060,20 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
         t = max(2, round(h * 0.0021)) // 2 * 2
         if gkey:
             pre.append(f"color=c=0x{bg}:s={w}x{bot_h}:r={fps},format=yuv420p,vignette=angle=PI/14[bg]")  # faint: PI/7 turned off-white grey
-        pre.append(f"color=c=0x{panel}:s={w}x{top_h}:r={fps},format=yuv420p[top]")
+        if br_where == "top":
+            # B-roll fills the top panel; under a card it's dimmed with the panel colour so the white text stays readable
+            # exact RGB blend 45 % footage / 55 % panel colour (drawbox@alpha on YUV lost the footage's colour: red -> grey)
+            pr, pg, pb = (int(panel[i:i + 2], 16) if len(panel) == 6 else 30 for i in (0, 2, 4))
+            dim = [f"lutrgb=r='val*0.45+{pr * 0.55:.1f}':g='val*0.45+{pg * 0.55:.1f}':b='val*0.45+{pb * 0.55:.1f}'",
+                   "format=yuv420p"] if card_on else []
+            pre.append(f"[1:v]{','.join(_broll_chain(fps, w, top_h) + dim)}[top]")
+        else:
+            pre.append(f"color=c=0x{panel}:s={w}x{top_h}:r={fps},format=yuv420p[top]")
         speaker_tail = (f"[bg][sp]overlay=0:0:shortest=1[bot];" if gkey else "") + \
                        f"[top][{'bot' if gkey else 'sp'}]vstack=inputs=2:shortest=1," \
                        f"drawbox=x=0:y={top_h - t // 2}:w={w}:h={t}:color=0x{seam}:t=fill,setsar=1"
+        if br_where == "full":  # cutaway hides the whole frame; captions still go on top (post)
+            speaker_tail += f"[comp];[1:v]{','.join(_broll_chain(fps, w, h))}[br];[comp][br]overlay=0:0:shortest=1"
     else:
         if z > 1.001:
             v.append(f"crop=trunc(iw/{z:.3f}/2)*2:trunc(ih/{z:.3f}/2)*2")
@@ -989,7 +1088,7 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
     _ensure_fonts(wd)
     extra = []
     if split:
-        extra = cards.events(scene.get("_card"), w, top_h, out_dur, bool(scene.get("_card_new")),
+        extra = cards.events(card, w, top_h, out_dur, bool(scene.get("_card_new")),
                              settings.get("highlight_color") or "#F97316", "Poppins", _ass_time)
     if (caps and words) or extra:
         ass = wd / f"cap_{sid}.ass"
@@ -997,26 +1096,39 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
                      seam_y=top_h if split else None, extra=extra):
             post.append(f"subtitles=cap_{sid}.ass:fontsdir=fonts")
     if (scene.get("text") or "").strip():
-        (wd / f"txt_{sid}.txt").write_text(scene["text"].strip(), encoding="utf-8")
         font = wd / "title_font.ttf"
         if not font.exists():
             for cand in (r"C:\Windows\Fonts\arialbd.ttf", r"C:\Windows\Fonts\segoeuib.ttf", r"C:\Windows\Fonts\arial.ttf"):
                 if Path(cand).exists():
                     shutil.copy(cand, font)
                     break
-        y = {"top": "h*0.08", "center": "(h-text_h)/2", "bottom": "h*0.80-text_h"}.get(scene.get("text_pos", "top"), "h*0.08")
-        fs = round(min(w, h) * 0.065)
-        post.append(f"drawtext=fontfile=title_font.ttf:textfile=txt_{sid}.txt:expansion=none:fontsize={fs}:fontcolor=white:"
-                    f"box=1:boxcolor=black@0.55:boxborderw={round(fs * 0.35)}:x=(w-text_w)/2:y={y}")
+        # captions really on screen in this scene? then the text must not sit on them
+        cap_on = bool(caps and words and words_in(words, scene["in"], scene["out"]))
+        band = caption_band(scene, settings, w, h, top_h if split else None) if cap_on else None
+        pos = scene.get("text_pos", "top")
+        top_limit = top_h + round(h * 0.02) if split and pos != "top" else round(h * 0.06)  # never onto the card
+        tlines, fs, ty, _moved = text_layout(scene["text"].strip(), pos, w, h, band, top_limit)
+        for i, ln in enumerate(tlines):  # one drawtext per line: each line centred, own box
+            (wd / f"txt_{sid}_{i}.txt").write_text(ln, encoding="utf-8")
+            post.append(f"drawtext=fontfile=title_font.ttf:textfile=txt_{sid}_{i}.txt:expansion=none:fontsize={fs}:"
+                        f"fontcolor=white:box=1:boxcolor=black@0.55:boxborderw={round(fs * 0.35)}:x=(w-text_w)/2:"
+                        f"y={ty + i * round(fs * 1.55) + round(fs * 0.35)}")
 
     inputs = ["-ss", f"{scene['in']:.3f}", "-t", f"{dur:.3f}", "-i", core.raw_dir(pid) / scene["src"]]
+    in_idx = 1
+    if br:
+        # input 1 = the B-roll, looped (a cutaway longer than the clip wraps around); its audio is never used
+        inputs += ["-ss", f"{float(br['at']):.3f}", "-stream_loop", "-1", "-i", Path(br["file"])]
+        in_idx = 2
     if split:
         graph = pre + [f"[0:v]{','.join(v)}[sp]", f"{speaker_tail}{(',' + ','.join(post)) if post else ''}[v0]"]
+    elif br:
+        graph = [f"[0:v]{','.join(v)}[sp0]", f"[1:v]{','.join(_broll_chain(fps, w, h))}[br]",
+                 f"[sp0][br]overlay=0:0:shortest=1{(',' + ','.join(post)) if post else ''}[v0]"]
     else:
         graph = [f"[0:v]{','.join(v + post)}[v0]"]
     vlabel = "v0"
     logo = settings.get("logo")
-    in_idx = 1
     if logo and (core.BRAND / logo).exists():
         inputs += ["-i", core.BRAND / logo]
         lw = round(min(w, h) * 0.16)
@@ -1095,6 +1207,39 @@ def with_effective_cards(scenes: list[dict], settings: dict) -> list[dict]:
         new = bool(eff) and (first or eff != shown)
         out.append(dict(sc, _card=eff, _card_new=new))
         shown, first = eff, False
+    return out
+
+
+def with_broll(pid: str, data: dict, scenes: list[dict], cache: dict) -> list[dict]:
+    """Resolve each scene's B-roll cutaway into _broll = {file, at, where, sig} (part of the segment cache key).
+    Consecutive scenes covered by the same clip CONTINUE its footage (computed here, so splits/trims/reorders never
+    replay the same seconds); a scene's own "at" restarts it. A clip that's skipped or missing is dropped silently
+    (the page warns). Full layout has no top panel -> full screen."""
+    split = data["settings"].get("layout") == "split"
+    out, prev, t_next, lens = [], None, 0.0, {}
+    for sc in scenes:
+        b = sc.get("broll") if isinstance(sc.get("broll"), dict) else None
+        p = core.broll_path(pid, data, b.get("src")) if b else None
+        if not p or b["src"] == sc["src"]:
+            out.append(sc)
+            prev = None
+            continue
+        if b["src"] not in lens:
+            s = core.source_by_file(data, b["src"]) or {}
+            lens[b["src"]] = float(s.get("duration") or probe(p).get("duration") or 0.0)
+        clip_len = lens[b["src"]]
+        at = b.get("at")
+        try:
+            at = float(at) if at is not None else (t_next if prev == b["src"] else 0.0)
+        except (TypeError, ValueError):
+            at = 0.0
+        at = at % clip_len if clip_len > 0.2 else 0.0  # past the end: wrap (the input loops anyway)
+        st = p.stat()
+        where = "top" if split and b.get("where", "top") == "top" else "full"
+        out.append(dict(sc, _broll={"file": str(p), "at": round(at, 3), "where": where, "sig": [st.st_size, st.st_mtime]}))
+        prev = b["src"]
+        words, sil = cache.get(sc["src"], ([], []))
+        t_next = at + estimated_duration(sc, sil, data["settings"])
     return out
 
 
@@ -1226,8 +1371,11 @@ def render_project(pid: str, preview: bool) -> Path:
     data = core.load(pid)
     skipped = {s["file"] for s in data["sources"] if s.get("include") is False}  # clip set to "Skip" in Footage
     scenes = [s for s in data["scenes"] if s.get("keep", True) and s["src"] not in skipped]
+    broll_only = bool(scenes) and all(s.get("role") == "broll" for s in scenes)
+    scenes = [s for s in scenes if s.get("role") != "broll"]  # B-roll scenes only appear as cutaways over others
     if not scenes:
-        raise PipelineError("No scenes are kept – nothing to render." +
+        raise PipelineError("Every kept scene is B-roll – set at least one scene to Role: Speaker." if broll_only else
+                            "No scenes are kept – nothing to render." +
                             (" (Some clips are set to Skip in the Footage tab.)" if skipped else ""))
     missing = sorted({s["src"] for s in scenes if not (core.raw_dir(pid) / s["src"]).is_file()})
     if missing:
@@ -1246,6 +1394,7 @@ def render_project(pid: str, preview: bool) -> Path:
     scenes = [sc for sc in scenes if kept_ranges(sc, cache[sc["src"]][1], data["settings"])]
     if not scenes:
         raise PipelineError("Every kept scene was cut away completely – nothing to render.")
+    scenes = with_broll(pid, data, scenes, cache)
 
     def render_all(nvenc: bool) -> list[Path]:
         segs = []
@@ -1318,11 +1467,21 @@ def render_project(pid: str, preview: bool) -> Path:
     os.replace(tmp_out, out)  # never leave a half-written file in Exports
     dur = probe(out)["duration"]
     _prune_segments(wd, "preview" if preview else "final", segs)
+    # REAL scene start/length in this file (the page's playhead/scene jumps; estimates drift by frames per scene)
+    times, t = [], 0.0
+    for sc, sp in zip(scenes, segs):
+        try:
+            d_ = float(probe(sp)["duration"] or 0)
+        except Exception:  # noqa: BLE001 – timing info is a nicety, never fail a finished render for it
+            times = None
+            break
+        times.append([sc["id"], round(t, 3), round(d_, 3)])
+        t += d_
 
     def fn(d):
         d.setdefault("renders", []).append({"kind": "preview" if preview else "final", "file": out.name,
                                             "created": core.now_iso(), "duration": dur, "size": f"{w}x{h}",
-                                            "sig": sig})
+                                            "sig": sig, "times": times})
         d["renders"] = d["renders"][-30:]
     core.mutate(pid, fn)
     return out
