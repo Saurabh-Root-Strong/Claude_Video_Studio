@@ -229,6 +229,23 @@ Step 'Library: 1,600 3D stickers (Microsoft Fluent Emoji, MIT) + 320 sound effec
 Push-Location $Studio
 try { & $VenvPy library.py setup; if ($LASTEXITCODE -ne 0) { Write-Host '   Library not complete - the studio works without it; run Setup again later.' -ForegroundColor Yellow } else { Ok 'Library ready' } } finally { Pop-Location }
 
+# ---------------------------------------------------------------- voice remover (a reference's background music)
+Step 'Voice remover: Demucs (Meta, MIT) on the CPU, ~400 MB - for "Background audio" of a reference look'
+$Sep = Join-Path $Root '_engines\separate'
+$SepPy = Join-Path $Sep '.venv\Scripts\python.exe'
+try {
+    if (-not (Test-Path $SepPy)) {
+        if ($py[1]) { & $py[0] $py[1] -m venv (Join-Path $Sep '.venv') } else { & $py[0] -m venv (Join-Path $Sep '.venv') }
+    }
+    & $SepPy -m pip install -q --disable-pip-version-check torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+    if ($LASTEXITCODE -ne 0) { throw 'torch' }
+    & $SepPy -m pip install -q --disable-pip-version-check demucs numpy
+    if ($LASTEXITCODE -ne 0) { throw 'demucs' }
+    Ok 'voice remover ready (the model, ~80 MB, downloads on first use)'
+} catch {
+    Write-Host '   Voice remover not installed - everything else works; "Background audio" needs it. Run Setup again later.' -ForegroundColor Yellow
+}
+
 if ($RunTests) {
     Step 'Self-test'
     Push-Location $Studio

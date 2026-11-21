@@ -60,6 +60,7 @@ function switchTab(name) {
   if (name === "footage") { if (typeof renderTimeline === "function" && P) setTimeout(renderTimeline, 0); }
   else if (typeof seqStop === "function") seqStop();
   if (name === "scenes" && P && typeof renderSceneTimeline === "function") setTimeout(renderSceneTimeline, 0);
+  if (name === "media" && typeof loadMedia === "function") loadMedia();
 }
 $$("#tabs button").forEach((b) => (b.onclick = () => switchTab(b.dataset.tab)));
 $$("[data-open]").forEach((b) => (b.onclick = () => api(`/api/projects/${PID}/open`, { method: "POST", body: { which: b.dataset.open } })));
@@ -107,7 +108,8 @@ function renderAll() {
   const refSig = [P.references, P.style_source, P.looks_view, P.commands.filter((c) => c.kind === "ref_style").map((c) => c.ref + c.status)];
   if (changed("refs", refSig)) { renderRefs(); renderLooks(); }
   renderBrief();
-  if (changed("scenes", [P.scenes, P.settings, P.storyboard, P.commands.filter((c) => c.status === "claude").map((c) => c.scene), selected])) renderScenes();
+  renderAutoReport(); renderSuggest();
+  if (changed("scenes", [P.scenes, P.settings, P.storyboard, P.tracks, P.commands.filter((c) => c.status === "claude").map((c) => c.scene), selected])) renderScenes();
   if (changed("detail", [curScene(), P.commands.length, P.commands.map((c) => c.status).join(), P.settings.layout,
     P.settings.remove_silence, P.settings.captions, P.settings.split_ratio, P.broll_clips, P.broll_assets, P.sources.map((s) => s.file)])) renderDetail();
   if (changed("renders", P.renders)) {
@@ -516,6 +518,90 @@ $("#binCard").addEventListener("drop", (e) => {
 });
 setupDrop("#dropRef", "#fileRef", "reference");
 
+/* ---------------- 📁 media (shared by every project) ---------------- */
+let MEDIA = null, MEDIA_OPEN = store.get("cve.medopen") || {};
+const MEDIA_KINDS_ORDER = ["music", "sounds", "stickers", "videos", "transitions", "pictures"];
+async function loadMedia() { try { MEDIA = (await api("/api/media")).kinds; renderMedia(); } catch (e) { toast(e.message, true); } }
+function fmtSize(b) { return b > 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`; }
+function renderMedia() {
+  const box = $("#mediaKinds"); if (!box || !MEDIA) return;
+  const q = ($("#mediaFind").value || "").trim().toLowerCase();
+  const kindOpts = (k) => MEDIA_KINDS_ORDER.filter((x) => x !== k).map((x) => `<option value="${x}">${MEDIA[x].icon} ${esc(MEDIA[x].label)}</option>`).join("");
+  box.innerHTML = MEDIA_KINDS_ORDER.map((k) => {
+    const K = MEDIA[k], items = K.items.filter((it) => !q || it.name.toLowerCase().includes(q));
+    const open = MEDIA_OPEN[k] !== false;
+    const cards = items.map((it) => {
+      const vis = k === "stickers" || k === "pictures" ? `<img loading="lazy" src="${it.url}" alt="">`
+        : k === "videos" || k === "transitions" ? `<video preload="none" muted loop playsinline src="${it.url}" ${it.thumb ? `poster="${it.thumb}"` : ""}></video>`
+        : `<div class="medaud">${k === "music" ? "🎵" : "🔊"}</div>`;
+      const meta = [it.dur ? fmt(it.dur) : "", fmtSize(it.size)].filter(Boolean).join(" · ");
+      return `<div class="medcard" data-k="${k}" data-n="${esc(it.name)}">
+        <div class="medvis" data-play="1" data-tip="${k === "music" || k === "sounds" ? "Click to listen" : k === "videos" || k === "transitions" ? "Hover / click to play" : esc(it.name)}">${vis}</div>
+        <div class="medname" title="${esc(it.name)}">${esc(it.name)}</div><div class="muted small">${meta}</div>
+        <div class="medact">
+          ${["videos", "transitions", "pictures"].includes(k) ? `<button class="btn small" data-use="1" data-tip="Copy into THIS project: then pick it in Cover with B-roll or on a timeline track">+ this project</button>` : ""}
+          <select data-move="1" data-tip="Wrong kind? Move it"><option value="">move…</option>${kindOpts(k)}</select>
+          <button class="btn ghost small" data-del="1" data-tip="Delete (kept in Library/.trash)">🗑</button>
+        </div></div>`; }).join("");
+    return `<div class="card medkind ${open ? "" : "closed"}">
+      <div class="medhead" data-tog="${k}"><b>${K.icon} ${esc(K.label)}</b> <span class="badge">${K.items.length}</span>
+        <span class="muted small">${esc(K.use)}</span><span class="grow"></span>
+        <button class="lnk" data-openk="${k}" data-tip="${esc(K.folder)}">folder</button><span class="chev">${open ? "▾" : "▸"}</span></div>
+      ${open ? (items.length ? `<div class="medgrid">${cards}</div>` : `<div class="muted small medempty">${q ? "Nothing matches." : "Nothing yet – drop files above."}</div>`) : ""}
+    </div>`; }).join("");
+  $$("[data-tog]", box).forEach((h) => (h.onclick = (e) => { if (e.target.closest("button")) return; MEDIA_OPEN[h.dataset.tog] = MEDIA_OPEN[h.dataset.tog] === false; store.set("cve.medopen", MEDIA_OPEN); renderMedia(); }));
+  $$("[data-openk]", box).forEach((b) => (b.onclick = () => api("/api/media/open", { method: "POST", body: { kind: b.dataset.openk } })));
+  $$(".medcard", box).forEach((c) => {
+    const k = c.dataset.k, n = c.dataset.n;
+    const v = $("video", c); if (v) { c.onmouseenter = () => v.play().catch(() => {}); c.onmouseleave = () => { v.pause(); v.currentTime = 0; }; }
+    $("[data-play]", c).onclick = () => {
+      if (k === "music" || k === "sounds") { const it = MEDIA[k].items.find((x) => x.name === n); if (window._medAudio) window._medAudio.pause(); window._medAudio = new Audio(it.url); window._medAudio.play().catch(() => {}); }
+      else if (v) { v.muted = false; v.currentTime = 0; v.play().catch(() => {}); }
+    };
+    const use = $("[data-use]", c); if (use) use.onclick = async () => {
+      if (!PID) return toast("Open a project first.", true);
+      try { const r = await api(`/api/projects/${PID}/media/use`, { method: "POST", body: { kind: k, name: n } }); toast(r.reply); refresh(true); } catch (e) { toast(e.message, true); } };
+    $("[data-move]", c).onchange = async (e) => { const to = e.target.value; if (!to) return;
+      try { const r = await api("/api/media/move", { method: "POST", body: { kind: k, name: n, to } }); toast(r.reply); LIBCAT = null; loadMedia(); } catch (er) { toast(er.message, true); e.target.value = ""; } };
+    $("[data-del]", c).onclick = async () => { if (!confirm(`Delete “${n}”? (kept in Library/.trash)\n\nIf a video uses it, it will be missing there.`)) return;
+      try { const r = await api("/api/media/remove", { method: "POST", body: { kind: k, name: n } }); toast(r.reply); LIBCAT = null; loadMedia(); } catch (e) { toast(e.message, true); } };
+  });
+}
+function uploadMedia(files) {
+  if (!files.length) return Promise.resolve();
+  const zone = $("#dropMedia"), fd = new FormData(); files.forEach((f) => fd.append("files", f));
+  const bar = $(".progress", zone), fill = $(".progress div", zone), as = $("#mediaAs").value;
+  bar.classList.remove("hidden"); fill.style.width = "0";
+  return new Promise((resolve) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", `/api/media/upload${as ? `?kind=${as}` : ""}`);
+    x.upload.onprogress = (e) => { if (e.lengthComputable) fill.style.width = `${(100 * e.loaded) / e.total}%`; };
+    x.onload = () => {
+      bar.classList.add("hidden");
+      let j = {}; try { j = JSON.parse(x.responseText); } catch {}
+      if (x.status >= 400) { toast(j.error || "Upload failed", true); return resolve(); }
+      const ok = j.results.filter((r) => r.ok), res = $("#mediaResult");
+      res.classList.remove("hidden");
+      res.innerHTML = j.results.map((r) => `<div class="${r.ok ? "ok" : "bad"}">${r.ok ? "✓" : r.dup ? "=" : "✗"} <b>${esc(r.name)}</b> → ${r.ok ? `${MEDIA && MEDIA[r.kind] ? MEDIA[r.kind].icon + " " + esc(MEDIA[r.kind].label) : esc(r.kind)} <span class="muted">(${esc(r.why)})</span>` : esc(r.why)}</div>`).join("");
+      toast(`${ok.length} of ${j.results.length} file(s) added` + (ok.length < j.results.length ? " – see the list for the others." : "."), ok.length < j.results.length);
+      LIBCAT = null; MEDIA_OPEN = Object.assign(MEDIA_OPEN, Object.fromEntries(ok.map((r) => [r.kind, true]))); loadMedia(); if (PID) refresh(true); resolve();
+    };
+    x.onerror = () => { bar.classList.add("hidden"); toast("Upload failed", true); resolve(); };
+    x.send(fd);
+  });
+}
+(() => {
+  const zone = $("#dropMedia"), input = $("#fileMedia");
+  zone.onclick = (e) => { if (e.target.tagName !== "INPUT") input.click(); };
+  input.onchange = () => uploadMedia([...input.files]).finally(() => (input.value = ""));
+  ["dragenter", "dragover"].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove("over"); }));
+  zone.addEventListener("drop", (e) => uploadMedia([...e.dataTransfer.files]));
+  $("#tab-media").addEventListener("drop", (e) => { if (e.target.closest("#dropMedia")) return; if (e.dataTransfer && e.dataTransfer.files.length) { e.preventDefault(); uploadMedia([...e.dataTransfer.files]); } });
+  $("#mediaFind").addEventListener("input", renderMedia);
+  $("#mediaOpen").onclick = () => api("/api/media/open", { method: "POST", body: {} });
+})();
+
 /* ---------------- references + brief ---------------- */
 function renderRefs() {
   const el = $("#refList");
@@ -597,7 +683,7 @@ function renderLookPick() {
   if (sel.dataset.h !== html) { sel.innerHTML = html; sel.dataset.h = html; }
   sel.value = used;
   const v = P.looks_view?.[used] || {};
-  $("#lookPickInfo").textContent = `${v.format || ""} · ${v.layout === "split" ? "split layout" : "full screen"} · captions ${v.captions === false ? "off" : v.caption_script === "hinglish" ? "Hinglish" : "on"}${v.music && v.music !== "off" ? " · music" : ""}`;
+  $("#lookPickInfo").textContent = `${v.format || ""} · ${v.layout === "split" ? "split layout" : "full screen"} · captions ${v.captions === false ? "off" : v.caption_script === "hinglish" ? "Hinglish" : "on"}${v.ref_audio && v.ref_audio !== "none" ? " · reference background audio" : v.music && v.music !== "off" ? " · music" : ""}`;
 }
 async function switchLook(id) {
   if ((P.style_source || "none") === id) return;
@@ -677,15 +763,21 @@ const HELP = {
   headline: ["Headline card", "The big title on top (split layout).",
     "It shows whenever a scene has no card of its own. Write your main hook here. Put stars around a word to make it orange.",
     "Bajaj *IPO* listing aaj → shows \"Bajaj IPO listing aaj\" with IPO in orange.", "Your hook, 2–5 words"],
-  bg_mode: ["Background", "What to do with a green screen behind you.",
-    "If you film in front of a green cloth, the studio can swap the green for a clean off-white wall so it looks like a real studio. If there's no green behind you, nothing changes.",
-    "Replace → green becomes a clean off-white wall.\nKeep as filmed → stays green.", "Replace"],
+  bg_file: ["Behind me", "The picture or video that shows where the green screen was.",
+    "Pick one from your Media tab (Pictures / Videos), or click ⬆ to upload one. A picture stays for the whole video; a video loops and runs on across cuts – it doesn't restart at every scene. Its sound is never used.",
+    "Picture → a city skyline / office / stock chart behind you.\nVideo → a moving market screen / b-roll loop behind you.", "–"],
+  bg_mode: ["Green screen", "What shows where the green screen behind you was.",
+    "Film in front of a green cloth and the studio swaps the green for something else – in full screen and in the split layout. If there's no green behind you, nothing changes.",
+    "Keep as filmed → stays green.\nClean wall → a clean off-white studio wall.\nPicture behind me → any photo (office, skyline, chart).\nVideo behind me → a moving clip that loops behind you while you talk.", "Clean wall"],
   face_y: ["Face position", "Moves you up or down in the bottom half.",
     "In the split layout you appear in the bottom half. This number tells the studio where your eyes are in your clip, so it can frame you nicely – not too high, not too low.",
     "Head cut off at the top? → make the number bigger (0.30).\nToo much space above your head? → smaller (0.22).", "0.27"],
   music: ["Music", "Soft background music under your voice.",
     "Music fills silences and adds energy. It automatically gets softer whenever you talk, so your words stay clear. Use your own song by putting it in the Brand Kit\\music folder.",
     "Quiet → music plays, and gets softer whenever you talk.\nOff → only your voice.", "Quiet"],
+  ref_audio: ["Background audio", "Play a reference video's background music under your voice.",
+    "Pick R1, R2… and the studio takes that reference's VOICE out (an AI voice-remover, about a minute the first time) and plays only its background music under you – softer whenever you talk, like Music. It replaces the Music setting while on. Careful: music inside someone else's video is usually copyrighted – fine to practise with, Instagram / YouTube may mute or claim a published reel.",
+    "None → only your voice (and Music, if on).\nR2 → R2's background music, voice removed, under your voice.", "None"],
   audio_polish: ["Audio polish", "Makes your voice clean and even.",
     "Phone recordings often have fan or AC hum, and some words come out louder than others. Audio polish removes the hum, evens out your voice, and makes every video equally loud.",
     "Before: soft words hard to hear, fan hum.\nAfter: clear, even voice, no hum.", "On"],
@@ -709,7 +801,9 @@ function setupHelp() {
     b.title = HELP[f.name][1];
     b.setAttribute("aria-label", `What is ${HELP[f.name][0]}?`);
     row.appendChild(b);
-    lab.insertBefore(row, f);
+    // the field may sit inside a wrapper (select + ⬆ button): insert before that wrapper, not the nested field
+    const anchor = f.parentNode === lab ? f : [...lab.children].find((c) => c.contains(f)) || null;
+    lab.insertBefore(row, anchor);
     b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); helpOpen && helpOpen.btn === b ? closeHelp() : showHelp(b); };
   }
 }
@@ -743,7 +837,52 @@ setupHelp();
 
 const STYLE_KEYS = new Set(["format", "fit", "fps", "captions", "caption_script", "caption_font", "caption_color", "highlight_color",
   "caption_position", "caption_case", "caption_words", "remove_silence", "silence_min", "logo", "logo_position", "layout", "split_ratio",
-  "bg_mode", "bg_color", "panel_color", "grade", "audio_polish", "music", "loudness", "duck_db"]);
+  "bg_mode", "bg_color", "bg_file", "panel_color", "grade", "audio_polish", "music", "loudness", "duck_db", "ref_audio"]);
+// 🟩 green screen: picture / video behind you – the file list follows the mode; ⬆ uploads into Media and picks it
+function fillBgFile() {
+  const mode = $('#settingsForm [name="bg_mode"]').value, sel = $('#settingsForm [name="bg_file"]');
+  $("#bgFileLab").classList.toggle("hidden", !["picture", "video"].includes(mode));
+  const list = ((P.bg_media || {})[mode === "picture" ? "pictures" : "videos"]) || [];
+  const keep = sel.value || sel.dataset.want || "";
+  const sig = mode + "|" + list.join("~");
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig;
+    sel.innerHTML = `<option value="">${list.length ? "– pick one –" : mode === "picture" ? "no pictures yet – ⬆ upload one" : "no videos yet – ⬆ upload one"}</option>` +
+      list.map((f) => `<option value="${esc(f)}">${esc(f.split("/").pop())}</option>`).join("");
+  }
+  sel.value = list.includes(keep) ? keep : "";
+}
+$('#settingsForm [name="bg_mode"]').addEventListener("change", fillBgFile);
+$("#bgUp").onclick = () => $("#bgUpFile").click();
+$("#bgUpFile").onchange = async () => {
+  const f = $("#bgUpFile").files[0]; $("#bgUpFile").value = ""; if (!f) return;
+  const mode = $('#settingsForm [name="bg_mode"]').value, kind = mode === "picture" ? "pictures" : "videos";
+  const fd = new FormData(); fd.append("files", f);
+  toast("Uploading…");
+  try {
+    const r = await fetch(`/api/media/upload?kind=${kind}`, { method: "POST", body: fd }).then((x) => x.json());
+    const res = (r.results || [])[0] || {};
+    if (!res.ok && !res.dup) return toast(res.why || r.error || "Upload failed", true);
+    await refresh(true);
+    const name = res.ok ? `${kind === "pictures" ? "Pictures" : "Videos"}/${res.name}` : null;
+    const sel = $('#settingsForm [name="bg_file"]');
+    if (name) { sel.dataset.want = name; fillBgFile(); sel.value = name; briefDirty = true; $("#briefState").textContent = "unsaved changes"; }
+    toast(res.ok ? `Uploaded – click “Save brief & settings” to use it.` : res.why, !res.ok);
+  } catch (e) { toast(e.message, true); }
+};
+// 🎵 Background audio: None, or a reference's background music with its voice taken out (one entry per reference)
+function fillRefAudio() {
+  const sel = $('#settingsForm [name="ref_audio"]'); if (!sel) return;
+  const opts = [["none", "None"]].concat((P.references || []).filter((r) => r.kind !== "error" && r.file).map((r) => {
+    const i = P.references.indexOf(r) + 1;
+    return [`ref:${r.id}`, `R${i} – its background music (voice removed)${r.bg_ready ? "" : P.ref_audio_tool ? " · prepared on save" : " · needs Setup"}`]; }));
+  const want = opts.map((o) => o.join("|")).join("~");
+  if (sel.dataset.sig === want) return;
+  sel.dataset.sig = want;
+  const keep = sel.value;
+  sel.innerHTML = opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("");
+  if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+}
 function renderBrief(force) {
   const ed = curEditLook(), nm = lookName(ed);
   $("#lookBriefTag").textContent = nm;
@@ -752,6 +891,8 @@ function renderBrief(force) {
     $("#brief").value = P.brief || "";
     $("#lookBrief").value = (P.look_briefs || {})[ed] || "";
     const look = (P.looks_view || {})[curEditLook()] || P.settings;  // style keys come from the look being edited
+    fillRefAudio();
+    { const bf = $('#settingsForm [name="bg_file"]'); bf.dataset.want = String(((P.looks_view || {})[curEditLook()] || P.settings).bg_file || ""); }
     for (const el of $$("#settingsForm [name]")) {
       const v = STYLE_KEYS.has(el.name) && el.name in look ? look[el.name] : P.settings[el.name];
       const sv = v === null || v === undefined ? "" : String(v);
@@ -760,6 +901,7 @@ function renderBrief(force) {
       if (el.tagName === "SELECT" && sv && ![...el.options].some((o) => o.value === sv)) el.add(new Option(sv, sv));
       el.value = sv;
     }
+    fillBgFile();
   }
   // ★ Brand Kit is read-only (shared by every project): grey out its style fields; footage fields stay editable
   for (const el of $$("#settingsForm [name]")) el.disabled = ed === BK && STYLE_KEYS.has(el.name);
@@ -794,11 +936,11 @@ function renderPlanBtn() {
   const analyzing = j.kind === "analyze" && (j.status === "running" || j.status === "queued");
   const pend = planPending();
   b.disabled = pend || analyzing || !P.scenes.length;
-  b.textContent = pend ? "✨ Plan requested – say “process studio inbox”" : "✨ Claude: plan the edit";
+  b.textContent = pend ? "① Plan requested – say “process studio inbox”" : "① Plan story (Claude)";
   b.title = pend ? "Waiting for Claude: type “process studio inbox” in VS Code. (Cancel it in the Claude inbox.)"
     : analyzing ? "Wait for the analysis to finish – the scenes are about to change"
     : !P.scenes.length ? "Analyze your footage first (Footage tab)"
-    : "Claude plans the whole edit beat by beat (cuts, cards, zooms) as a storyboard – you approve before anything renders";
+    : "Step ① (optional) – Claude plans the STORY beat by beat (keep / cut / reorder, hook, cards, B-roll) as a storyboard – you approve before anything changes. Then ② Auto-edit decorates the final cut.";
 }
 $("#planBtn").onclick = async () => {
   try {
@@ -1060,10 +1202,11 @@ function libTabs(s, L) {
         <span class="muted small">hits at</span><input type="number" step="0.05" min="0" class="sfxSet" data-i="${i + 1}" data-k="at" value="${e.at}" data-tip="Seconds into this scene where the sound's hit lands (it starts a little earlier so the hit is exactly there)">
         <span class="muted small">vol</span><input type="number" step="10" min="0" max="200" class="sfxSet" data-i="${i + 1}" data-k="vol" value="${Math.round((e.vol ?? 1) * 100)}"><span class="muted small">%</span>
         <button class="lnk danger" data-cmd="sfx remove ${i + 1}" title="Remove">×</button></div>`).join("")}</div>` : ""}
+      ${LIBQ.scat === "meme sounds" ? `<div class="warnline">⚠ Meme sounds from myinstants.com have NO licence – many are clips from films, TV or songs. In monetised videos they can get YouTube Content ID claims or muted audio on Instagram. If a video gets a claim, swap that sound.</div>` : ""}
       <div class="irow"><input id="sndQ" placeholder="Search 320 sounds: whoosh, pop, cash, ding, riser, typing…" value="${esc(LIBQ.sound)}">
         <select id="sndC" data-tip="Sound category">${(L.sound_categories || []).map((c) => `<option ${c === LIBQ.scat ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></div>
       <div class="sndlist">${items.slice(0, 120).map((it) => `<div class="sndrow"><button class="lnk" data-play="${esc(it.file)}" title="Listen">▶</button>
-        <span class="nm" title="${esc(it.desc || "")}">${esc(it.name)}</span><span class="muted small">${it.duration ? it.duration.toFixed(1) + " s" : ""}${(it.use_for || []).length ? " · " + esc(it.use_for.slice(0, 2).join(", ")) : ""}</span>
+        <span class="nm" title="${esc(it.desc || "")}">${it.risky ? `<b class="risky" title="${esc(it.desc)}">⚠</b> ` : ""}${esc(it.name)}</span><span class="muted small">${it.duration ? it.duration.toFixed(1) + " s" : ""}${(it.use_for || []).length ? " · " + esc(it.use_for.slice(0, 2).join(", ")) : ""}</span>
         <button class="btn small" data-snd="${esc(it.id)}" data-tip="Add to this scene – its hit lands at the start of the scene (change 'hits at' above)">+ add</button></div>`).join("") || `<span class="muted small">No sounds found.</span>`}</div>`;
   }
   return `<div class="seg iseg libtabs">${tabs.map(([k, l]) => `<button data-libtab="${k}" class="${LIBTAB === k ? "active" : ""}">${l}${n[k] ? ` <b>${n[k]}</b>` : ""}</button>`).join("")}</div>${body}`;
@@ -1165,7 +1308,8 @@ function renderDetail() {
   } else {
     const bv = s.broll_view;
     const clipOpts = [...(P.broll_clips || []).map((c) => c.file), ...P.sources.map((x) => x.file).filter((f) => f !== s.src && !(P.broll_clips || []).some((c) => c.file === f))];
-    const assets = P.broll_assets || [];
+    const assets = (P.broll_assets || []).filter((a) => !a.audio);  // sounds belong on Audio tracks
+    const allUploads = P.broll_assets || [];
     const c = s.card;
     const cardKind = !c ? "auto" : c.kind;
     const words = (s.caption_view ?? s.transcript ?? "").split(/\s+/).filter(Boolean);
@@ -1181,8 +1325,8 @@ function renderDetail() {
           <input type="file" id="brUpFile" accept="video/*,image/*,.mkv,.mts" hidden>
           <span id="brUpProg" class="muted small">${BRUP && BRUP.sid === s.id ? `uploading ${BRUP.pct} %…` : ""}</span>
         </div>
-        ${assets.length ? `<details class="brmanage" ${BRMANAGE ? "open" : ""}><summary class="muted small" data-tip="See and delete the videos/pictures you uploaded for B-roll">Manage uploads (${assets.length})</summary>
-          ${assets.map((a) => `<div class="brrow">${a.thumb ? `<img src="${media("thumbs", a.thumb)}" alt="">` : `<span class="brnothumb">${a.still ? "🖼" : "🎞"}</span>`}
+        ${allUploads.length ? `<details class="brmanage" ${BRMANAGE ? "open" : ""}><summary class="muted small" data-tip="See and delete the videos, pictures and sounds you uploaded">Manage uploads (${allUploads.length})</summary>
+          ${allUploads.map((a) => `<div class="brrow">${a.thumb ? `<img src="${media("thumbs", a.thumb)}" alt="">` : `<span class="brnothumb">${a.audio ? "🎵" : a.still ? "🖼" : "🎞"}</span>`}
             <span class="brname" title="${esc(a.file)}">${esc(a.file)}</span>
             <span class="muted small">${a.used_by.length ? `scene ${rangeTxt(a.used_by)}` : "not used"}</span>
             <button class="lnk danger" data-delasset="${esc(a.file)}" data-tip="Remove this upload from the project${a.used_by.length ? " – the scenes using it go back to showing you" : ""}. Undo brings it back.">🗑 delete</button></div>`).join("")}</details>` : ""}
@@ -1374,7 +1518,7 @@ function renderSceneTimeline() {
   const others = P.sources.map((x) => x.file).filter((f) => !bin.some((c) => c.file === f));
   $("#brollBin").innerHTML = P.sources.length ? `<span class="muted small">Clips <span title="Drag a clip onto a scene to use it as B-roll there">ⓘ drag onto a scene:</span></span> ` +
     [...bin.map((c) => clipChip(c.file, true)), ...others.map((f) => clipChip(f, false)),
-     ...(P.broll_assets || []).map((a) => { const u = usedBy(a.file); return `<button class="bchip" data-file="${esc(a.file)}" title="Uploaded B-roll – drag onto a scene below to show it OVER that scene (your voice keeps playing).">${a.still ? "🖼" : "⬆"} ${esc(a.file)}${a.still ? "" : ` · ${(+a.duration || 0).toFixed(1)}s`} · ${u.length ? `covers ${rangeTxt(u)}` : "<i>not used</i>"}</button>`; })].join(" ") : "";
+     ...(P.broll_assets || []).filter((a) => !a.audio).map((a) => { const u = usedBy(a.file); return `<button class="bchip" data-file="${esc(a.file)}" title="Uploaded B-roll – drag onto a scene below to show it OVER that scene (your voice keeps playing).">${a.still ? "🖼" : "⬆"} ${esc(a.file)}${a.still ? "" : ` · ${(+a.duration || 0).toFixed(1)}s`} · ${u.length ? `covers ${rangeTxt(u)}` : "<i>not used</i>"}</button>`; })].join(" ") : "";
   // B-roll scenes of clips that also have speaker scenes (e.g. a talking scene set to B-roll): off the timeline, so
   // list them here – every scene must stay findable
   const loose = [];
@@ -1385,10 +1529,10 @@ function renderSceneTimeline() {
     else b.onclick = () => b.dataset.sel && selectScene(b.dataset.sel);
   });
   if (!main.length) { box.innerHTML = `<p class="muted small">No scenes yet.</p>`; STL.blocks = []; return; }
-  const W = Math.max(300, box.clientWidth - 70), STUB = 30, GAP = 2;
+  const W = Math.max(300, box.clientWidth - 126), STUB = 30, GAP = 2;
   const kept = main.filter(inVid), total = kept.reduce((a, s) => a + s.est, 0) || 1;
   const stubs = main.length - kept.length;
-  const pps = Math.max(1, (W - stubs * STUB - main.length * GAP) / total);
+  const pps = Math.max(1, (W - stubs * STUB - main.length * GAP) / total) * (STL.zoom || 1);
   let x = 0; STL.pps = pps;
   STL.blocks = main.map((s) => { const w = inVid(s) ? Math.max(6, s.est * pps) : STUB; const b = { s, x, w }; x += w + GAP; return b; });
   const cardsEff = effCards(main);
@@ -1400,19 +1544,47 @@ function renderSceneTimeline() {
   const bRuns = runs((b) => inVid(b.s) && b.s.broll_view ? JSON.stringify([b.s.broll_view.src, b.s.broll_view.where, b.s.broll_view.ok, b.s.broll.where || ""]) : "");
   STL.bRuns = bRuns;
   const cRuns = runs((b, i) => inVid(b.s) && cardsEff[i] && cardsEff[i].kind !== "none" && !(b.s.broll_view && b.s.broll_view.where === "full") ? JSON.stringify(cardsEff[i]) : "");
+  // extra tracks: pictures/titles above the B-roll lane (top-most layer first), audio below the cards
+  const allT = P.tracks || [];
+  const trkVis = allT.filter((t) => t.kind !== "audio").slice().reverse(), trkAud = allT.filter((t) => t.kind === "audio");
   const step = tickStep(pps);
   let ticks = "";
-  for (let t = 0; t <= total + 0.01; t += step) ticks += `<span class="tick" style="left:${tlX(t)}px">${tc(t)}</span>`;
+  for (let t = 0; t <= total + 0.01; t += step / (step >= 1 ? 5 : 2)) {
+    const major = Math.abs(t / step - Math.round(t / step)) < 1e-6;
+    ticks += `<span class="tick ${major ? "" : "minor"}" style="left:${tlX(t)}px">${major ? tc(t).replace(/\.0$/, "") : ""}</span>`;
+  }
+  const LK = P.ui_locks || {}, ST = P.settings;
+  const laneHead = (cls, label, tip, btns) => `<div class="h ${cls} hastip" data-tip="${esc(tip)}"><span class="tn">${label}</span>${btns}</div>`;
+  const lockBtn = (lane, on) => `<button class="tb ${on ? "on" : ""}" data-lane="${lane}" data-what="lock" title="${on ? "Unlock" : "Lock (no accidental changes)"}">${on ? "🔒" : "🔓"}</button>`;
+  const swBtn = (lane, what, off, onIc, offIc, t1, t2) => `<button class="tb ${off ? "on" : ""}" data-lane="${lane}" data-what="${what}" title="${off ? t2 : t1}">${off ? offIc : onIc}</button>`;
+  const film = (s, w) => {  // the scene's own frames (clip film strip) + its sound (waveform), like an editor's clip
+    const src = P.sources.find((x) => x.file === s.src) || {}, D = +src.duration || 0, span = Math.max(0.05, s.out - s.in);
+    let fr = "";
+    if (src.strip && D > 0) {
+      const k = Math.max(1, Math.round(w / 40));
+      for (let j = 0; j < k; j++) {
+        const idx = Math.min(STRIP_N - 1, Math.max(0, Math.floor(((s.in + ((j + 0.5) / k) * span) / D) * STRIP_N)));
+        fr += `<i style="background-image:url('${media("thumbs", src.strip)}');background-position:${-idx * 40}px 0;background-size:${STRIP_N * 40}px 40px"></i>`;
+      }
+    } else fr = `<i class="one" style="background-image:url('${media("thumbs", s.thumb)}')"></i>`;
+    const full = w * D / span;
+    const wv = src.wave && D > 0 ? `<div class="wv ${ST.main_mute || s.mute ? "mut" : ""}" style="background-image:url('${media("thumbs", src.wave)}');background-size:${full}px 100%;background-position:${-(s.in / D) * full}px 0"></div>`
+      : `<div class="wv none"></div>`;
+    return `<div class="fr">${fr}</div>${wv}`;
+  };
   box.innerHTML = `
-    <div class="stl-heads"><div class="h ruler"></div><div class="h hastip" data-tip="Footage shown OVER the scenes below while your voice plays. Optional – drag a clip chip onto a scene to add one.">B-roll</div><div class="h main hastip" data-tip="Your scenes in playing order. Drag to reorder, drag an edge to trim, striped = cut.">Video</div>${cardsEff.length ? `<div class="h hastip" data-tip="The top-panel card (title / number / chart) shown during each scene – split layout.">Cards</div>` : ""}</div>
+    <div class="stl-heads"><div class="h ruler"></div>${trkVis.map(trkHead).join("")}${laneHead(`trk broll ${ST.broll_off ? "off" : ""}`, "🎞 B-roll", "Scene B-roll: footage shown OVER a scene while your voice plays. Drag a clip chip onto a scene to add one.", lockBtn("broll", LK.broll) + swBtn("broll", "hide", ST.broll_off, "👁", "🚫", "Hide all scene B-roll", "Show scene B-roll again"))}${laneHead(`trk main ${ST.main_mute ? "off" : ""}`, "🎬 Video 1", "Your scenes in playing order (the main line). Drag to reorder, drag an edge to trim, striped = cut. Green = its sound.", lockBtn("main", LK.main) + swBtn("main", "mute", ST.main_mute, "🔊", "🔇", "Mute the scenes' own sound (keep music / track audio)", "Turn the scenes' sound back on"))}${cardsEff.length ? laneHead(`trk ${ST.cards_off ? "off" : ""}`, "🃏 Cards", "The top-panel card (title / number / chart) shown during each scene – split layout.", lockBtn("cards", LK.cards) + swBtn("cards", "hide", ST.cards_off, "👁", "🚫", "Hide the top cards", "Show the top cards again")) : ""}${trkAud.map(trkHead).join("")}<div class="h newtrk"></div></div>
     <div class="stl-lanes" style="width:${x}px">
       <div class="lane ruler" data-tip="Time in the edited video. Click to jump there.">${ticks}</div>
-      <div class="lane broll">${bRuns.map((r, ri) => { const v = JSON.parse(r.k); return `<div class="bblk ${v[2] ? "" : "bad"}" data-run="${ri}" style="left:${r.x}px;width:${r.w}px;${thumb(v[0])}" title="${esc(v[0])} – ${v[1] === "full" ? "full screen" : v[1] === "bottom" ? "bottom" : "top"}${v[2] ? "" : " – NOT SHOWN (skipped or missing)"}
+      ${trkVis.map(trkLane).join("")}
+      <div class="lane broll ${LK.broll ? "locked" : ""} ${ST.broll_off ? "off" : ""}">${bRuns.map((r, ri) => { const v = JSON.parse(r.k); return `<div class="bblk ${v[2] ? "" : "bad"}" data-run="${ri}" style="left:${r.x}px;width:${r.w}px;${thumb(v[0])}" title="${esc(v[0])} – ${v[1] === "full" ? "full screen" : v[1] === "bottom" ? "bottom" : "top"}${v[2] ? "" : " – NOT SHOWN (skipped or missing)"}
 Drag = move to other scenes · drag an edge = cover more / fewer scenes · × = remove"><i class="hd l"></i><span>🎞 ${esc(v[0])} · ${v[1]}</span><b class="bx" title="Remove this B-roll">×</b><i class="hd r"></i></div>`; }).join("")}</div>
-      <div class="lane main">${STL.blocks.map((b) => `<div class="sblk ${isBroll(b.s) ? "cut brs" : b.s.keep ? "" : "cut"} ${b.s.id === selected ? "sel" : ""}" data-id="${b.s.id}" style="left:${b.x}px;width:${b.w}px;${inVid(b.s) ? `background-image:url('${media("thumbs", b.s.thumb)}')` : ""}" title="Scene ${b.s.no} · ${isBroll(b.s) ? "B-roll footage, not played – drag it to a place in the video to play it there" : b.s.keep ? `${b.s.est}s` : "cut – click to select, Del to restore"}">
+      <div class="lane main ${LK.main ? "locked" : ""}">${STL.blocks.map((b) => `<div class="sblk ${inVid(b.s) ? "film" : ""} ${isBroll(b.s) ? "cut brs" : b.s.keep ? "" : "cut"} ${b.s.id === selected ? "sel" : ""}" data-id="${b.s.id}" style="left:${b.x}px;width:${b.w}px" title="Scene ${b.s.no} · ${isBroll(b.s) ? "B-roll footage, not played – drag it to a place in the video to play it there" : b.s.keep ? `${b.s.est}s` : "cut – click to select, Del to restore"}">${inVid(b.s) ? film(b.s, b.w) : ""}
         ${isBroll(b.s) ? `${b.s.no}🎞` : b.s.keep ? `<i class="hd l"></i><span class="no">${b.s.no}</span>${b.w > 54 ? `<span class="du">${b.s.est}s</span>` : ""}<i class="hd r"></i>` : `${b.s.no}✂${b.s.broll_view ? "🎞" : ""}`}</div>`).join("")}</div>
       ${cardsEff.length ? `<div class="lane cards">${cRuns.map((r) => `<div class="cblk" style="left:${r.x}px;width:${r.w}px" title="${esc(cardLabel(JSON.parse(r.k)))}">${esc(cardLabel(JSON.parse(r.k)))}</div>`).join("")}</div>` : ""}
-      <div class="stl-head" id="stlHead"></div>
+      ${trkAud.map(trkLane).join("")}
+      <div class="lane newtrk" title="Drop a clip chip or drag a scene here – a new track is made for it">＋ drop a clip or a scene here for a new track</div>
+      <div class="stl-head" id="stlHead"><b class="ph-knob" title="Drag to move the playhead"></b><button class="ph-cut" title="Split the scene at the playhead (S)">✂</button></div>
     </div>`;
   const nCut = main.length - kept.length, nBr = P.scenes.filter(isBroll).length, nSk = P.scenes.filter((x) => x.src_skipped && !isBroll(x)).length;
   $("#stlInfo").textContent = `${P.scenes.length} scenes: ${kept.length} in the video (≈ ${fmt(total)})` +
@@ -1421,7 +1593,431 @@ Drag = move to other scenes · drag an edge = cover more / fewer scenes · × = 
   $$(".bblk", box).forEach((b) => b.addEventListener("pointerdown", bDown));
   $(".lane.ruler", box).onclick = (e) => seekEdit((e.clientX - $(".stl-lanes", box).getBoundingClientRect().left));
   $$(".sblk", box).forEach((el) => el.addEventListener("pointerdown", stlDown));
+  $$("[data-lane]", box).forEach((b) => (b.onclick = () => trackOp({ op: "lane", lane: b.dataset.lane, what: b.dataset.what })));
+  bindPlayhead(box);
+  bindTracks(box);
   drawStlHead();
+}
+/* ---- extra TRACKS (Video / B-roll / Audio / Text): items are connected to a scene (anchor + offset), so they move
+   with their scene. Drag = move · drag an edge = trim · double-click an empty spot = new item · × = remove. */
+let TSEL = null;  // {track, item}
+const TKIND = { video: ["🎬", "Video: an overlay clip WITH its own sound"], broll: ["🎞", "B-roll: a silent overlay"],
+  audio: ["🎵", "Audio: music, voice-over or sounds"], text: ["🔤", "Text: titles, lower-thirds, banners"] };
+function xToT(px) {  // timeline px -> edited time (inverse of tlX)
+  const m = renderTimes(true);
+  for (const b of STL.blocks) {
+    if (px < b.x + b.w + 1) {
+      if (!inVid(b.s)) { const nx = STL.blocks.slice(STL.blocks.indexOf(b)).find((k) => inVid(k.s)); return nx ? sAt(nx.s, m) : 0; }
+      return sAt(b.s, m) + Math.max(0, Math.min(1, (px - b.x) / b.w)) * sDur(b.s, m);
+    }
+  }
+  const last = [...STL.blocks].reverse().find((k) => inVid(k.s));
+  return last ? sAt(last.s, m) + sDur(last.s, m) : 0;
+}
+function anchorAt(t) {  // the scene playing at edited time t -> {anchor, off}
+  const m = renderTimes(true), vid = STL.blocks.map((b) => b.s).filter(inVid);
+  if (!vid.length) return null;
+  const s = vid.find((x) => t < sAt(x, m) + sDur(x, m) - 1e-6) || vid[vid.length - 1];
+  return { anchor: s.id, off: Math.max(0, +(t - sAt(s, m)).toFixed(3)) };
+}
+function itemSpan(it) {  // -> {a, b, ok}: edited times; ok=false when its scene is cut / gone
+  const m = renderTimes(true), s = P.scenes.find((x) => x.id === it.anchor);
+  if (!s || !inVid(s)) return { a: s ? s.start_at : 0, b: (s ? s.start_at : 0) + it.dur, ok: false };
+  const a = sAt(s, m) + it.off; return { a, b: a + it.dur, ok: true };
+}
+const srcName = (it) => (it.src && it.src.n ? it.src.n.split("/").pop() : "");
+function trkHead(t) {
+  const [ic, tip] = TKIND[t.kind] || ["", ""];
+  return `<div class="h trk ${t.kind} ${t.off ? "off" : ""}" data-trk="${t.id}" data-tip="${esc(tip)} · double-click the name to rename">
+    <span class="tn" data-ren="${t.id}">${ic} ${esc(t.name)}</span>
+    <button class="tb ${t.locked ? "on" : ""}" data-tlock="${t.id}" title="${t.locked ? "Unlock" : "Lock (no accidental changes)"}">${t.locked ? "🔒" : "🔓"}</button>
+    ${t.kind === "video" ? `<button class="tb ${t.mute ? "on" : ""}" data-tmute="${t.id}" title="${t.mute ? "Sound back on" : "Mute this track's sound (picture stays)"}">${t.mute ? "🔇" : "🔊"}</button>` : ""}
+    <button class="tb" data-ttog="${t.id}" title="${t.kind === "audio" ? (t.off ? "Unmute" : "Mute") : (t.off ? "Show" : "Hide")} this track">${t.kind === "audio" ? (t.off ? "🔇" : "🔊") : (t.off ? "🚫" : "👁")}</button>
+    <button class="tb" data-tdel="${t.id}" title="Delete this track">×</button></div>`;
+}
+function trkLane(t) {
+  return `<div class="lane trk ${t.kind} ${t.off ? "off" : ""} ${t.locked ? "locked" : ""}" data-trk="${t.id}" title="Double-click an empty spot to add here${t.kind === "video" || t.kind === "broll" ? " (or drag a clip chip onto it)" : ""}">
+    ${(t.items || []).map((it) => { const sp = itemSpan(it), x0 = tlX(sp.a), x1 = tlX(sp.b), w = Math.max(10, x1 - x0);
+      const lab = t.kind === "text" ? `“${it.text}”` : `${srcName(it)}${t.kind === "audio" || t.kind === "video" ? ` · ${Math.round((it.vol ?? 1) * 100)}%` : ""}${it.where && it.where !== "full" ? ` · ${it.where}` : ""}`;
+      const look = t.kind === "text" ? "" : tblkMedia(t, it, w);
+      return `<div class="tblk ${t.kind} ${look ? "media" : ""} ${sp.ok ? "" : "bad"} ${TSEL && TSEL.item === it.id ? "sel" : ""}" data-trk="${t.id}" data-item="${it.id}" style="left:${x0}px;width:${w}px"
+        title="${esc(lab)} · ${it.dur.toFixed(1)} s${sp.ok ? "" : " – its scene is cut, so this is not in the video"}">${look}<i class="hd l"></i><span class="tl">${esc(lab)}</span><b class="bx" title="Remove">×</b><i class="hd r"></i></div>`; }).join("")}</div>`;
+}
+// what a track block looks like: the frames it plays (film strip) and, for sound, its waveform – like an editor's clip
+const MA = {};  // "t|name" -> {strip, wave, duration, thumb, still} | "wait"
+function maOf(it) {
+  const src = it.src || {}, key = `${src.t}|${src.n}`;
+  if (src.t === "clip") { const s = P.sources.find((x) => x.file === src.n) || {}; return { strip: s.strip, wave: s.wave, duration: +s.duration || it.src_len || 0 }; }
+  if (src.t === "asset") {
+    const a = (P.broll_assets || []).find((x) => x.file === src.n) || {};
+    if (a.still) return { thumb: a.thumb, still: true };
+  }
+  if (MA[key] && MA[key] !== "wait") return MA[key];
+  if (!MA[key]) {
+    MA[key] = "wait";
+    api(`/api/projects/${PID}/media_assets`, { method: "POST", body: { src } })
+      .then((r) => { MA[key] = r || {}; if (!STL.drag && !STL.busy) renderSceneTimeline(); })
+      .catch(() => { MA[key] = {}; });
+  }
+  return null;
+}
+function tblkMedia(t, it, w) {
+  const m = maOf(it);
+  if (!m) return "";
+  const D = +m.duration || +it.src_len || 0, inP = +it.in || 0, dur = Math.max(0.05, +it.dur || 0.05);
+  const FH = t.kind === "video" ? 34 : t.kind === "broll" ? 40 : 0;
+  let fr = "";
+  if (FH && m.still && m.thumb) fr = `<div class="tfr still" style="height:${FH}px;background-image:url('${media("thumbs", m.thumb)}');background-size:${FH * 1.6}px ${FH}px"></div>`;
+  else if (FH && m.strip && D > 0) {
+    let tiles = "";
+    const k = Math.max(1, Math.round(w / FH));
+    for (let j = 0; j < k; j++) {
+      const idx = Math.min(STRIP_N - 1, Math.max(0, Math.floor(((inP + ((j + 0.5) / k) * dur) / D) * STRIP_N)));
+      tiles += `<i style="flex:0 0 ${FH}px;height:${FH}px;background-image:url('${media("thumbs", m.strip)}');background-position:${-idx * FH}px 0;background-size:${STRIP_N * FH}px ${FH}px"></i>`;
+    }
+    fr = `<div class="tfr">${tiles}</div>`;
+  }
+  let wv = "";
+  const audible = t.kind === "audio" || (t.kind === "video" && (it.vol ?? 1) > 0.001);
+  if ((t.kind === "audio" || t.kind === "video") && m.wave && D > 0) {
+    const full = w * D / dur;
+    wv = `<div class="twv ${audible && !t.off && !t.mute ? "" : "mut"}" style="background-image:url('${media("thumbs", m.wave)}');background-size:${full}px 100%;background-position:${-(inP / D) * full}px 0"></div>`;
+  }
+  return fr || wv ? `<div class="tmedia">${fr}${wv}</div>` : "";
+}
+async function trackOp(body, quiet) {
+  try {
+    const r = await api(`/api/projects/${PID}/tracks`, { method: "POST", body });
+    if (r.reply && !quiet) toast(r.reply);
+    await refresh(true); autoPreviewTick(); renderPvBadge();
+    return r;
+  } catch (e) { toast(e.message, true); await refresh(true); return null; }
+}
+function trkDefaults(t) {
+  if (t.kind === "text") return { text: "Your text here", style: "lower", dur: 2.5 };
+  if (t.kind === "audio") {
+    const up = (P.broll_assets || []).find((a) => a.audio), mus = (P.music_files || [])[0];
+    if (up) return { src: { t: "asset", n: up.file }, dur: Math.min(+up.duration || 5, 8), vol: (+up.duration || 0) > 15 ? 0.3 : 1 };
+    if (mus) return { src: { t: "music", n: mus }, dur: 8, vol: 0.3, fade_in: 0.5, fade_out: 1 };
+    const snd = LIBCAT && (LIBCAT.sounds || []).find((x) => x.category === "whooshes");
+    if (snd) return { src: { t: "lib", n: snd.file }, dur: Math.max(0.3, snd.duration || 1), vol: 1 };
+    return null;
+  }
+  const up = (P.broll_assets || []).find((a) => !a.audio), clip = P.sources[0];
+  if (up) return { src: { t: "asset", n: up.file }, dur: 3, where: t.kind === "video" ? "pip" : "full" };
+  if (clip) return { src: { t: "clip", n: clip.file }, dur: 3, where: t.kind === "video" ? "pip" : "full" };
+  return null;
+}
+async function trkAddAt(t, time, over) {
+  const an = anchorAt(time);
+  if (!an) return toast("No scenes in the video yet.", true);
+  if (t.kind === "audio" && !LIBCAT) await loadLib();
+  const def = Object.assign(trkDefaults(t) || {}, over || {});
+  if (t.kind !== "text" && !def.src) return toast(t.kind === "audio" ? "No sound yet – upload one in the editor below, or download the Library." : "No clip or upload to show yet.", true);
+  const r = await trackOp({ op: "item_add", track: t.id, item: Object.assign(def, an) }, true);
+  if (r && r.item) { TSEL = { track: t.id, item: r.item }; renderSceneTimeline(); renderTrkEdit(); }
+}
+function bindTracks(box) {
+  $$("[data-ttog]", box).forEach((b) => (b.onclick = () => trackOp({ op: "toggle", track: b.dataset.ttog })));
+  $$("[data-tlock]", box).forEach((b) => (b.onclick = () => trackOp({ op: "lock", track: b.dataset.tlock })));
+  $$("[data-tmute]", box).forEach((b) => (b.onclick = () => trackOp({ op: "mute", track: b.dataset.tmute })));
+  // the empty zone under the tracks: double-click = pick a track type (the + Track menu)
+  const nz = $(".lane.newtrk", box);
+  if (nz) nz.ondblclick = (e) => { e.stopPropagation(); $("#trkMenu").hidden = false; };
+  $$("[data-tdel]", box).forEach((b) => (b.onclick = () => {
+    const t = (P.tracks || []).find((x) => x.id === b.dataset.tdel);
+    if (t && (!t.items.length || confirm(`Delete the track “${t.name}” and its ${t.items.length} item(s)?\n(Undo brings it back.)`))) {
+      if (TSEL && TSEL.track === t.id) TSEL = null;
+      trackOp({ op: "remove", track: t.id }).then(renderTrkEdit);
+    }
+  }));
+  $$("[data-ren]", box).forEach((el) => (el.ondblclick = () => {
+    const t = (P.tracks || []).find((x) => x.id === el.dataset.ren); if (!t) return;
+    const n = prompt("Track name:", t.name); if (n && n.trim() && n.trim() !== t.name) trackOp({ op: "rename", track: t.id, name: n.trim() });
+  }));
+  $$(".lane.trk", box).forEach((lane) => (lane.ondblclick = (e) => {
+    if (e.target.closest(".tblk")) return;
+    const t = (P.tracks || []).find((x) => x.id === lane.dataset.trk);
+    if (t && t.locked) return toast(`“${t.name}” is locked – click 🔒 on its header to unlock it.`, true);
+    if (t) trkAddAt(t, xToT(e.clientX - $(".stl-lanes", box).getBoundingClientRect().left));
+  }));
+  $$(".tblk", box).forEach((el) => el.addEventListener("pointerdown", tblkDown));
+  renderTrkEdit();
+}
+function snapT(t) {  // snap to scene cuts and the playhead within ~6 px
+  const m = renderTimes(true), tol = 6 / (STL.pps || 50);
+  const pts = STL.blocks.filter((b) => inVid(b.s)).flatMap((b) => [sAt(b.s, m), sAt(b.s, m) + sDur(b.s, m)]);
+  if (playerMode === "preview") pts.push(player.currentTime);
+  const best = pts.reduce((a, p) => (Math.abs(p - t) < Math.abs(a - t) ? p : a), Infinity);
+  return Math.abs(best - t) <= tol ? best : t;
+}
+function tblkDown(e) {
+  if (e.button !== 0) return;
+  const el = e.currentTarget, t = (P.tracks || []).find((x) => x.id === el.dataset.trk), it = t && t.items.find((x) => x.id === el.dataset.item);
+  if (!it) return;
+  if (t.locked) { TSEL = { track: t.id, item: it.id }; renderTrkEdit(); return toast(`“${t.name}” is locked – click 🔒 on its header to unlock it.`, true); }
+  if (e.target.classList.contains("bx")) { e.stopPropagation(); if (TSEL && TSEL.item === it.id) TSEL = null; return trackOp({ op: "item_remove", track: t.id, item: it.id }).then(renderTrkEdit); }
+  const mode = e.target.classList.contains("hd") ? (e.target.classList.contains("l") ? "l" : "r") : "move";
+  const sp = itemSpan(it), x0 = e.clientX, left0 = parseFloat(el.style.left), w0 = parseFloat(el.style.width);
+  const top0 = el.getBoundingClientRect().top;
+  let dest = null;  // {main: before-scene} | {track}
+  TSEL = { track: t.id, item: it.id };
+  $$("#stl .tblk").forEach((k) => k.classList.toggle("sel", k === el));
+  renderTrkEdit();
+  el.setPointerCapture(e.pointerId); STL.busy = true;
+  let moved = false;
+  el.onpointermove = (ev) => {
+    const dx = ev.clientX - x0; if (!moved && Math.abs(dx) < 4 && Math.abs(ev.clientY - (top0 + 10)) < 14) return; moved = true;
+    if (mode === "move") {
+      // which lane is under the pointer (looking through the dragged block)?
+      const under = document.elementsFromPoint(ev.clientX, ev.clientY).find((n) => n !== el && !el.contains(n) && n.closest) || null;
+      const ml = under && under.closest("#stl .lane.main"), ol = under && under.closest("#stl .lane.trk");
+      const otk = ol && ol.dataset.trk !== t.id ? (P.tracks || []).find((x) => x.id === ol.dataset.trk) : null;
+      $$("#stl .sblk").forEach((x) => x.classList.remove("dropl"));
+      $$("#stl .lane").forEach((x) => x.classList.remove("dropzone"));
+      dest = null;
+      if (ml && (t.kind === "video" || t.kind === "broll")) {
+        const lanes = $("#stl .stl-lanes").getBoundingClientRect(), cx = ev.clientX - lanes.left;
+        const bef = STL.blocks.find((k) => inVid(k.s) && k.x + k.w / 2 > cx);
+        dest = { main: bef ? bef.s.id : "end" };
+        if (bef) $(`#stl .sblk[data-id="${bef.s.id}"]`).classList.add("dropl");
+        ml.classList.add("dropzone");
+        el.style.transform = `translateY(${ml.getBoundingClientRect().top + 6 - top0}px)`;
+        $("#stlInfo").textContent = `“${srcName(it)}” → back into Video 1 ${bef ? `before scene ${bef.s.no}` : "at the end"}`;
+      } else if (otk) {
+        dest = { track: otk };
+        ol.classList.add("dropzone");
+        el.style.transform = `translateY(${ol.getBoundingClientRect().top + 3 - top0}px)`;
+        $("#stlInfo").textContent = `→ “${otk.name}”`;
+      } else el.style.transform = "";
+      el.style.left = `${left0 + dx}px`;
+      return;
+    }
+    else if (mode === "r") el.style.width = `${Math.max(10, w0 + dx)}px`;
+    else { el.style.left = `${left0 + dx}px`; el.style.width = `${Math.max(10, w0 - dx)}px`; }
+  };
+  el.onpointerup = () => {
+    el.onpointermove = el.onpointerup = null; STL.busy = false;
+    $$("#stl .sblk").forEach((x) => x.classList.remove("dropl"));
+    $$("#stl .lane").forEach((x) => x.classList.remove("dropzone"));
+    if (!moved) return;
+    if (dest && dest.main) {
+      if (TSEL && TSEL.item === it.id) TSEL = null;
+      trackOp({ op: "item_to_scene", track: t.id, item: it.id, before: dest.main }).then((r) => { if (r && r.scene) selectScene(r.scene, false); renderTrkEdit(); });
+      return;
+    }
+    if (dest && dest.track) {
+      const an = anchorAt(snapT(xToT(parseFloat(el.style.left))));
+      if (!an) return renderSceneTimeline();
+      trackOp({ op: "item_move_track", track: t.id, item: it.id, to: dest.track.id, ...an }).then((r) => {
+        if (r && r.item) { TSEL = { track: r.track, item: r.item }; renderSceneTimeline(); renderTrkEdit(); } });
+      return;
+    }
+    const L = parseFloat(el.style.left), W = parseFloat(el.style.width);
+    let a = snapT(xToT(L)), b = snapT(xToT(L + W));
+    if (mode === "move") b = a + it.dur;
+    if (b - a < 0.2) b = a + 0.2;
+    const an = anchorAt(a); if (!an) return renderSceneTimeline();
+    const set = { ...an };
+    if (mode !== "move") set.dur = +(b - a).toFixed(3);
+    if (mode === "l" && it.src && !(it.src_len === 0)) set.in = Math.max(0, +((it.in || 0) + (a - sp.a)).toFixed(3));  // trimming the head moves the in-point
+    trackOp({ op: "item_set", track: t.id, item: it.id, set }, true);
+  };
+  el.onpointercancel = () => { el.onpointermove = el.onpointerup = null; STL.busy = false; renderSceneTimeline(); };
+}
+function renderTrkEdit() {
+  const box = $("#trkEdit"); if (!box) return;
+  const t = TSEL && (P.tracks || []).find((x) => x.id === TSEL.track), it = t && t.items.find((x) => x.id === TSEL.item);
+  if (!it) { box.hidden = true; box.innerHTML = ""; TSEL = null; return; }
+  box.hidden = false;
+  const sp = itemSpan(it), ref = it.src ? `${it.src.t}|${it.src.n}` : "";
+  const opt = (v, l) => `<option value="${esc(v)}" ${v === ref ? "selected" : ""}>${esc(l)}</option>`;
+  const assets = P.broll_assets || [];
+  let srcSel = "";
+  if (t.kind === "audio") {
+    const snd = (LIBCAT && LIBCAT.sounds) || [];
+    srcSel = `<select id="teSrc">${assets.filter((a) => a.audio).length ? `<optgroup label="Uploaded sounds">${assets.filter((a) => a.audio).map((a) => opt(`asset|${a.file}`, a.file)).join("")}</optgroup>` : ""}
+      ${(P.music_files || []).length ? `<optgroup label="Brand Kit music">${P.music_files.map((f) => opt(`music|${f}`, f)).join("")}</optgroup>` : ""}
+      <optgroup label="Sound of a clip">${P.sources.filter((s) => s.has_audio !== false).map((s) => opt(`clip|${s.file}`, s.file)).join("")}</optgroup>
+      ${snd.length ? `<optgroup label="Library sounds">${snd.map((x) => opt(`lib|${x.file}`, `${x.category}: ${x.name}`)).join("")}</optgroup>` : ""}
+      ${ref && !snd.some((x) => `lib|${x.file}` === ref) && !assets.some((a) => `asset|${a.file}` === ref) && !(P.music_files || []).some((f) => `music|${f}` === ref) && !P.sources.some((s) => `clip|${s.file}` === ref) ? opt(ref, srcName(it) + " (missing)") : ""}</select>`;
+  } else if (t.kind !== "text") {
+    srcSel = `<select id="teSrc">${assets.filter((a) => !a.audio).length ? `<optgroup label="Uploads">${assets.filter((a) => !a.audio).map((a) => opt(`asset|${a.file}`, `${a.still ? "🖼" : "🎞"} ${a.file}`)).join("")}</optgroup>` : ""}
+      <optgroup label="Your clips">${P.sources.map((s) => opt(`clip|${s.file}`, s.file)).join("")}</optgroup></select>`;
+  }
+  const num = (id, v, step, lab, tip) => `<label class="tef" data-tip="${esc(tip)}">${lab} <input type="number" id="${id}" step="${step}" min="0" value="${v}"></label>`;
+  box.innerHTML = `<div class="tehead"><b>${(TKIND[t.kind] || [""])[0]} ${esc(t.name)}</b>
+      <span class="muted small">${sp.ok ? `${fmt(sp.a)} → ${fmt(sp.b)} · connected to scene ${(P.scenes.find((x) => x.id === it.anchor) || {}).no || "?"} (moves with it)` : "⚠ its scene is cut – not in the video"}</span>
+      <span class="spacer"></span><button class="lnk danger" id="teDel">🗑 remove</button><button class="lnk" id="teClose">close</button></div>
+    <div class="terow">
+      ${t.kind === "text" ? `<input id="teText" value="${esc(it.text)}" maxlength="200" placeholder="Text (put *one word* in stars – shown plain)">
+        <select id="teStyle" data-tip="title = big, middle · lower = coloured bar above the captions · top = coloured banner at the top">${["title", "lower", "top"].map((v) => `<option ${v === it.style ? "selected" : ""}>${v}</option>`).join("")}</select>` : srcSel}
+      ${t.kind !== "text" ? `<button class="btn small" id="teUp" data-tip="Upload a ${t.kind === "audio" ? "sound or music file (MP3 / WAV / M4A …)" : "video or picture"} for this item">⬆ upload</button><input type="file" id="teFile" hidden accept="${t.kind === "audio" ? "audio/*" : "video/*,image/*"}">` : ""}
+    </div>
+    <div class="terow">
+      ${num("teDur", it.dur, 0.1, "length", "Seconds on the timeline")}
+      ${t.kind !== "text" && it.src_len !== 0 ? num("teIn", it.in || 0, 0.1, "starts at", "Seconds into the clip / sound where it starts playing") : ""}
+      ${t.kind === "video" || t.kind === "broll" ? `<label class="tef">where <select id="teWhere">${[["full", "full screen"], ["top", "top"], ["bottom", "bottom"], ["pip", "corner (picture-in-picture)"]].map(([v, l]) => `<option value="${v}" ${v === it.where ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        <label class="tef">picture <select id="teFit"><option value="fill" ${it.fit !== "fit" ? "selected" : ""}>fill (crop)</option><option value="fit" ${it.fit === "fit" ? "selected" : ""}>whole picture</option></select></label>` : ""}
+      ${t.kind === "video" || t.kind === "audio" ? `<label class="tef" data-tip="${t.kind === "video" ? "Its own sound (0 = silent)" : "Volume – music under your voice sounds right around 20-35 %"}">volume <input type="number" id="teVol" step="5" min="0" max="200" value="${Math.round((it.vol ?? 1) * 100)}"> %</label>` : ""}
+      ${t.kind === "audio" ? num("teFi", it.fade_in || 0, 0.1, "fade in", "Seconds to fade in") + num("teFo", it.fade_out || 0, 0.1, "fade out", "Seconds to fade out") : ""}
+    </div>`;
+  const set = (o) => trackOp({ op: "item_set", track: t.id, item: it.id, set: o }, true);
+  $("#teClose", box).onclick = () => { TSEL = null; renderTrkEdit(); renderSceneTimeline(); };
+  $("#teDel", box).onclick = () => { TSEL = null; trackOp({ op: "item_remove", track: t.id, item: it.id }).then(renderTrkEdit); };
+  const on = (id, fn) => { const el = $(id, box); if (el) el.onchange = () => fn(el.value); };
+  on("#teSrc", (v) => { const [tt, ...n] = v.split("|"); set({ src: { t: tt, n: n.join("|") }, in: 0, dur: it.dur }); });
+  on("#teText", (v) => v.trim() && set({ text: v }));
+  on("#teStyle", (v) => set({ style: v }));
+  on("#teDur", (v) => set({ dur: +v }));
+  on("#teIn", (v) => set({ in: +v }));
+  on("#teWhere", (v) => set({ where: v }));
+  on("#teFit", (v) => set({ fit: v }));
+  on("#teVol", (v) => set({ vol: +v / 100 }));
+  on("#teFi", (v) => set({ fade_in: +v }));
+  on("#teFo", (v) => set({ fade_out: +v }));
+  if ($("#teUp", box)) {
+    $("#teUp", box).onclick = () => $("#teFile", box).click();
+    $("#teFile", box).onchange = (e) => {
+      const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+      const fd = new FormData(); fd.append("files", f);
+      toast(`Uploading ${f.name}…`);
+      fetch(`/api/projects/${PID}/upload?kind=asset`, { method: "POST", body: fd }).then((r) => r.json().then((j) => [r.ok, j]))
+        .then(([ok, j]) => { if (!ok) return toast(j.error || "Upload failed", true); set({ src: { t: "asset", n: j.file }, in: 0, dur: it.dur }); })
+        .catch(() => toast("Upload failed – is the black Start Studio window still open?", true));
+    };
+  }
+  if (t.kind === "audio" && !LIBCAT) loadLib().then(() => { if (TSEL && TSEL.item === it.id) renderTrkEdit(); });
+}
+const ZOOMS = [1, 1.5, 2, 3, 4, 6, 8, 12];
+function setZoom(z) {
+  const box = $("#stl"), head = $("#stlHead");
+  const at = head ? (parseFloat((head.style.transform.match(/translateX\(([-\d.]+)px/) || [0, 0])[1]) || 0) : 0;
+  const frac = STL.pps ? at / STL.pps : 0;
+  STL.zoom = z; renderSceneTimeline();
+  if (box && STL.pps) box.scrollLeft = Math.max(0, frac * STL.pps - box.clientWidth / 2);  // keep the playhead in view
+}
+$("#zIn").onclick = () => setZoom(ZOOMS.find((z) => z > (STL.zoom || 1)) || ZOOMS[ZOOMS.length - 1]);
+$("#zOut").onclick = () => setZoom([...ZOOMS].reverse().find((z) => z < (STL.zoom || 1)) || 1);
+$("#zFit").onclick = () => setZoom(1);
+$("#stl").addEventListener("wheel", (e) => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  (e.deltaY < 0 ? $("#zIn") : $("#zOut")).click();
+}, { passive: false });
+// ✨ AUTO-EDIT: one click – the studio places everything, renders, and the report says what it did per scene
+// the order matters: ① the plan changes WHICH scenes exist; ② auto-edit decorates them. Decorating first = lost work.
+function storyWaiting() { const sb = P.storyboard; return !!(sb && sb.status && !/applied/.test(String(sb.status))); }
+$("#autoBtn").onclick = async () => {
+  const b = $("#autoBtn");
+  if (planPending() && !confirm("Step ① is still running: Claude's story plan hasn't arrived yet (say “process studio inbox” in VS Code).\n\nThe plan may cut or reorder scenes – what auto-edit puts on those scenes would be lost.\n\nAuto-edit now anyway?")) return;
+  if (storyWaiting() && !confirm("A Claude storyboard is waiting for your approval (Storyboard button).\n\nApprove it first – it may cut or reorder scenes, and auto-edit work on those scenes would be lost.\n\nAuto-edit now anyway?")) return;
+  if (P.auto_edit && !confirm("Run auto-edit again? It replaces its own earlier stickers / sounds / zooms / transitions (your own edits stay).")) return;
+  b.disabled = true; b.textContent = "② ✨ Editing…";
+  try {
+    const r = await api(`/api/projects/${PID}/autoedit`, { method: "POST", body: { level: $("#autoLevel").value || null } });
+    toast(r.reply);
+    SHOW = { sid: (P.scenes.find(inVid) || {}).id, switchView: true, at: Date.now() };
+    await refresh(true); renderPvBadge();
+    $("#aeReport").open = true;
+  } catch (e) { toast(e.message, true); }
+  b.disabled = false; b.textContent = "② ✨ Auto-edit";
+};
+$("#aeClear").onclick = async () => {
+  try { const r = await api(`/api/projects/${PID}/autoedit`, { method: "POST", body: { action: "clear" } }); toast(r.reply); await refresh(true); autoPreviewTick(); }
+  catch (e) { toast(e.message, true); }
+};
+// 💬 SUGGESTIONS: a plain-words note for many scenes -> applied, then the edited video updates
+let SUG_BUSY = false;
+// ONE status line that always says what is happening: applying → updating the video (scene x/y) → done ✓,
+// plus anything still waiting for Claude. Redrawn on every poll, so it is never stale.
+function renderSugStatus() {
+  const el = $("#sugStatus"); if (!el || !P) return;
+  const j = P.job || {}, rendering = ["running", "queued"].includes(j.status) && ["preview", "final", "ref_audio"].includes(j.kind);
+  const waiting = (P.commands || []).filter((c) => c.status === "claude").length;
+  const st = typeof editedState === "function" ? editedState().k : "";
+  let html = "";
+  if (SUG_BUSY) html = `<span class="spin"></span> Applying your note…`;
+  else if (rendering) html = `<span class="spin"></span> Working – ${esc(j.kind === "final" ? "making the final video" : j.kind === "ref_audio" ? "taking the voice out of the reference" : "updating your edited video")}${j.progress && j.progress !== "Queued" ? ` · ${esc(j.progress)}` : j.status === "queued" ? " · starting…" : ""}`;
+  else if (j.status === "error" && (P.suggestions || []).length) html = `<span class="bad">✗ The last update failed – ${esc((j.error || "").split("\n")[0].slice(0, 140))}</span>`;
+  else if ((P.suggestions || []).length && st === "fresh") html = `<span class="okc">✓ Done – your edited video is up to date</span> <button class="lnk" id="sugPlay">▶ watch it</button>`;
+  else if ((P.suggestions || []).length && st === "stale") html = `<span class="spin"></span> Your edited video is about to update…`;
+  if (waiting) html += `${html ? " &nbsp;·&nbsp; " : ""}<span class="clw"><span class="dot"></span> ${waiting} waiting for Claude – say “process studio inbox” in VS Code</span>`;
+  el.hidden = !html;
+  if (el.dataset.h !== html) { el.dataset.h = html; el.innerHTML = html; const pb = $("#sugPlay"); if (pb) pb.onclick = () => $("#previewBtn").click(); }
+}
+$("#sugSend").onclick = async () => {
+  const ta = $("#sugText"), text = ta.value.trim(), b = $("#sugSend");
+  if (!text) return toast("Type a change first – e.g. scene 5 money sticker and cash sound, or remove silences.", true);
+  if (SUG_BUSY) return;
+  SUG_BUSY = true; renderSugStatus();
+  b.disabled = true; b.innerHTML = `<span class="spin"></span>`;
+  try {
+    const r = await api(`/api/projects/${PID}/suggest`, { method: "POST", body: { text } });
+    const ok = r.results.filter((x) => x.ok).length;
+    toast(`${ok} of ${r.results.length} change(s) done` + (r.queued ? ` · ${r.queued} sent to Claude` : "") + (r.changed ? " – updating your edited video…" : "."), !ok && !r.queued);
+    if (r.changed) { ta.value = ""; SHOW = { sid: (P.scenes.find(inVid) || {}).id, switchView: true, at: Date.now() }; }
+    await refresh(true); renderPvBadge();
+  } catch (e) { toast(e.message, true); }
+  SUG_BUSY = false; renderSugStatus();
+  b.disabled = false; b.textContent = "Send";
+};
+$("#sugText").addEventListener("keydown", (e) => {  // chat style: Enter sends, Shift+Enter = a new line
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#sugSend").click(); } });
+function renderSuggest() {
+  renderSugStatus();
+  const ul = $("#sugResult"), last = (P.suggestions || [])[0];
+  $("#sugBox").classList.toggle("ready", !!P.auto_edit);
+  if (!last) { ul.hidden = true; return; }
+  ul.hidden = false;
+  ul.innerHTML = `<li class="muted small">Last note (${esc(new Date(last.at).toLocaleTimeString())}):</li>` + last.results.map((x) => {
+    const ic = x.ok ? "✓" : x.ok === null ? "→" : "✗", cls = x.ok ? "ok" : x.ok === null ? "cl" : "bad";
+    const sc = x.scene && P.scenes[x.scene - 1];
+    const who = sc ? `<button class="lnk" data-sgsel="${sc.id}">Scene ${x.scene}</button>` : x.scene ? `Scene ${x.scene}` : "Whole video";
+    return `<li class="${cls}"><b>${ic}</b> ${who} · <i>${esc(x.text)}</i> – ${esc(x.reply)}</li>`; }).join("");
+  $$("[data-sgsel]", ul).forEach((b) => (b.onclick = () => selectScene(b.dataset.sgsel)));
+}
+function renderAutoReport() {
+  const box = $("#aeReport"), ae = P && P.auto_edit;
+  if (!box) return;
+  if (!ae) { box.hidden = true; return; }
+  box.hidden = false;
+  const c = ae.counts || {};
+  const sbAt = (P.storyboard || {}).applied_at;
+  const stale = sbAt && ae.at && sbAt > ae.at;
+  $("summary", box).innerHTML = (stale ? `<span class="aestale">⚠ The story changed after auto-edit (storyboard applied) – click ② Auto-edit again to fit the new cut.</span><br>` : "") + `✨ Auto-edit (${esc(ae.level)}) · ${c.stickers || 0} stickers · ${c.sfx || 0} sounds · ${c.punches || 0} zooms · ${c.transitions || 0} transitions · ${c.effects || 0} effects <span class="muted small">– click a scene to review it</span>`;
+  $("ol", box).innerHTML = (ae.report || []).map((l) => { const m = l.match(/^Scene (\d+):\s*(.*)$/); const sc = m && P.scenes[+m[1] - 1];
+    return `<li>${sc ? `<button class="lnk" data-aesel="${sc.id}">Scene ${m[1]}</button>: ${esc(m[2])}` : esc(l)}</li>`; }).join("");
+  $$("[data-aesel]", box).forEach((b) => (b.onclick = () => selectScene(b.dataset.aesel)));
+}
+$("#addTrackBtn").onclick = (e) => { e.stopPropagation(); $("#trkMenu").hidden = !$("#trkMenu").hidden; };
+document.addEventListener("click", (e) => { if (!e.target.closest(".trkadd")) $("#trkMenu").hidden = true; });
+$$("[data-addtrk]").forEach((b) => (b.onclick = async () => {
+  $("#trkMenu").hidden = true;
+  const r = await trackOp({ op: "add", kind: b.dataset.addtrk });
+  if (r) toast(`${r.reply} Double-click on it to add something${b.dataset.addtrk === "video" || b.dataset.addtrk === "broll" ? ", or drag a clip chip onto it" : ""}.`);
+}));
+function bindPlayhead(box) {
+  const knob = $(".ph-knob", box), cut = $(".ph-cut", box), lanes = $(".stl-lanes", box);
+  if (knob) knob.onpointerdown = (e) => {
+    e.preventDefault(); e.stopPropagation(); knob.setPointerCapture(e.pointerId);
+    let last = 0;
+    knob.onpointermove = (ev) => { const now = Date.now(); if (now - last < 60) return; last = now; seekEdit(ev.clientX - lanes.getBoundingClientRect().left); };
+    knob.onpointerup = () => { knob.onpointermove = knob.onpointerup = null; };
+  };
+  if (cut) cut.onclick = (e) => { e.stopPropagation(); splitAtPlayhead(); };
+}
+function splitAtPlayhead() {
+  if (playerMode === "source") return $("#splitHere").click();
+  // Edited view: find the scene under the playhead and the matching second inside it
+  const m = renderTimes(false), t = player.currentTime;
+  const s = P.scenes.filter(inVid).find((x) => t >= sAt(x, m) && t < sAt(x, m) + sDur(x, m));
+  if (!s) return toast("Put the playhead on a scene first.", true);
+  const into = (t - sAt(s, m)) * (s.speed || 1);
+  if (into < 0.3 || into > (s.out - s.in) - 0.3) return toast("Too close to the scene's start or end to split there.", true);
+  sendCommand(s.id, `split at ${into.toFixed(2)}`).then(() => {
+    if (s.remove_silence || (s.cuts || []).length) toast("Split made – the scene has jump cuts, so the cut point is approximate. Check it in Original footage.");
+  });
 }
 function renderTimes(fresh) {  // id -> [start, dur] measured in the rendered file (null if unknown / stale)
   const pv = P && latestPreview();
@@ -1457,8 +2053,9 @@ $("#player").addEventListener("seeked", drawStlHead);
 function stlDown(e) {
   const el = e.currentTarget, id = el.dataset.id, b = STL.blocks.find((k) => k.s.id === id);
   if (!b || e.button !== 0) return;
+  if ((P.ui_locks || {}).main) { selectScene(id); return toast("Video 1 is locked – click 🔒 on its header to unlock it.", true); }
   const edge = e.target.classList.contains("hd") ? (e.target.classList.contains("l") ? "l" : "r") : null;
-  STL.drag = { id, b, el, edge, x0: e.clientX, moved: false };
+  STL.drag = { id, b, el, edge, x0: e.clientX, moved: false, top0: el.getBoundingClientRect().top };
   el.setPointerCapture(e.pointerId);
   el.onpointermove = stlMove; el.onpointerup = stlUp; el.onpointercancel = () => { STL.drag = null; renderSceneTimeline(); };
 }
@@ -1475,8 +2072,35 @@ function stlMove(e) {
     const diff = d.edge === "l" ? d.val - s.in : s.out - d.val;
     $("#stlInfo").textContent = `${d.edge === "l" ? "Start" : "End"}: ${diff >= 0 ? "trim" : "extend"} ${Math.abs(diff).toFixed(2)} s`;
   } else {
-    // dragged UP onto the B-roll lane = make it B-roll footage (handled on release)
-    const over = document.elementFromPoint(e.clientX, e.clientY);
+    // dragged UP onto the B-roll lane = make it B-roll footage; onto a Video / B-roll / Audio TRACK = lift it there
+    // look THROUGH the dragged block (it moves under the pointer) to the lane underneath
+    const over = document.elementsFromPoint(e.clientX, e.clientY).find((n) => n !== d.el && !d.el.contains(n) && n.closest) || null;
+    const tl = over ? over.closest("#stl .lane.trk") : null;
+    const nz = over ? over.closest("#stl .lane.newtrk") : null;
+    nz && $(".lane.newtrk").classList.add("dropzone");
+    if (!nz) { const z = $("#stl .lane.newtrk"); if (z) z.classList.remove("dropzone"); }
+    if (nz && !isBroll(d.b.s) && d.b.s.keep) {
+      d.toNew = true; d.toTrack = null; d.dropT = xToT(Math.max(0, d.b.x + dx));
+      d.el.style.transform = `translate(${dx}px, ${nz.getBoundingClientRect().top + 3 - d.top0}px)`;
+      d.el.classList.add("dragging");
+      $("#stlInfo").textContent = `Scene ${d.b.s.no} → a NEW Video track at ${fmt(d.dropT)} – the main video closes the gap`;
+      return;
+    }
+    d.toNew = false;
+    const tk = tl && (P.tracks || []).find((x) => x.id === tl.dataset.trk);
+    const okTrack = !!tk && tk.kind !== "text" && !isBroll(d.b.s) && d.b.s.keep;
+    $$("#stl .lane.trk").forEach((x) => x.classList.toggle("dropzone", x === tl && okTrack));
+    d.toTrack = okTrack ? tk : null;
+    if (d.toTrack) {
+      d.dropT = xToT(Math.max(0, d.b.x + dx));
+      d.el.style.transform = `translate(${dx}px, ${tl.getBoundingClientRect().top + 3 - d.top0}px)`;
+      d.el.classList.add("dragging");
+      $$(".sblk", $("#stl")).forEach((x) => x.classList.remove("dropl"));
+      $("#stlInfo").textContent = `Scene ${d.b.s.no} → “${tk.name}” at ${fmt(d.dropT)} (${tk.kind === "broll" ? "picture only" : tk.kind === "audio" ? "sound only" : "picture + sound"}) – the main video closes the gap`;
+      return;
+    }
+    if (tk && tk.kind === "text") $("#stlInfo").textContent = "Scenes can't go on a Text track – drop it on a Video, B-roll or Audio track.";
+    else if (tk && !d.b.s.keep) $("#stlInfo").textContent = `Scene ${d.b.s.no} is cut – restore it first.`;
     d.toBroll = !!(over && over.closest && over.closest("#stl .lane.broll"));
     const dy = d.toBroll ? -(d.el.offsetTop + d.el.offsetHeight) + 10 : 0;
     d.el.style.transform = `translate(${dx}px, ${dy}px)`; d.el.classList.add("dragging");
@@ -1493,7 +2117,22 @@ async function stlUp() {
   const s = d.b.s;
   if (!d.moved) { selectScene(s.id); return; }
   const bl = $("#stl .lane.broll"); if (bl) bl.classList.remove("dropzone");
+  $$("#stl .lane.trk").forEach((x) => x.classList.remove("dropzone"));
   try {
+    if (!d.edge && d.toNew) {
+      const z = $("#stl .lane.newtrk"); if (z) z.classList.remove("dropzone");
+      const r = await trackOp({ op: "scene_to_track", new_kind: "video", scene: s.id, t: +d.dropT.toFixed(3) });
+      if (r && r.item) { TSEL = { track: r.track, item: r.item }; renderSceneTimeline(); renderTrkEdit(); }
+      return;
+    }
+    if (!d.edge && d.toTrack) {
+      const tk = d.toTrack, speech = (s.transcript || "").trim() && !s.no_speech;
+      const words = (s.caption_view ?? s.transcript ?? "").split(/\s+/).slice(0, 10).join(" ");
+      if (tk.kind === "broll" && speech && !confirm(`Scene ${s.no} has speech:\n“${words}…”\n\nA B-roll track is SILENT – these words won't be heard (a Video track keeps the sound). Continue?`)) { renderSceneTimeline(); return; }
+      const r = await trackOp({ op: "scene_to_track", track: tk.id, scene: s.id, t: +d.dropT.toFixed(3) });
+      if (r && r.item) { TSEL = { track: tk.id, item: r.item }; renderSceneTimeline(); renderTrkEdit(); }
+      return;
+    }
     if (!d.edge && d.toBroll && isBroll(s)) { /* already B-roll */ }
     else if (!d.edge && isBroll(s)) {
       // a B-roll scene dragged to a place in the video = it plays there as a normal scene (one undo step)
@@ -1551,6 +2190,25 @@ async function sendBroll(set) {
 }
 function chipDown(e) {
   if (e.button !== 0) return;
+  const tl = (ev) => { const el = document.elementFromPoint(ev.clientX, ev.clientY); return el && el.closest ? el.closest("#stl .lane.trk") : null; };
+  e.currentTarget.addEventListener("pointerup", (ev) => {  // dropped on a Video / B-roll track: add it there
+    const lane = tl(ev);
+    const nz = (() => { const el = document.elementFromPoint(ev.clientX, ev.clientY); return el && el.closest ? el.closest("#stl .lane.newtrk") : null; })();
+    if (nz) {  // the empty zone: a new track for it – speech clips on a Video track (keeps the sound), the rest B-roll
+      const f = e.currentTarget.dataset.file, asset = (P.broll_assets || []).find((a) => a.file === f), src = P.sources.find((x) => x.file === f);
+      const kind = asset ? (asset.audio ? "audio" : "broll") : (src && src.has_audio !== false && P.scenes.some((x) => x.src === f && (x.transcript || "").trim() && !x.no_speech) ? "video" : "broll");
+      const an = anchorAt(xToT(ev.clientX - $("#stl .stl-lanes").getBoundingClientRect().left));
+      if (!an) return;
+      const item = Object.assign({ src: { t: asset ? "asset" : "clip", n: f }, dur: asset && asset.still ? 3 : Math.min(5, +(asset ? asset.duration : src && src.duration) || 5), where: "full" }, an);
+      trackOp({ op: "item_add", new_kind: kind, item }).then((r) => { if (r && r.item) { TSEL = { track: r.track, item: r.item }; renderSceneTimeline(); } });
+      return;
+    }
+    if (!lane) return;
+    const t = (P.tracks || []).find((x) => x.id === lane.dataset.trk);
+    if (!t || (t.kind !== "video" && t.kind !== "broll")) return toast(t && t.kind === "audio" ? "Clips go on a Video or B-roll track – for an Audio track use “+ add” there." : "Drop clips on a Video or B-roll track.", true);
+    const f = e.currentTarget.dataset.file, isAsset = (P.broll_assets || []).some((a) => a.file === f);
+    trkAddAt(t, xToT(ev.clientX - $("#stl .stl-lanes").getBoundingClientRect().left), { src: { t: isAsset ? "asset" : "clip", n: f } });
+  }, { once: true });
   const chip = e.currentTarget, file = chip.dataset.file, x0 = e.clientX, y0 = e.clientY;
   const isBclip = (P.broll_clips || []).some((c) => c.file === file);  // only B-roll clips can be inserted as scenes
   let ghost = null, tgt = null, insertAt = null;
@@ -1610,6 +2268,7 @@ function chipDown(e) {
   chip.onpointerup = end; chip.onpointercancel = () => { if (ghost) ghost.remove(); ghost = null; tgt = -1; insertAt = null; end(); };
 }
 function bDown(e) {
+  if ((P.ui_locks || {}).broll) return toast("The B-roll lane is locked – click 🔒 on its header to unlock it.", true);
   if (e.button !== 0) return;
   const el = e.currentTarget, run = STL.bRuns[+el.dataset.run]; if (!run) return;
   const runIdx = []; for (let i = run.start; i <= run.end; i++) runIdx.push(i);
@@ -1678,7 +2337,7 @@ document.addEventListener("keydown", (e) => {
     const i = P.scenes.findIndex((x) => x.id === selected), j = i + (e.key === "ArrowRight" ? 1 : -1);
     if (P.scenes[j]) selectScene(P.scenes[j].id);
   }
-  else if (e.key === "s" || e.key === "S") $("#splitHere").click();
+  else if (e.key === "s" || e.key === "S") splitAtPlayhead();
   // Delete only – not Backspace: too easy to hit by accident
   else if (e.key === "Delete" && s && !isBroll(s)) { e.preventDefault(); sendCommand(s.id, s.keep ? "cut" : "keep"); }
   else if (e.key === "i" || e.key === "I") trimAtPlayhead("i");
@@ -1733,8 +2392,6 @@ async function sendCommand(scene, text) {
 }
 $("#sceneSend").onclick = () => { const s = curScene(); if (!s) return toast("Select a scene first.", true); sendCommand(s.id, $("#sceneCmd").value).then(() => ($("#sceneCmd").value = "")); };
 $("#sceneCmd").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#sceneSend").click(); });
-$("#globalSend").onclick = () => sendCommand(null, $("#globalCmd").value).then(() => ($("#globalCmd").value = ""));
-$("#globalCmd").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#globalSend").click(); });
 const CHIP_TIP = { "cut": "Remove the selected scene from the video.", "keep": "Bring a cut scene back.",
   "trim start 0.5": "Remove half a second from the start of the scene.", "trim end 0.5": "Remove half a second from the end of the scene.",
   "speed 1.25": "Play the scene 25 % faster.", "slow mo": "Play the scene in slow motion.", "mute": "Silence the scene's sound.",
@@ -1931,6 +2588,17 @@ window.addEventListener("message", (e) => {
   if (e.data.msg) toast(`${e.data.msg} (Undo takes it back)`);
 });
 const hashTab = location.hash.slice(1);
-switchTab(["footage", "refs", "scenes", "exports"].includes(hashTab) ? hashTab : store.get("cve.tab") || "footage");
+// ?widthdebug: logs the elements that make the page wider than the window (layout audits at phone width)
+if (location.search.includes("widthdebug")) setTimeout(() => {
+  const W = document.documentElement.clientWidth, bad = [];
+  for (const el of document.querySelectorAll("body *")) {
+    const r = el.getBoundingClientRect();
+    if (r.width && r.right > W + 1 && el.offsetParent !== null && ![...el.children].some((c) => c.getBoundingClientRect().right > W + 1))
+      bad.push(`[${(el.textContent || "").trim().slice(0, 40)}] ${el.parentElement ? el.parentElement.tagName.toLowerCase() + (el.parentElement.className ? "." + String(el.parentElement.className).split(" ")[0] : "") + ">" : ""}${el.tagName.toLowerCase()}${el.id ? "#" + el.id : ""}${el.className && typeof el.className === "string" ? "." + el.className.trim().split(/\s+/).join(".") : ""} right=${Math.round(r.right)} w=${Math.round(r.width)}`);
+  }
+  console.log("WIDTHDEBUG " + W + " :: " + bad.slice(0, 25).join(" | "));
+}, 2500);
+const TABS = ["footage", "refs", "media", "scenes", "exports"];
+switchTab(TABS.includes(hashTab) ? hashTab : TABS.includes(store.get("cve.tab")) ? store.get("cve.tab") : "footage");
 loadBrandKit();
 loadProjects().catch((e) => toast(e.message, true));

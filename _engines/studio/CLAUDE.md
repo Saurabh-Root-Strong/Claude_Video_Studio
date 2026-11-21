@@ -86,3 +86,17 @@ whole video `transitions <name>|off`; `effect <name>`, `effect remove <name>`, `
 top-right size 30% pop`, `sticker N <opts>`, `sticker remove N`; `sfx <id> at 0.5 vol 80%`, `sfx N <opts>`, `sfx remove N`.
 Transitions + sounds are added when the segments are joined (pipeline.assemble); a failure there renders without them
 and logs it. Effects + stickers are per segment (cache key includes the sticker files).
+
+TRACKS (tracks.py): data["tracks"] = [{id, kind: video|broll|audio|text, name, off, items}], any number, edited ONLY via
+POST /api/projects/<pid>/tracks {"op": add|remove|rename|toggle|move|item_add|item_set|item_remove, ...} (one undo step,
+validated). Items are CONNECTED clips: {anchor: scene id, off: s into that scene, dur} (+ src {t: clip|asset|lib|music, n},
+in, where full|top|bottom|pip, fit, vol, fade_in/out | text, style title|lower|top). Absolute time = start(anchor) + off.
+Pictures/titles render per scene as slices under the captions (pipeline._track_overlays; exact lengths from
+scene_out_len); audio (incl. a video item's own sound) is mixed once in pipeline.assemble. `upload?kind=asset` stores a
+video/picture/SOUND in Assets for tracks.
+
+AUTO-EDIT (autoedit.py, POST /api/projects/<pid>/autoedit {level subtle|balanced|energetic|null, action apply|clear}):
+rule-based, offline. Reads words.json timing per scene (Hindi via hinglish), keyword categories (CATS) -> sticker + kit
+sound at the word's OUTPUT time (_map_time through jump cuts/speed), punches on key words, transitions only at topic
+changes, slowzoom on speechless scenes, fadeout last. Everything tagged auto (items "auto": true, scene auto_fx /
+auto_punch); re-run replaces only auto work; never uses risky (meme) sounds. Report in data["auto_edit"].

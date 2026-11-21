@@ -18,7 +18,12 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import commands
 import core
 import hinglish
+import autoedit
+import media as media_lib
+import refaudio
+import suggest
 import library
+import tracks
 import pipeline
 import storyboard
 
@@ -84,6 +89,15 @@ def _worker():
                 info = pipeline.analyze_reference(pid, name)
                 core.mutate(pid, lambda d: d["references"].append({"id": core.new_id("r"), "file": name, "url": args["url"], **info}))
                 msg = f"Reference downloaded: {name}"
+            elif kind == "ref_audio":  # take the voice out of a reference once, so renders don't wait for it
+                r_ = next((r for r in core.load(pid).get("references", []) if r.get("id") == args["ref"]), None)
+                if not r_:
+                    msg = "That reference was removed."
+                else:
+                    core.set_job(pid, progress=f"Taking the voice out of {r_['file']} (first time only)…")
+                    refaudio.bg_audio(pid, r_, log=lambda m: core.job_log(pid, m))
+                    msg = f"Background audio of {r_['file']} is ready."
+                    auto_preview = bool(core.load(pid)["scenes"])
             elif kind == "ref_analyze":
                 for name in args["files"]:
                     core.job_log(pid, f"Analysing reference {name}")
@@ -266,11 +280,25 @@ def _decorate(data: dict) -> dict:
     adir, meta = core.assets_dir(data["id"]), data.get("assets") or {}
     thumbs = core.project_dir(data["id"]) / "work" / "thumbs"
     data["broll_assets"] = [{"file": p.name, "still": core.is_still(p.name), "duration": (meta.get(p.name) or {}).get("duration"),
+                             "audio": p.suffix.lower() in core.AUDIO_EXT,
                              "used_by": used.get(p.name, []),
                              "thumb": _asset_thumb_name(p.name) if (thumbs / _asset_thumb_name(p.name)).is_file() else None}
                             for p in (sorted(adir.iterdir(), key=lambda p: p.name.lower()) if adir.is_dir() else [])
-                            if p.is_file() and not p.name.startswith(".") and p.suffix.lower() in BROLL_EXT
+                            if p.is_file() and not p.name.startswith(".") and p.suffix.lower() in (BROLL_EXT | core.AUDIO_EXT)
                             and not core.source_by_file(data, p.name)]
+    mdir = core.BRAND / "music"
+    data.setdefault("ui_locks", {})
+    data["ref_audio_tool"] = refaudio.available()
+    bgm = {}  # pictures / videos from the Media tab, for "Green screen: picture / video"
+    for k, sub in (("pictures", "Pictures"), ("videos", "Videos")):
+        d_ = library.LIB / sub
+        bgm[k] = sorted((f"{sub}/{p.name}" for p in d_.iterdir() if p.is_file() and not p.name.startswith(".")
+                         and p.suffix.lower() in media_lib.ACCEPT), key=str.lower) if d_.is_dir() else []
+    data["bg_media"] = bgm
+    for r in data.get("references", []):
+        r["bg_ready"] = bool(r.get("file")) and refaudio.ready(data["id"], r)
+    data["music_files"] = sorted(p.name for p in mdir.iterdir() if p.is_file() and p.suffix.lower() in core.AUDIO_EXT) \
+        if mdir.is_dir() else []
     raw = core.raw_dir(data["id"])
     for s in data["sources"]:
         ps = per_src.get(s["file"], {})
@@ -295,7 +323,7 @@ def _decorate(data: dict) -> dict:
     data["inbox"] = sum(1 for c in data.get("commands", []) if c["status"] == "claude")
     data["undo_depth"] = core.history_depth(data["id"])
     sb = core.read_json(storyboard.sb_path(data["id"]), None)
-    data["storyboard"] = {"status": sb.get("status"), "beats": len(sb.get("beats", [])),
+    data["storyboard"] = {"status": sb.get("status"), "applied_at": sb.get("applied_at"), "beats": len(sb.get("beats", [])),
                           "reviewed": sum(1 for b in sb.get("beats", []) if b["status"] != "pending")} if sb else None
     return data
 
@@ -328,7 +356,7 @@ def index():
 
 @app.get("/media/<pid>/<area>/<path:name>")
 def media(pid, area, name):
-    if not core.valid_pid(pid):
+    if area not in ("library", "brand") and not core.valid_pid(pid):  # shared folders: no project needed ("_")
         abort(404)
     work = core.project_dir(pid) / "work"   # no mkdir here: a GET must never create folders
     base = {
@@ -372,6 +400,137 @@ def api_project(pid):
         return jsonify(error=str(e), damaged=True), 500
 
 
+@app.post("/api/projects/<pid>/autoedit")
+def api_autoedit(pid):
+    """✨ Auto-edit: read every scene, place transitions / effects / stickers / sounds / zoom moments (one undo step),
+    then render the preview. {"level": subtle|balanced|energetic|null, "action": "apply"|"clear"}"""
+    _exists(pid)
+    body = request.json or {}
+    res = {}
+
+    def fn(d):
+        if not any(s.get("keep", True) and s.get("role") != "broll" for s in d["scenes"]):
+            res["error"] = "No scenes yet – add footage and click Analyze first."
+            return
+        if (d.get("job") or {}).get("kind") == "analyze" and (d.get("job") or {}).get("status") == "running":
+            res["error"] = "Analysis is still running – wait for it to finish."
+            return
+        core.snapshot(pid, d)
+        if body.get("action") == "clear":
+            n = autoedit.clear_auto(d)
+            d.pop("auto_edit", None)
+            if not n:
+                core.drop_snapshot(pid)
+            res.update(reply=f"Removed {n} auto-edit change(s) – your own edits stay." if n else "Nothing from auto-edit to remove.")
+            return
+        autoedit.clear_auto(d)  # plan on a clean slate: its own earlier zooms / transitions must not block new ones
+        pl = autoedit.plan(pid, d, body.get("level"))
+        cnt = autoedit.apply(d, pl)
+        res.update(level=pl["level"], counts=cnt, report=pl["report"],
+                   reply=f"Auto-edit ({pl['level']}): {cnt['stickers']} sticker(s), {cnt['sfx']} sound(s), "
+                         f"{cnt['punches']} zoom moment(s), {cnt['transitions']} transition(s), {cnt['effects']} effect(s). "
+                         f"Rendering the edited view – review it, change any scene, Undo removes it all.")
+        d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "text": f"auto-edit {pl['level']}",
+                              "status": "done", "reply": res["reply"], "by": "studio", "created": core.now_iso()})
+        _cap_commands(d)
+    core.mutate(pid, fn)
+    if res.get("error"):
+        return jsonify(error=res["error"]), 400
+    enqueue(pid, "preview")
+    return jsonify(ok=True, **res)
+
+
+@app.post("/api/projects/<pid>/suggest")
+def api_suggest(pid):
+    """💬 Suggestions after auto-edit: a plain-words note for many scenes at once ("scene 6 calm music. scene 5 money
+    sticker and cash sound"). One undo step; what the studio can't do goes to Claude's inbox with its scene."""
+    _exists(pid)
+    body = request.json or {}
+    text = (body.get("text") or "").strip()
+    if not text:
+        return jsonify(error="Type your suggestions first."), 400
+    if len(text) > 4000:
+        return jsonify(error="That note is very long – send it in parts (under 4000 characters)."), 400
+    res = {}
+
+    def fn(d):
+        j = d.get("job") or {}
+        if j.get("kind") == "analyze" and j.get("status") in ("running", "queued"):
+            res["error"] = "Analysis is still running – wait for it to finish."
+            return
+        if not any(s.get("keep", True) and s.get("role") != "broll" for s in d["scenes"]):
+            res["error"] = "No scenes yet – add footage and click Analyze first."
+            return
+        core.snapshot(pid, d)
+        out = suggest.apply(pid, d, text, body.get("scene") or None)
+        if not out["changed"]:
+            core.drop_snapshot(pid)
+        for sid, req in out["queued"]:
+            sc = core.scene_by_id(d, sid) if sid else None
+            d["commands"].append({"id": core.new_id("cmd"), "scene": sid,
+                                  "scene_no": d["scenes"].index(sc) + 1 if sc else None,
+                                  "text": f"suggestion: {req}", "status": "claude", "reply": "", "by": None,
+                                  "created": core.now_iso()})
+        done = [r for r in out["results"] if r["ok"]]
+        d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "text": f"suggestions: {text[:300]}",
+                              "status": "done" if done else "error", "by": "studio", "created": core.now_iso(),
+                              "reply": f"{len(done)} of {len(out['results'])} suggestion(s) done"
+                                       + (f", {len(out['queued'])} sent to Claude" if out["queued"] else "") + "."})
+        _cap_commands(d)
+        d["suggestions"] = ([{"text": text, "at": core.now_iso(), "results": out["results"]}]
+                            + list(d.get("suggestions") or []))[:10]
+        res.update(results=out["results"], changed=out["changed"], queued=len(out["queued"]))
+    core.mutate(pid, fn)
+    if res.get("error"):
+        return jsonify(error=res["error"]), 400
+    if res.get("changed"):
+        enqueue(pid, "preview")
+    return jsonify(ok=True, **res)
+
+
+@app.post("/api/projects/<pid>/media_assets")
+def api_media_assets(pid):
+    """Film strip + waveform of a timeline item's file (so a track block looks like the clip it is)."""
+    _exists(pid)
+    p = tracks.media_path(pid, core.load(pid), (request.json or {}).get("src"))
+    if not p:
+        return jsonify(error="file not available"), 404
+    return jsonify(pipeline.media_assets(pid, p))
+
+
+@app.post("/api/projects/<pid>/tracks")
+def api_tracks(pid):
+    """Timeline tracks + their items: {"op": add|remove|rename|toggle|move|item_add|item_set|item_remove, ...}.
+    Each change is ONE undo step; a refused change leaves everything as it was."""
+    _exists(pid)
+    body = request.json or {}
+    res = {}
+
+    def fn(d):
+        before = copy.deepcopy(d.get("tracks") or [])
+        core.snapshot(pid, d)
+        reply, err, extra = tracks.apply_op(pid, d, body)
+        if err:
+            d["tracks"] = before
+            core.drop_snapshot(pid)
+            res["error"] = err
+            return
+        res.update(extra, reply=reply)
+        if extra.get("scene"):  # a block came back into Video 1: its thumbnail / words for the scene list + captions
+            _refresh_scene_meta(pid, d, {extra["scene"]}, {extra["scene"]})
+        if body.get("op") == "lock" or (body.get("op") == "lane" and body.get("what") == "lock"):
+            core.drop_snapshot(pid)  # a lock is a page state, not an edit: not an undo step
+            return
+        if reply:
+            d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "text": f"timeline: {body.get('op')}",
+                                  "status": "done", "reply": reply, "by": "studio", "created": core.now_iso()})
+            _cap_commands(d)
+    core.mutate(pid, fn)
+    if res.get("error"):
+        return jsonify(error=res["error"]), 400
+    return jsonify(ok=True, **res)
+
+
 # ----------------------------------------------------------------- Library (transitions, effects, stickers, sounds)
 _LIBSETUP = {"running": False, "log": []}
 
@@ -409,6 +568,67 @@ def api_library_open():
     return jsonify(ok=True)
 
 
+# ----------------------------------------------------------------- 📁 Media: your own files, sorted automatically
+
+@app.get("/api/media")
+def api_media():
+    return jsonify(kinds=media_lib.listing())
+
+
+@app.post("/api/media/upload")
+def api_media_upload():
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify(error="No files received."), 400
+    want = request.args.get("kind") or None
+    inc = library.LIB / ".incoming"
+    inc.mkdir(parents=True, exist_ok=True)
+    results = []
+    for f in files:
+        tmp = inc / f"{core.new_id('up')}{Path(core.safe_filename(f.filename or 'x')).suffix.lower()}"
+        try:
+            f.save(tmp)
+        except OSError as e:
+            tmp.unlink(missing_ok=True)
+            results.append({"ok": False, "name": f.filename, "why": f"could not save ({e.strerror or e}) – is the disk full?"})
+            continue
+        results.append(media_lib.add_file(tmp, f.filename or "upload", want if want in media_lib.KINDS else None))
+    return jsonify(ok=True, results=results)
+
+
+@app.post("/api/media/<action>")
+def api_media_action(action):
+    b = request.json or {}
+    try:
+        if action == "move":
+            msg = media_lib.move(str(b.get("kind")), str(b.get("name")), str(b.get("to")))
+        elif action == "remove":
+            msg = media_lib.remove(str(b.get("kind")), str(b.get("name")))
+        elif action == "open":
+            k = b.get("kind") if b.get("kind") in media_lib.KINDS else None
+            d = media_lib.folder(k) if k else library.LIB
+            d.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(d)  # local convenience – app is bound to 127.0.0.1 only
+            msg = ""
+        else:
+            abort(404)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(ok=True, reply=msg)
+
+
+@app.post("/api/projects/<pid>/media/use")
+def api_media_use(pid):
+    _exists(pid)
+    b = request.json or {}
+    try:
+        msg = media_lib.add_to_project(pid, str(b.get("kind")), str(b.get("name")))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(ok=True, reply=msg)
+
+
 @app.get("/api/brandkit")
 def api_brandkit():
     core.BRAND.mkdir(exist_ok=True)
@@ -424,6 +644,8 @@ def api_upload(pid):
         return jsonify(error="No files received."), 400
     if kind == "broll":
         return _upload_broll(pid, files[0], request.args.get("scene") or None)
+    if kind == "asset":  # a file for a timeline track (video / picture / SOUND), not tied to a scene
+        return _upload_broll(pid, files[0], None, allow_audio=True)
     folder = core.raw_dir(pid) if kind == "source" else core.refs_dir(pid)
     saved, skipped, dupes = [], [], []
     # camera files arrive in any order from a multi-select: add them in natural name order (C0002 before C0010)
@@ -492,14 +714,14 @@ def _asset_thumb_name(name: str) -> str:
     return f"asset_{hashlib.sha1(name.encode()).hexdigest()[:12]}.jpg"
 
 
-def _upload_broll(pid: str, f, sid: str | None):
+def _upload_broll(pid: str, f, sid: str | None, allow_audio: bool = False):
     """A video or picture uploaded for ONE scene's B-roll. Saved in Raw Footage/<pid>/Assets (not footage: it is
     never analysed, adds no scenes, no captions). The same file uploaded again is reused, not stored twice.
     With `sid`, that scene is covered with it right away (one undo step; its top/bottom/full choice is kept)."""
     name = core.safe_filename(f.filename or "broll")
     stem, ext = os.path.splitext(name)
     ext = ext.lower()
-    if ext not in BROLL_EXT:
+    if ext not in BROLL_EXT and not (allow_audio and ext in core.AUDIO_EXT):
         return jsonify(error=f"“{name}” can't be B-roll – use a video ({', '.join(sorted(core.VIDEO_EXT))}) "
                              f"or a picture ({', '.join(sorted(core.IMAGE_EXT))})."), 400
     folder = core.assets_dir(pid)
@@ -531,14 +753,22 @@ def _upload_broll(pid: str, f, sid: str | None):
         meta = pipeline.probe(dest)
     except Exception:
         meta = {}
-    if not meta.get("has_video") or not meta.get("width"):
+    is_audio = dest.suffix.lower() in core.AUDIO_EXT
+    if is_audio and not meta.get("has_audio"):
+        if not reused:
+            dest.unlink(missing_ok=True)
+        return jsonify(error=f"Can't read any sound from “{name}” – is it damaged?"), 400
+    if not is_audio and (not meta.get("has_video") or not meta.get("width")):
         if not reused:
             dest.unlink(missing_ok=True)
         return jsonify(error=f"Can't read a picture from “{name}” – is it damaged, or a sound-only file?"), 400
     still = core.is_still(dest.name)
-    info = {"duration": 0.0 if still else meta.get("duration"), "width": meta["width"], "height": meta["height"],
-            "still": still, "hdr": False if still else pipeline.is_hdr(dest)}
+    info = {"duration": 0.0 if still else meta.get("duration"), "width": meta.get("width", 0), "height": meta.get("height", 0),
+            "still": still, "audio": is_audio, "has_audio": bool(meta.get("has_audio")),
+            "hdr": False if (still or is_audio) else pipeline.is_hdr(dest)}
     try:
+        if is_audio:
+            raise ValueError("no picture")
         (core.work_dir(pid) / "thumbs").mkdir(parents=True, exist_ok=True)
         pipeline.thumbnail(dest, 0.0 if still else min(1.0, (meta.get("duration") or 0) * 0.1),
                            core.work_dir(pid) / "thumbs" / _asset_thumb_name(dest.name))
@@ -609,9 +839,15 @@ def api_broll_asset_remove(pid):
         core.snapshot(pid, d, restore_assets=[name])  # undo moves the file back out of the trash
         for s in users:
             s.pop("broll", None)
+        n_items = 0
+        for tk in d.get("tracks") or []:  # timeline-track items using it go too (Undo brings them back)
+            keep = [it for it in tk.get("items", []) if not ((it.get("src") or {}).get("t") == "asset" and it["src"].get("n") == name)]
+            n_items += len(tk.get("items", [])) - len(keep)
+            tk["items"] = keep
         nos = [d["scenes"].index(s) + 1 for s in users]
         res["reply"] = f"Removed “{name}” from the project." + (
-            f" Scene(s) {', '.join(map(str, nos))} no longer show it." if nos else "") + " (Undo brings it back.)"
+            f" Scene(s) {', '.join(map(str, nos))} no longer show it." if nos else "") + (
+            f" {n_items} timeline item(s) removed." if n_items else "") + " (Undo brings it back.)"
         d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "text": f"remove upload: {name}",
                               "status": "done", "reply": res["reply"], "by": "studio", "created": core.now_iso()})
         _cap_commands(d)
@@ -911,6 +1147,8 @@ def api_brief(pid):
             target = _ensure_look(d, look)  # editing a look the video doesn't use: the video stays as it is
         for k, v in (body.get("settings") or {}).items():
             ok, clean = core.clean_setting(k, v)
+            if ok and k == "ref_audio" and clean != "none" and not refaudio.ref_of(d, clean):
+                ok = False  # that reference was removed meanwhile
             if ok:
                 if k not in core.STYLE_KEYS:
                     d["settings"][k] = clean  # footage keys stay project-wide
@@ -921,6 +1159,11 @@ def api_brief(pid):
     core.mutate(pid, fn)
     if rejected:
         return jsonify(ok=False, error=f"Not saved (invalid value): {', '.join(rejected)}"), 400
+    ra = (body.get("settings") or {}).get("ref_audio")
+    d2 = core.load(pid)
+    r_ = refaudio.ref_of(d2, ra)
+    if r_ and not refaudio.ready(pid, r_) and refaudio.available():
+        enqueue(pid, "ref_audio", ref=r_["id"])  # take the voice out now, so the next render doesn't wait for it
     return jsonify(ok=True)
 
 
@@ -1305,6 +1548,8 @@ def api_undo(pid):
         if not snap:
             return False
         d["scenes"], d["settings"] = snap["scenes"], snap["settings"]
+        if "tracks" in snap:
+            d["tracks"] = snap["tracks"]
         # a clip removed in Footage: its scenes come back above – its entry (audio, size, analysis) must come back too,
         # else those scenes render silent and the clip is missing from Footage. Clips added since are kept.
         have = {s["file"] for s in d["sources"]}

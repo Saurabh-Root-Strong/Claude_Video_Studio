@@ -40,6 +40,7 @@ FLUENT = STICKERS / "Fluent Emoji"
 MY_STICKERS = STICKERS / "My stickers"
 SFXKIT = SOUNDS / "SFX Kit"
 MY_SOUNDS = SOUNDS / "My sounds"
+MEME = SOUNDS / "Meme sounds (Myinstants)"  # downloaded on request – NO licence (the user's responsibility)
 STICKER_EXT = {".png", ".gif", ".webp"}
 SOUND_EXT = {".wav", ".mp3", ".ogg", ".m4a", ".aac", ".flac"}
 
@@ -186,7 +187,7 @@ _lock = threading.Lock()
 
 def _sig() -> tuple:
     out = []
-    for p in (FLUENT / "catalog.json", SFXKIT / "sounds.json", MY_STICKERS, MY_SOUNDS, PREVIEWS):
+    for p in (FLUENT / "catalog.json", SFXKIT / "sounds.json", MY_STICKERS, MY_SOUNDS, MEME, PREVIEWS):
         try:
             out.append((str(p), p.stat().st_mtime))
         except OSError:
@@ -239,17 +240,115 @@ def catalog() -> dict:
                     "file": _rel(f), "duration": s.get("duration"), "sync": (s.get("sync") or {}).get("at", 0.0),
                     "desc": s.get("description", ""), "use_for": s.get("use_for", [])[:4], "tags": s.get("tags", []),
                     "gain_db": float(s.get("under_voiceover_db", 0) or 0), "pack": "SFX Kit"})
-        if MY_SOUNDS.is_dir():
-            for p in sorted(MY_SOUNDS.iterdir()):
-                if p.is_file() and p.suffix.lower() in SOUND_EXT:
-                    cat["sounds"].append({"id": "my_" + slug(p.stem), "name": p.stem, "category": "my sounds",
-                                          "file": _rel(p), "duration": None, "sync": 0.0, "desc": "Your own sound.",
-                                          "use_for": [], "tags": [], "gain_db": 0.0, "pack": "My sounds"})
+        for folder, cat_name, pack, prefix, risky in ((MY_SOUNDS, "my sounds", "My sounds", "my_", False),
+                                                      (MEME, "meme sounds", "Myinstants (no licence)", "meme_", True)):
+            if not folder.is_dir():
+                continue
+            titles = core.read_json(folder / "sounds.json", {}) or {}
+            meas = _measure_folder(folder)
+            for p in sorted(folder.iterdir()):
+                if p.is_file() and p.suffix.lower() in SOUND_EXT and p.name in meas:
+                    m = meas[p.name]
+                    title = (titles.get(p.name) or {}).get("title") or p.stem
+                    cat["sounds"].append({
+                        "id": prefix + slug(p.stem), "name": title, "category": cat_name, "file": _rel(p),
+                        "duration": m["dur"], "sync": m["peak"], "pack": pack, "risky": risky,
+                        "desc": ("⚠ No licence – a clip from myinstants.com; can get YouTube/Instagram copyright claims."
+                                 if risky else "Your own sound."),
+                        "use_for": [], "tags": [w for w in re.split(r"[^a-z0-9]+", title.lower()) if len(w) > 2],
+                        "gain_db": m["gain"]})
         cat["sound_categories"] = sorted({s["category"] for s in cat["sounds"]})
         cat["sticker_groups"] = list(dict.fromkeys(s["group"] for s in cat["stickers"]))
         cat["ready"] = bool(cat["stickers"] or cat["sounds"])
         _cache.update(sig=sig, cat=cat)
         return cat
+
+
+def _measure_folder(folder: Path) -> dict:
+    """Length, loudest moment (= its 'hit', so "hits at" lines up like the kit's sync points) and a level trim for every
+    sound in a user folder. Measured once per file version, cached in <folder>/.measure.json; unreadable files left out."""
+    import array
+    cache_f = folder / ".measure.json"
+    cache = core.read_json(cache_f, {}) or {}
+    out, changed = {}, False
+    for p in sorted(folder.iterdir()):
+        if not (p.is_file() and p.suffix.lower() in SOUND_EXT):
+            continue
+        st = p.stat()
+        c = cache.get(p.name)
+        if c and c.get("sig") == [st.st_size, st.st_mtime]:
+            if c.get("ok"):
+                out[p.name] = c
+            continue
+        r = subprocess.run([core.FFMPEG, "-v", "error", "-i", str(p), "-t", "30", "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
+                           capture_output=True, timeout=60)
+        a = array.array("h")
+        a.frombytes(r.stdout[: len(r.stdout) // 2 * 2])
+        if r.returncode != 0 or len(a) < 80:
+            cache[p.name] = {"sig": [st.st_size, st.st_mtime], "ok": False}
+            changed = True
+            continue
+        win = 80  # 10 ms windows: the loudest one is the hit
+        best, bi, tot = -1.0, 0, 0.0
+        for i in range(0, len(a) - win, win):
+            e = sum(abs(x) for x in a[i:i + win]) / win
+            tot += e
+            if e > best:
+                best, bi = e, i
+        avg = tot / max(1, len(a) // win)
+        peak_db = 20 * __import__("math").log10(max(1.0, max(abs(x) for x in a)) / 32768)
+        c = {"sig": [st.st_size, st.st_mtime], "ok": True, "dur": round(len(a) / 8000, 3), "peak": round(bi / 8000, 3),
+             "gain": round(min(0.0, -3.0 - peak_db) if peak_db > -3 else 0.0, 1) if avg > 0 else 0.0}
+        cache[p.name] = c
+        out[p.name] = c
+        changed = True
+    if changed:
+        try:
+            core._atomic_write(cache_f, cache)
+        except OSError:
+            pass
+    return out
+
+
+# 🙂🔊 every sticker pops in WITH a sound that means the same thing (a silent pop-up feels broken in a reel).
+# Rules read the sticker's id + keywords (and the spoken word it lands on, when known); first match wins.
+STICKER_SOUND_RULES = [
+    (r"money|coin|cash|dollar|banknote|rupee|yen|euro|bank|credit_card|receipt|money_mouth", "money-register", 0.6),
+    (r"chart_decreasing|down_arrow|thumbs_down|cross_mark|crying|loss|nuksan|crash|girawat", "notification-failure-fall", 0.6),
+    (r"warning|exclamation|stop_sign|no_entry|siren|police|alarm|danger|risk|scam|savdhan", "notification-alert-clear", 0.65),
+    (r"chart_increasing|up_arrow|rocket|trophy|medal|crown|flexed|glowing_star|profit|munafa|gain|double", "notification-success-chime", 0.55),
+    (r"fire|high_voltage|lightning|collision|bomb|exploding_head|mind_blown|boom", "boom-hit-medium", 0.5),
+    (r"question|thinking|eyes|magnifying|face_with_monocle|kya|kyun|kaise", "tone-ding-mid", 0.5),
+    (r"light_bulb|brain|bullseye|idea|sparkles|gem|key|pushpin|tip", "notification-success-sparkle", 0.55),
+    (r"bell|party|megaphone|loudspeaker|tada|confetti|ipo|listing", "notification-success-ding-ding", 0.55),
+    (r"hourglass|alarm_clock|stopwatch|timer|calendar|locked|hold|wait", "tone-ding-low", 0.5),
+    (r"point|arrow|backhand|right_arrow|follow|subscribe", "whoosh-fast-soft", 0.55),
+    (r"laugh|joy|rofl|grin|wink|clap|thumbs_up|heart|hand|ok_hand|handshake", "pop-medium-in", 0.55),
+]
+
+
+def sticker_sound(sticker: dict | str, word: str = "") -> dict | None:
+    """The sound for a sticker: {"file", "name", "sync", "gain_db", "vol"} from the licensed SFX kit (never a meme
+    sound), or None when the Library has no sounds. Unknown stickers get a soft pop (they pop in)."""
+    if isinstance(sticker, dict):
+        sid = str(sticker.get("id") or Path(str(sticker.get("file") or "")).stem)
+        kws = " ".join(sticker.get("keywords") or [])
+    else:
+        sid, kws = str(sticker), ""
+        it = find("sticker", sid)
+        if it:
+            sid, kws = it["id"], " ".join(it.get("keywords") or [])
+    text = f"{sid} {kws} {word}".lower()
+    sound_id, vol = "pop-medium-in", 0.5
+    for rx, snd, v in STICKER_SOUND_RULES:
+        if re.search(rx, text):
+            sound_id, vol = snd, v
+            break
+    it = find("sound", sound_id, exact=True) or find("sound", "pop-medium-in", exact=True)
+    if not it or it.get("risky"):
+        return None
+    return {"file": it["file"], "name": it["name"], "sync": round(float(it.get("sync") or 0), 3),
+            "gain_db": float(it.get("gain_db") or 0), "vol": vol}
 
 
 def find(kind: str, key: str, exact: bool = False) -> dict | None:

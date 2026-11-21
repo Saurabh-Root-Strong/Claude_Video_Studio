@@ -37,7 +37,7 @@
      "Skip" leaves a clip out of the video without deleting it.
      Click "Analyze footage" (about 1 minute per minute of video).
      When it's done, a preview of the complete video renders by itself,
-     and the green "Next: Scenes ->" button takes you to tab 3.
+     and the green "Next: Scenes ->" button takes you to tab 4.
      Clips with no speech (music, street footage) get captions OFF
      automatically. To bring them back: "captions on" in that scene.
 
@@ -50,16 +50,89 @@
      reference and fills in its look.
      "About this video" = what the video is about (shared by all looks).
      Every setting has a "?" - click it to see what it does and why.
+     "Background audio" = None, or R1 / R2...'s background music under
+     your voice: the studio takes that reference's VOICE out (Demucs
+     voice-remover, about a minute the first time, then cached) and
+     the music gets softer whenever you talk. It replaces "Music"
+     while on. Music in someone else's video is usually copyrighted -
+     fine to practise with, risky to publish.
+     "Green screen" = what shows where your green cloth was (full screen
+     AND split layout): Keep as filmed · Clean wall (colour) · Picture
+     behind me · Video behind me. For picture / video pick a file in
+     "Behind me" (from the Media tab) or click ⬆ to upload one. A video
+     loops and runs on across cuts; its sound is never used.
      Click "Save brief & settings" when done.
      For Hindi videos set "Language" to Hindi before analyzing.
 
-  TAB 3  SCENES  (the main editor)
+  TAB 3  MEDIA  (your own files - shared by every project)
+     Drop audio, music, videos, transitions, stickers or pictures (many
+     at once). The studio sorts each one into the right folder:
+        sound up to 15 s  -> Sound effects   (Library/Sounds/My sounds)
+        longer sound      -> Music           (Brand Kit/music)
+        transparent PNG / WebP, any GIF -> Stickers (Library/Stickers/My stickers)
+        photo             -> Pictures        (Library/Pictures)
+        clip named "transition / swipe / wipe / light leak / glitch..."
+        or up to 2.5 s    -> Transitions     (Library/Transitions)
+        other clip        -> Videos          (Library/Videos)
+     "Sort as" forces one kind for the next drop. The list under the drop
+     area says where each file went (or why it was refused: not a media
+     file, damaged, already there). Each card: click to play / listen,
+     "move..." = wrong kind, 🗑 = delete (kept in Library/.trash).
+     Music, sounds and stickers work at once in every project (Library
+     panel, Music setting, "scene 5 money sticker"). Videos, transitions
+     and pictures: click "+ this project" - then pick them in "Cover with
+     B-roll" or on a timeline track.
+
+  TAB 4  SCENES  (the main editor)
+     THE STEPS (top bar, left to right):
+       ① Plan story (Claude) – OPTIONAL, for raw / long footage: Claude
+          plans keep / cut / reorder, the hook, cards, B-roll as a
+          storyboard; you approve before anything changes. Short clips
+          already in order? Skip it.
+       ② ✨ Auto-edit – decorates the final cut (below). Run it AFTER ①:
+          the plan may cut or reorder scenes. It warns you if a plan is
+          still on its way / waiting for approval, and its report says
+          "run again" if the story changed afterwards.
+       💬 Tell the editor – the box under the top bar, for every change
+          after that (below).
+     ✨ AUTO-EDIT = the whole decoration in one click: pick the Look
+     first, then click it.
+     It reads every scene (what is said and WHEN) and adds:
+        - a sticker that pops in on the word that matters (📈 profit,
+          📉 loss, 💰 money, ⚠ risk, 💡 tip, 🤔 question, 👇 follow…)
+          and vanishes, with a matching sound landing on that word
+        - zoom moments on key words / numbers
+        - transitions only where the topic changes (with a whoosh)
+        - a slow zoom on scenes without speech, a fade-out ending
+     Strength: Subtle / Balanced / Energetic (or "auto strength" =
+     from your look's brief). The edited view then renders by itself.
+     The report under the timeline lists what it did in each scene –
+     click a scene to review / change it. Your own edits are never
+     touched; running it again replaces only its own work; Undo or
+     "remove the auto-edit" takes it all out. (It never uses the
+     meme sounds – only the free licensed ones.)
+     💬 TELL THE EDITOR (one box for every change, plain words):
+        name a scene = that scene; no scene = the whole video.
+          scene 6: calm music.  scene 5: money sticker and cash sound
+          scene 3: zoom on 'double', no transition
+          last scene thumbs up sticker top left · scenes 2-4 black and white
+          remove silences · format 9:16 · captions upper   (whole video)
+        Scenes: "scene 5", "scene five", "5th scene", "scenes 2-4",
+        "scene 5 and 6", "last scene", "all scenes". Timing: "at 2 s",
+        "on 'double'", "when I say double" (else the scene's key word).
+        A sticker / sound you ask for replaces auto-edit's on that scene.
+        Music needs files: put MP3s in Brand Kit/music (or Library/Music)
+        named by mood – calm_…, upbeat_…, dramatic_… – it plays under
+        that scene only, soft under your voice.
+        Meme sounds only when you write "meme" (no licence – warned).
+        Enter sends, Shift+Enter = new line. The list under the box shows
+        ✓ done · ✗ refused (why) · → sent to Claude. One Undo per note.
      "Look" dropdown at the top = which look this video USES
      (None, ★ Brand Kit, R1, R2...). A NEW video starts on
      "None · simple settings". Pick a look and its settings apply
      right away; the edited view updates by itself. Your scene edits
      (cuts, trims, cards, caption height...) stay. Undo switches back.
-     "▶ Edited view" (above the player, right of the timeline) plays your
+     "▶ Your edited video" (right of the timeline) plays your
      video with every edit so far - it updates itself after each change;
      "Original footage" plays the raw camera clip.
 
@@ -102,6 +175,45 @@
      music. They are hidden ("No speech detected") and captions stay
      off - unless you set Captions to On for that scene.
 
+     EXTRA TRACKS ("＋ Track" above the timeline) - as many as you like:
+        🎬 Video   an extra clip ON TOP, with its own sound (volume)
+        🎞 B-roll  an extra clip/picture on top, silent
+        🎵 Audio   music, voice-over or sounds (volume, fade in/out)
+        🔤 Text    titles: title (middle), lower (bar above the
+                   captions) or top (banner)
+        Double-click an empty spot on a track = add something there
+        (or drag a clip chip onto a Video/B-roll track). Drag a block =
+        move it, drag its edge = make it shorter/longer, × = remove.
+        Click a block: its settings open under the timeline (which
+        file, length, where on screen, whole picture, volume, fades,
+        ⬆ upload). Track name: double-click to rename. 👁/🔊 = hide or
+        mute the track, × = delete it (Undo brings it back).
+        Drag a SCENE from the Video lane UP onto a Video / B-roll /
+        Audio track = it leaves the main line (the video closes the
+        gap; the scene stays as a striped "cut" block) and its clip
+        plays on that track where you drop it (Video: picture + sound,
+        B-roll: picture only, Audio: sound only). Restore or Undo
+        brings it back. Its captions / jump cuts stay with the scene.
+        BACK DOWN: drag a Video / B-roll block onto Video 1 (between
+        two scenes) = it becomes a scene again – a scene you lifted
+        comes back WITH its captions, cuts and settings (trimmed the
+        way the block was). Only footage clips can be scenes; uploads
+        and pictures stay on tracks. Drag a block onto ANOTHER track
+        to move it there (Video <-> B-roll, Audio, Text: same type).
+        Video tracks have 🔊 (sound) and 👁 (picture) switches.
+        EMPTY ZONE under the tracks: drop a clip chip or drag a scene
+        there and a new track is made for it (double-click it = the
+        + Track menu).
+        TRACK HEADERS (left of every lane): 🔓/🔒 lock (no accidental
+        changes) · 👁 hide (B-roll, Cards, picture tracks) · 🔊 mute
+        (Video 1 = your scenes' own sound, Audio tracks).
+        PLAYHEAD (red line): drag its top knob to scrub; ✂ on it
+        splits the scene there (key S – works in both player views).
+        ZOOM: − / Fit / + above the timeline, or Ctrl + mouse wheel.
+        Scene blocks show their frames and, in green, their sound.
+        Each block is CONNECTED to the scene where it starts: move,
+        trim or speed up that scene and the block moves with it.
+        Higher tracks are drawn on top; captions always stay on top.
      EVERY scene of every clip is a block on the Video lane - also clips
      with nobody speaking (market footage etc.). Drag any block left or
      right to put it before/after another scene. That's all you need.
@@ -193,7 +305,7 @@
         captions off         hide captions for this scene
         remove silences      cut out pauses (jump cuts)
 
-     Commands for the WHOLE video (top box):
+     Commands for the WHOLE video (💬 box, no scene named):
         format 9:16          vertical video for Reels / Shorts
         captions upper       CAPITAL LETTER captions
         captions hinglish    Hindi captions in English letters (aap kaise ho)
@@ -220,7 +332,7 @@
         broll from 3                    start 3 s into the clip
         broll off                       remove it from this scene
         role broll / role speaker       what this scene IS
-        broll auto   (whole video box)  place unused B-roll clips
+        broll auto   (💬 box, no scene)  place unused B-roll clips
 
      STORYBOARD (when Claude has planned the edit): click the orange
      "Storyboard" button. Each beat shows the planned frame, cuts,
@@ -233,10 +345,10 @@
      "← Scenes" goes back without changing anything.
 
      Made a mistake?  Click  "Undo".
-     Want to see the result?  Click  "▶ Edited view".
+     Want to see the result?  Click  "▶ Your edited video".
      Happy with it?  Click  "Export final".
 
-  TAB 4  EXPORTS
+  TAB 5  EXPORTS
      Watch your finished videos. They are saved in the  Exports  folder.
 
 ---------------------------------------------------------------------

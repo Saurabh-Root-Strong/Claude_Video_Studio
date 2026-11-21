@@ -59,7 +59,10 @@ DEFAULT_SETTINGS = {
     "caption_color": "#FFFFFF",
     "highlight_color": "#F97316",
     "caption_position": "bottom",  # bottom | center | top
-    "caption_y": None,  # exact caption height for the WHOLE video, % from the top (None = the look's position)
+    "caption_y": None,
+    "main_mute": False,   # timeline "Video 1" 🔇: the scenes' own sound off (music / track audio only)
+    "broll_off": False,   # timeline "B-roll" lane 👁: scene cutaways hidden
+    "cards_off": False,   # timeline "Cards" lane 👁: top-panel cards hidden  # exact caption height for the WHOLE video, % from the top (None = the look's position)
     "caption_case": "normal",      # normal | upper
     "caption_words": 4,
     "caption_script": "original",  # original (as transcribed, e.g. Hindi script) | hinglish (Hindi in English letters)
@@ -73,8 +76,9 @@ DEFAULT_SETTINGS = {
     "layout": "full",              # full | split
     "split_ratio": 0.44,           # top panel share of the height
     "headline": "",                # default title card when a scene has no card of its own
-    "bg_mode": "auto",             # auto = replace a detected green screen with bg_color | off
+    "bg_mode": "auto",             # green screen: off (keep) | auto (clean wall in bg_color) | picture | video
     "bg_color": "#F4F1EC",
+    "bg_file": "",                 # picture / video behind you (Library-relative: Pictures/x.jpg, Videos/y.mp4)
     "panel_color": "#0F1B2D",
     "face_y": 0.27,                # where the speaker's eyes are in the source (0 top .. 1 bottom), for framing
     "grade": True,                 # light brightness/contrast lift on the speaker
@@ -83,6 +87,7 @@ DEFAULT_SETTINGS = {
     "music": "off",                # off | auto (Brand Kit/music, else a generated soft pad) | file in Brand Kit/music
     "loudness": -16,               # final speech loudness, LUFS (audio_polish)
     "duck_db": 10,                 # how far music drops under dialogue, dB
+    "ref_audio": "none",           # none | ref:<reference id> = that reference's background music (voice removed)
 }
 
 _lock = threading.RLock()
@@ -234,8 +239,8 @@ def new_project(name: str) -> dict:
 # this video, so they stay with the project whichever look is active.
 STYLE_KEYS = ("format", "fit", "fps", "captions", "caption_script", "caption_font", "caption_color", "highlight_color",
               "caption_position", "caption_case", "caption_words", "remove_silence", "silence_min", "logo",
-              "logo_position", "layout", "split_ratio", "bg_mode", "bg_color", "panel_color", "grade",
-              "audio_polish", "music", "loudness", "duck_db")
+              "logo_position", "layout", "split_ratio", "bg_mode", "bg_color", "bg_file", "panel_color", "grade",
+              "audio_polish", "music", "loudness", "duck_db", "ref_audio")
 
 
 def ref_id(r: dict) -> str:
@@ -275,7 +280,8 @@ def edit_sig(d: dict) -> str:
     import hashlib
     scenes = [{k: v for k, v in s.items() if k not in _SIG_SKIP} for s in d.get("scenes", [])]
     srcs = [(s.get("file"), s.get("include", True)) for s in d.get("sources", [])]
-    blob = json.dumps([scenes, d.get("settings", {}), srcs], sort_keys=True, default=str)
+    trk = [{k: v for k, v in t.items() if k != "locked"} for t in (d.get("tracks") or []) if isinstance(t, dict)]
+    blob = json.dumps([scenes, d.get("settings", {}), srcs, trk], sort_keys=True, default=str)
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 
@@ -375,6 +381,7 @@ def load(pid: str) -> dict:
         r["id"] = ref_id(r)
     data.setdefault("looks", {})
     data.setdefault("style_source", "none")
+    data.setdefault("tracks", [])
     return data
 
 
@@ -428,6 +435,7 @@ def snapshot(pid: str, data: dict, restore_assets: list[str] | None = None) -> N
     hist.append({"at": now_iso(), "scenes": copy.deepcopy(data.get("scenes", [])),
                  "settings": copy.deepcopy(data.get("settings", {})),
                  "sources": copy.deepcopy(data.get("sources", [])),  # undo can bring back a removed clip's entry
+                 "tracks": copy.deepcopy(data.get("tracks", [])),
                  **({"restore_assets": list(restore_assets)} if restore_assets else {})})
     _atomic_write(_hfile(pid), hist[-30:])
 
@@ -551,7 +559,7 @@ def job_log(pid: str, line: str) -> None:
 
 _ENUMS = {"format": {"original", "16:9", "9:16", "1:1"}, "fit": {"crop", "pad"},
           "caption_position": {"bottom", "center", "top"}, "caption_case": {"normal", "upper"},
-          "caption_script": {"original", "hinglish"}, "layout": {"full", "split"}, "bg_mode": {"auto", "off"},
+          "caption_script": {"original", "hinglish"}, "layout": {"full", "split"}, "bg_mode": {"auto", "off", "picture", "video"},
           "logo_position": {"top-right", "top-left", "bottom-right", "bottom-left"}}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
@@ -561,7 +569,7 @@ def clean_setting(key: str, value):
     try:
         if key in _ENUMS:
             return (value in _ENUMS[key]), value
-        if key in ("captions", "remove_silence", "grade", "audio_polish"):
+        if key in ("captions", "remove_silence", "grade", "audio_polish", "main_mute", "broll_off", "cards_off"):
             return True, value in (True, "true", "1", 1, "on")
         if key in ("caption_color", "highlight_color", "bg_color", "panel_color"):
             return bool(_HEX.match(str(value))), str(value).upper()
@@ -590,6 +598,16 @@ def clean_setting(key: str, value):
             return True, round(max(0.0, min(float(value), 1.0)), 3)
         if key == "headline":
             return True, re.sub(r"[{}\\\r\n]", " ", str(value or "")).strip()[:100]
+        if key == "bg_file":
+            v = str(value or "").strip().replace("\\", "/")
+            if not v:
+                return True, ""
+            import library  # local: library imports core
+            p = library.path_of(v)
+            return bool(p) and v.split("/")[0] in ("Pictures", "Videos"), v
+        if key == "ref_audio":
+            v = str(value or "none").strip()
+            return (v == "none" or bool(re.fullmatch(r"ref:[\w-]{1,64}", v))), v
         if key == "music":
             v = str(value or "off").strip()
             if v in ("off", "auto", "none", ""):

@@ -333,6 +333,22 @@ try:
     check("Claude can fill an inactive look (R2) without touching the active one; non-style keys refused",
           dd["looks"][rB]["highlight_color"] == "#22C55E" and dd["settings"]["highlight_color"] != "#22C55E" and
           "language" not in dd["looks"][rB] and dd["references"][1].get("studied"))
+    # 🎵 background audio of a reference (voice removed): stored per look, a removed / unknown reference refused,
+    # a prepared file is used without re-separating (here a stand-in tone instead of a real Demucs run)
+    import refaudio
+    cpa = refaudio.cache_path(pid, refs[0])
+    cpa.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=330:d=4", "-c:a", "aac", str(cpa)], check=True)
+    r_ra = post(f"/api/projects/{pid}/brief", {"settings": {"ref_audio": f"ref:{rA}"}})
+    r_bad = post(f"/api/projects/{pid}/brief", {"settings": {"ref_audio": "ref:nosuchref"}})
+    d_ra = core.load(pid)
+    pv = client.get(f"/api/projects/{pid}").get_json()
+    check("background audio: R1's music set on R1's look, unknown reference refused, prepared file reused (no new job)",
+          r_ra.status_code == 200 and r_bad.status_code == 400 and d_ra["settings"]["ref_audio"] == f"ref:{rA}"
+          and refaudio.bg_audio(pid, refaudio.ref_of(d_ra, d_ra["settings"]["ref_audio"])) == cpa
+          and pv["references"][0]["bg_ready"] and (d_ra.get("job") or {}).get("kind") != "ref_audio",
+          f"{r_bad.get_json()} {d_ra['settings'].get('ref_audio')}")
+    post(f"/api/projects/{pid}/brief", {"settings": {"ref_audio": "none"}})
     q1 = post(f"/api/projects/{pid}/reference/{rB}/study").get_json()
     q2 = post(f"/api/projects/{pid}/reference/{rB}/study").get_json()
     check("'Ask Claude to study' queues one inbox job per reference", q1["ok"] and not q1["already"] and q2["already"])
@@ -510,6 +526,282 @@ try:
           rs[0]["replies"] == ["Muted."] and rs[1]["replies"] == ["Unmuted."] and rs[2]["replies"][0].startswith("!"), str(rs))
     for sid_, c in ((l1, "transition off"), (l2, "effects off"), (l2, "stickers off"), (l2, "sfx off")):
         post(f"/api/projects/{pid}/command", {"scene": sid_, "text": c})
+
+    # ---------------------------------------------------------------- timeline TRACKS (connected to scenes)
+    def tk(body):
+        return post(f"/api/projects/{pid}/tracks", body)
+    blue_png, tone = ROOT / "blue card.png", ROOT / "tone.wav"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x1030E0:s=640x360", "-frames:v", "1", str(blue_png)], check=True)
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=700:d=2", "-af", "volume=0.9", str(tone)], check=True)
+    ups = [client.post(f"/api/projects/{pid}/upload?kind=asset", data={"files": (open(f_, "rb"), f_.name)},
+                       content_type="multipart/form-data").get_json() for f_ in (blue_png, tone)]
+    dt = core.load(pid)
+    vt = [x for x in dt["scenes"] if x.get("keep", True) and x.get("role") != "broll"]
+    d0 = pipeline.scene_out_len(vt[0], pipeline.load_silences(pid, vt[0]["src"]), dt["settings"])
+    tb_ = tk({"op": "add", "kind": "broll"}).get_json()["track"]
+    tt_ = tk({"op": "add", "kind": "text"}).get_json()["track"]
+    ta_ = tk({"op": "add", "kind": "audio"}).get_json()["track"]
+    r_it = tk({"op": "item_add", "track": tb_, "item": {"anchor": vt[0]["id"], "off": d0 - 0.6, "dur": 1.4,
+                                                        "src": {"t": "asset", "n": "blue card.png"}, "where": "full"}}).get_json()
+    tk({"op": "item_add", "track": tt_, "item": {"anchor": vt[1]["id"], "off": 1.2, "dur": 1.0, "text": "Track title", "style": "top"}})
+    tk({"op": "item_add", "track": ta_, "item": {"anchor": vt[2]["id"], "off": 0.5, "dur": 1.0, "src": {"t": "asset", "n": "tone.wav"}, "vol": 1}})
+    bad = [tk(b_).status_code for b_ in (
+        {"op": "item_add", "track": tb_, "item": {"anchor": "nope", "off": 0, "dur": 1, "src": {"t": "asset", "n": "blue card.png"}}},
+        {"op": "item_add", "track": tb_, "item": {"anchor": vt[0]["id"], "off": 0, "dur": 1, "src": {"t": "asset", "n": "tone.wav"}}},
+        {"op": "item_add", "track": ta_, "item": {"anchor": vt[0]["id"], "off": 0, "dur": 1, "src": {"t": "asset", "n": "blue card.png"}}},
+        {"op": "item_add", "track": tb_, "item": {"anchor": vt[0]["id"], "off": 0, "dur": 1, "src": {"t": "clip", "n": "../../x.mp4"}}},
+        {"op": "add", "kind": "weird"})]
+    dtk = core.load(pid)
+    check("tracks: add Video/B-roll/Audio/Text tracks + items; bad scene / wrong file type / unknown file refused",
+          all(u.get("file") for u in ups) and r_it.get("item") and len(dtk["tracks"]) == 3 and bad == [400] * 5
+          and sum(len(t_["items"]) for t_ in dtk["tracks"]) == 3, f"{ups} {bad}")
+    post(f"/api/projects/{pid}/render", {"kind": "preview"})
+    jt = wait_job(pid, "preview")
+    rect = core.load(pid)["renders"][-1]
+    ft = core.work_dir(pid) / rect["file"]
+    if jt["status"] == "done":
+        tmt = {i: (a_, d_) for i, a_, d_ in rect["times"]}
+        mt = pipeline.probe(ft)
+
+        def tpx(t, fx=0.08, fy=0.5):
+            b_ = subprocess.run([core.FFMPEG, "-v", "error", "-ss", f"{t:.3f}", "-i", str(ft), "-frames:v", "1", "-vf",
+                                 f"format=rgb24,crop=1:1:{int(mt['width'] * fx)}:{int(mt['height'] * fy)}", "-f", "rawvideo",
+                                 "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
+            return tuple(b_[:3])
+        s1_ = tmt[vt[1]["id"]][0]
+        isblue = lambda c: c and c[2] > 150 and c[0] < 80  # noqa: E731
+        bt = [tpx(s1_ - 0.3), tpx(s1_ + 0.5), tpx(s1_ + 1.2)]
+
+        def tpeak(t0, t1):
+            o_ = subprocess.run([core.FFMPEG, "-v", "info", "-ss", f"{t0:.3f}", "-t", f"{t1 - t0:.3f}", "-i", str(ft), "-af",
+                                 "volumedetect", "-f", "null", "-"], capture_output=True, text=True).stderr
+            m_ = _re.search(r"max_volume: (-?[\d.]+)", o_)
+            return float(m_.group(1)) if m_ else -99
+        s2t = tmt[vt[2]["id"]][0]
+        tone_db = tpeak(s2t + 0.55, s2t + 1.4)
+    check("track render: one B-roll item flows across a scene cut (both sides) and ends on time; audio item at its time; length unchanged",
+          jt["status"] == "done" and isblue(bt[0]) and isblue(bt[1]) and not isblue(bt[2]) and tone_db > -10
+          and abs(mt["duration"] - sum(d_ for _, d_ in tmt.values())) < 0.08,
+          (jt.get("error") or "") + (f" px {bt} tone {tone_db}" if jt["status"] == "done" else ""))
+    ma_snd = post(f"/api/projects/{pid}/media_assets", {"src": {"t": "asset", "n": "tone.wav"}}).get_json()
+    ma_vid = post(f"/api/projects/{pid}/media_assets", {"src": {"t": "clip", "n": vt[0]["src"]}}).get_json()
+    ma_bad = post(f"/api/projects/{pid}/media_assets", {"src": {"t": "asset", "n": "../project.json"}})
+    check("track blocks get the clip's look: waveform for a sound, film strip + waveform for a video; bad path refused",
+          ma_snd.get("wave") and not ma_snd.get("strip") and ma_vid.get("strip") and ma_bad.status_code == 404
+          and (core.work_dir(pid) / "thumbs" / ma_snd["wave"]).is_file(), f"{ma_snd} {ma_vid}")
+    dep0 = core.history_depth(pid)
+    tk({"op": "toggle", "track": tb_})
+    hidden_ok = core.load(pid)["tracks"][0]["off"] is True
+    tk({"op": "remove", "track": tt_})
+    gone_t = len(core.load(pid)["tracks"]) == 2
+    post(f"/api/projects/{pid}/undo")
+    back_t = len(core.load(pid)["tracks"]) == 3
+    rdel_t = post(f"/api/projects/{pid}/broll_asset/remove", {"file": "blue card.png"}).get_json()
+    no_item = not core.load(pid)["tracks"][0]["items"]
+    post(f"/api/projects/{pid}/undo")
+    check("tracks: hide, delete + Undo brings the track back; deleting an upload removes its items (Undo restores)",
+          hidden_ok and gone_t and back_t and no_item and core.load(pid)["tracks"][0]["items"],
+          f"{rdel_t} hidden {hidden_ok} gone {gone_t} back {back_t} no_item {no_item}")  # (undo history is capped at 30)
+    # a scene dragged UP from the Video lane onto a Video track: leaves the main line, plays on the track; Undo restores
+    tv_ = tk({"op": "add", "kind": "video"}).get_json()["track"]
+    dv = core.load(pid)
+    vv = [x for x in dv["scenes"] if x.get("keep", True) and x.get("role") != "broll"]
+    r_lift = tk({"op": "scene_to_track", "track": tv_, "scene": vv[1]["id"], "t": 0.5}).get_json()
+    dl_ = core.load(pid)
+    lifted = core.scene_by_id(dl_, vv[1]["id"])
+    itl = next(t_ for t_ in dl_["tracks"] if t_["id"] == tv_)["items"]
+    r_txt = tk({"op": "scene_to_track", "track": tt_, "scene": vv[2]["id"], "t": 0.5})
+    post(f"/api/projects/{pid}/undo")
+    du_ = core.load(pid)
+    check("scene dragged onto a Video track: leaves the main line, its clip plays there (connected at the drop spot); "
+          "Text track refused; Undo puts it back",
+          r_lift.get("item") and lifted["keep"] is False and len(itl) == 1 and itl[0]["src"]["n"] == vv[1]["src"]
+          and itl[0]["anchor"] == vv[0]["id"] and r_txt.status_code == 400
+          and core.scene_by_id(du_, vv[1]["id"]).get("keep", True) is True
+          and not next(t_ for t_ in du_["tracks"] if t_["id"] == tv_)["items"], str(r_lift))
+    # ...and dragged back DOWN onto Video 1: the same scene returns (captions etc.), at the drop spot
+    dvb = core.load(pid)
+    itb = next(t_ for t_ in dvb["tracks"] if t_["id"] == tv_)["items"]
+    rb_lift = tk({"op": "scene_to_track", "track": tv_, "scene": vv[1]["id"], "t": 0.5}).get_json()
+    r_back = tk({"op": "item_to_scene", "track": tv_, "item": rb_lift["item"], "before": "end"}).get_json()
+    d_back = core.load(pid)
+    sb_ = core.scene_by_id(d_back, vv[1]["id"])
+    vis_b = [x["id"] for x in d_back["scenes"] if x.get("keep", True) and x.get("role") != "broll"]
+    r_up = tk({"op": "item_to_scene", "track": tt_, "item": "nope", "before": "end"})
+    check("block dragged back DOWN onto Video 1 restores the SAME scene (kept, at the drop spot), its track item gone",
+          not itb and r_back.get("scene") == vv[1]["id"] and not r_back.get("new_scene") and sb_.get("keep", True)
+          and vis_b[-1] == vv[1]["id"] and not next(t_ for t_ in d_back["tracks"] if t_["id"] == tv_)["items"]
+          and r_up.status_code == 400, f"{r_back}")
+    post(f"/api/projects/{pid}/undo")
+    post(f"/api/projects/{pid}/undo")
+    # editor controls: lock a track (edits refused, not an undo step), lane switches (Video 1 mute / B-roll + cards hide,
+    # undoable), a drop on the empty zone makes the track in the same step
+    tk({"op": "lock", "track": tv_})
+    r_lk = tk({"op": "item_add", "track": tv_, "item": {"anchor": vv[0]["id"], "off": 0, "dur": 1, "src": {"t": "asset", "n": "blue card.png"}}})
+    tk({"op": "lock", "track": tv_})
+    m0 = core.load(pid)["settings"].get("main_mute")
+    tk({"op": "lane", "lane": "main", "what": "mute"})
+    m1 = core.load(pid)["settings"].get("main_mute")
+    post(f"/api/projects/{pid}/undo")
+    m2 = core.load(pid)["settings"].get("main_mute")
+    tk({"op": "lane", "lane": "main", "what": "lock"})
+    lk_main = core.load(pid).get("ui_locks", {}).get("main")
+    tk({"op": "lane", "lane": "main", "what": "lock"})
+    n_tr = len(core.load(pid)["tracks"])
+    r_new = tk({"op": "item_add", "new_kind": "broll", "item": {"anchor": vv[0]["id"], "off": 0.2, "dur": 1,
+                                                                "src": {"t": "asset", "n": "blue card.png"}}}).get_json()
+    d_new = core.load(pid)
+    check("editor controls: locked track refuses edits; Video 1 mute toggles (Undo restores); lane lock kept; "
+          "drop on the empty zone = new track + item in one step",
+          r_lk.status_code == 400 and not m0 and m1 is True and not m2 and lk_main is True
+          and len(d_new["tracks"]) == n_tr + 1 and r_new.get("track") and r_new.get("item")
+          and d_new["tracks"][-1]["kind"] == "broll" and len(d_new["tracks"][-1]["items"]) == 1, f"{r_lk.get_json()} {r_new}")
+    for t_ in list(core.load(pid)["tracks"]):
+        tk({"op": "remove", "track": t_["id"]})
+
+    # ---------------------------------------------------------------- ✨ auto-edit (one click, own edits kept, one undo)
+    post(f"/api/projects/{pid}/command", {"scene": vt[0]["id"], "text": "sticker magenta box at 0.1"})  # the user's own
+    dae0 = core.load(pid)
+    own0 = [len(s.get("stickers") or []) for s in dae0["scenes"]]
+    r_ae = post(f"/api/projects/{pid}/autoedit", {"level": "energetic"}).get_json()
+    dae1 = core.load(pid)
+    autos = sum(1 for s in dae1["scenes"] for x in (s.get("stickers") or []) + (s.get("sfx") or []) if x.get("auto"))
+    zooms = sum(len(s.get("auto_punch") or []) + len(s.get("auto_fx") or []) for s in dae1["scenes"])
+    r_ae2 = post(f"/api/projects/{pid}/autoedit", {"level": "energetic"}).get_json()  # again: replaces, never stacks
+    autos2 = sum(1 for s in core.load(pid)["scenes"] for x in (s.get("stickers") or []) + (s.get("sfx") or []) if x.get("auto"))
+    zooms2 = sum(len(s.get("auto_punch") or []) + len(s.get("auto_fx") or []) for s in core.load(pid)["scenes"])
+    r_clr = post(f"/api/projects/{pid}/autoedit", {"action": "clear"}).get_json()
+    dae2 = core.load(pid)
+    check("auto-edit: runs on every scene with a report; running again replaces (no stacking); clear removes only its "
+          "own work – the user's sticker stays",
+          r_ae.get("ok") and len(r_ae.get("report") or []) >= 3 and autos2 == autos and r_ae2.get("ok")
+          and zooms2 == zooms and zooms > 0
+          and [len(s.get("stickers") or []) for s in dae2["scenes"]] == own0
+          and not any(x.get("auto") for s in dae2["scenes"] for x in (s.get("stickers") or []) + (s.get("sfx") or []))
+          and "auto_edit" not in dae2, f"{r_ae.get('reply')} | {r_clr.get('reply')} | autos {autos}/{autos2} zooms+fx {zooms}/{zooms2}")
+    post(f"/api/projects/{pid}/command", {"scene": vt[0]["id"], "text": "stickers off"})
+
+    # ---------------------------------------------------------------- 💬 suggestions (plain words, many scenes, one undo)
+    import suggest
+    pr = [suggest.parse(t_, 7) for t_ in (
+        "in the scene six I want calm music. And scene five I want money sticker and cash sound",
+        "add a fire sticker in scene 2 and a whoosh sound in scene 4", "money sticker in scene 5 and 6",
+        "scenes 2-4 black and white effect", "scene no. 3 sticker on 'double'", "scene 1 purple\nremove silences",
+        "last scene: thumbs up sticker. also bell sound", "5th scene shake effect")]
+    check("suggestions: notes split per scene (scene six / scene no. 3 / 5th scene / 2-4 / 5 and 6 / last; request "
+          "before or after the scene; a new line without a scene = whole video)",
+          pr[0] == [([6], "i want calm music"), ([5], "i want money sticker and cash sound")]
+          and pr[1] == [([2], "add a fire sticker in"), ([4], "and a whoosh sound in")] and pr[2] == [([5, 6], "money sticker in")]
+          and pr[3] == [([2, 3, 4], "black and white effect")] and pr[4] == [([3], "sticker on 'double'")]
+          and pr[5] == [([1], "purple"), ([], "remove silences")] and pr[6] == [([7], "thumbs up sticker"), ([7], "also bell sound")]
+          and pr[7] == [([5], "shake effect")] and suggest._atoms("money sticker and cash sound, no transition")
+          == ["money sticker", "cash sound", "no transition"] and suggest._atoms("black and white effect") == ["black and white effect"]
+          and suggest.parse('scene 2 text: Big "News" & More. Today', 7) == [([2], 'text: big "news" & more. today')]
+          and suggest._atoms('text: big "news" & more. today') == ['text: big "news" & more. today'],
+          str(pr))
+    dsg = core.load(pid)
+    n1, n2 = dsg["scenes"].index(vt[0]) + 1, dsg["scenes"].index(vt[1]) + 1
+    nq0 = sum(1 for c in dsg["commands"] if c["status"] == "claude")
+    r_sg = post(f"/api/projects/{pid}/suggest", {"text": f"scene {n1}: magenta sticker at 0.3 and beep sound\n"
+                                                          f"scene {n2} shake effect, no transition\nscene 99 fire sticker\n"
+                                                          f"scene {n1} make it purple sparkly vibes"}).get_json()
+    dsg1 = core.load(pid)
+    s1_, s2s = dsg1["scenes"][n1 - 1], dsg1["scenes"][n2 - 1]
+    oks = [x["ok"] for x in r_sg.get("results") or []]
+    post(f"/api/projects/{pid}/undo")
+    dsg2 = core.load(pid)
+    check("suggestions: sticker + its sound at the asked time, effect on another scene, unknown scene refused, the rest "
+          "sent to Claude; ONE undo removes it all",
+          r_sg.get("ok") and r_sg.get("changed") and [x.get("name") for x in s1_.get("stickers") or []] == ["magenta box"]
+          and (s1_["stickers"][0]["at"] == 0.3) and [x.get("name") for x in s1_.get("sfx") or []] == ["beep"]
+          and s1_["sfx"][0]["at"] == 0.3 and "shake" in (s2s.get("effects") or []) and oks.count(False) == 1 and None in oks
+          and sum(1 for c in dsg1["commands"] if c["status"] == "claude") == nq0 + 1 and dsg1.get("suggestions")
+          and not dsg2["scenes"][n1 - 1].get("stickers") and "shake" not in (dsg2["scenes"][n2 - 1].get("effects") or []),
+          f"{[(x['scene'], x['text'], x['reply']) for x in r_sg.get('results') or []]}")
+    r_ob = post(f"/api/projects/{pid}/suggest", {"text": f"scene {n1} text: Big News Today\nhighlight #22C55E\n"
+                                                          f"scene {n1} magenta sticker. also beep sound"}).get_json()
+    dob = core.load(pid)
+    s_ob = dob["scenes"][n1 - 1]
+    post(f"/api/projects/{pid}/undo")
+    check("one box: a line without a scene = whole-video command; capitals kept as typed; a named sound replaces "
+          "the one picked for the sticker (no double hit)",
+          r_ob.get("ok") and s_ob.get("text") == "Big News Today" and all(x["ok"] for x in r_ob["results"])
+          and [x["name"] for x in s_ob.get("sfx") or []] == ["beep"],
+          f"{[(x['scene'], x['text'], x['reply'][:60]) for x in r_ob.get('results') or []]} {s_ob.get('text')}")
+
+    # ---------------------------------------------------------------- 📁 media tab: drop anything, sorted automatically
+    import media as media_lib
+    mfx = ROOT / "_media_fx"
+    mfx.mkdir(exist_ok=True)
+    gen = [("tick tone.wav", ["-f", "lavfi", "-i", "sine=f=1500:d=0.4"]),
+           ("calm bed.mp3", ["-f", "lavfi", "-i", "sine=f=220:d=30"]),
+           ("logo cut.png", ["-f", "lavfi", "-i", "color=c=red@0.0:s=120x120,format=rgba,drawbox=x=30:y=30:w=60:h=60:color=red@1:t=fill", "-frames:v", "1"]),
+           ("beach photo.jpg", ["-f", "lavfi", "-i", "testsrc=s=320x240", "-frames:v", "1"]),
+           ("light leak.mp4", ["-f", "lavfi", "-i", "testsrc=s=320x240:d=3", "-pix_fmt", "yuv420p"]),
+           ("city drone.mp4", ["-f", "lavfi", "-i", "testsrc=s=320x240:d=4", "-pix_fmt", "yuv420p"])]
+    for n_, a_ in gen:
+        subprocess.run([core.FFMPEG, "-v", "error", "-y", *a_, str(mfx / n_)], check=True)
+    (mfx / "notes.txt").write_text("hello")
+    (mfx / "fake.mp4").write_bytes(b"not a video at all" * 100)
+
+    def mup(names, kind=None):
+        fs = [open(mfx / n_, "rb") for n_ in names]
+        try:
+            return client.post("/api/media/upload" + (f"?kind={kind}" if kind else ""),
+                               data={"files": [(f_, n_) for f_, n_ in zip(fs, names)]}, content_type="multipart/form-data").get_json()
+        finally:
+            for f_ in fs:
+                f_.close()
+    rm_ = mup([n_ for n_, _ in gen] + ["notes.txt", "fake.mp4"])
+    got = {r["name"]: (r.get("kind"), r["ok"]) for r in rm_["results"]}
+    rdup = mup(["tick tone.wav"])["results"][0]
+    rforce = mup(["beach photo.jpg"], "stickers")["results"][0]
+    ml = client.get("/api/media").get_json()["kinds"]
+    library._cache["sig"] = None
+    cat_m = library.catalog()
+    check("media: dropped files sorted – short sound -> sounds, 30 s -> music, transparent PNG -> stickers, photo -> pictures, "
+          "‘light leak’ -> transitions, clip -> videos; text / fake video refused; same file twice kept once; a JPG can't be a sticker; "
+          "new sound + sticker show in the Library at once",
+          got.get("tick tone.wav") == ("sounds", True) and got.get("calm bed.mp3") == ("music", True)
+          and got.get("logo cut.png") == ("stickers", True) and got.get("beach photo.jpg") == ("pictures", True)
+          and got.get("light leak.mp4") == ("transitions", True) and got.get("city drone.mp4") == ("videos", True)
+          and got.get("notes.txt", (None, True))[1] is False and got.get("fake.mp4", (None, True))[1] is False
+          and rdup.get("dup") and not rforce["ok"]
+          and [i["name"] for i in ml["music"]["items"]] == ["calm bed.mp3"] and len(ml["videos"]["items"]) == 1
+          and any(s["name"] == "tick tone" for s in cat_m["sounds"]) and any(s["name"] == "logo cut" for s in cat_m["stickers"]),
+          f"{got} dup={rdup} force={rforce.get('why')}")
+    ru = post(f"/api/projects/{pid}/media/use", {"kind": "videos", "name": "city drone.mp4"}).get_json()
+    ru2 = post(f"/api/projects/{pid}/media/use", {"kind": "videos", "name": "city drone.mp4"}).get_json()
+    rmv_bad = post("/api/media/move", {"kind": "pictures", "name": "beach photo.jpg", "to": "music"})
+    rmv = post("/api/media/move", {"kind": "transitions", "name": "light leak.mp4", "to": "videos"}).get_json()
+    rdel = post("/api/media/remove", {"kind": "sounds", "name": "tick tone.wav"}).get_json()
+    rtrav = post("/api/media/remove", {"kind": "sounds", "name": "../../Brand Kit/brand-kit.json"})
+    pa = client.get(f"/api/projects/{pid}").get_json()
+    ml2 = client.get("/api/media").get_json()["kinds"]
+    check("media: '+ this project' copies a clip into the project's B-roll files (once); move checks the kind; delete goes "
+          "to the trash; a path in the name can't reach outside the folder",
+          ru.get("ok") and any(a["file"] == "city drone.mp4" for a in pa.get("broll_assets") or []) and "already" in ru2["reply"]
+          and rmv_bad.status_code == 400 and rmv.get("ok") and len(ml2["videos"]["items"]) == 2 and not ml2["transitions"]["items"]
+          and rdel.get("ok") and "tick tone.wav" not in [i["name"] for i in ml2["sounds"]["items"]] and (library.LIB / ".trash" / "sounds" / "tick tone.wav").is_file()
+          and rtrav.status_code == 400,
+          f"{ru} {ru2} {rmv_bad.get_json()} {rmv}")
+    # 🟩 green screen -> picture / video behind you (files from the Media tab)
+    r_gv = post(f"/api/projects/{pid}/brief", {"settings": {"bg_mode": "video", "bg_file": "Videos/city drone.mp4"}})
+    r_gbad = post(f"/api/projects/{pid}/brief", {"settings": {"bg_file": "../Brand Kit/brand-kit.json"}})
+    r_gnone = post(f"/api/projects/{pid}/brief", {"settings": {"bg_file": "Videos/nope.mp4"}})
+    st_g = core.load(pid)["settings"]
+    gb1 = pipeline.green_background(st_g)
+    gb_pic = pipeline.green_background(dict(st_g, bg_mode="picture", bg_file="Pictures/beach photo.jpg"))
+    gb_gone = pipeline.green_background(dict(st_g, bg_file="Videos/deleted.mp4"))
+    gb_off = pipeline.green_background(dict(st_g, bg_mode="off"))
+    check("green screen: video / picture behind you from Media; paths outside Library/Pictures|Videos and missing files "
+          "refused; a file deleted later falls back to the clean wall; 'keep as filmed' = none",
+          r_gv.status_code == 200 and r_gbad.status_code == 400 and r_gnone.status_code == 400
+          and st_g["bg_mode"] == "video" and st_g["bg_file"] == "Videos/city drone.mp4"
+          and gb1[0] == "video" and gb1[3] > 3 and gb_pic[0] == "picture" and gb_gone == ("color",) and gb_off is None,
+          f"{gb1} {gb_pic} {gb_gone}")
+    post(f"/api/projects/{pid}/brief", {"settings": {"bg_mode": "auto", "bg_file": ""}})
+    shutil.rmtree(mfx, ignore_errors=True)
 
     # ---------------------------------------------------------------- stale job after a closed studio
     core.set_job(pid, status="running", kind="final", pending=["preview"])

@@ -26,6 +26,11 @@
 /_engines/studio/cache/
 /_engines/studio/**/*.pyc
 
+# voice remover runner (its .venv + downloaded model stay local)
+!/_engines/separate/
+/_engines/separate/*
+!/_engines/separate/run_sep.py
+
 # Remotion project (sources only)
 !/_engines/remotion/
 /_engines/remotion/node_modules/

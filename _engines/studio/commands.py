@@ -7,7 +7,7 @@ Scene commands (typed in a scene's box):
   zoom 1.2 | zoom in | no zoom captions on | captions off
   remove silences | keep silences
   text: Your title here        text top|center|bottom | remove text
-Global commands (whole-video box):
+Global commands (the 💬 box with no scene named; suggest.py hands them here):
   format 9:16 | 16:9 | 1:1 | original     fit crop | fit pad
   captions on|off   captions upper|normal  captions top|center|bottom
   highlight #FF0000 caption color #FFFFFF  words 3
@@ -654,8 +654,9 @@ def _library_scene_cmd(data: dict, sc: dict, t: str) -> str | None:
     if re.fullmatch(r"stickers? (?:off|none|clear|remove all)|no stickers?", t):
         if not sc.get("stickers"):
             return "! This scene has no stickers."
-        sc.pop("stickers")
-        return "Stickers removed."
+        for st_ in sc.pop("stickers"):
+            _drop_pair(sc, st_)
+        return "Stickers removed (with their sounds)."
     m = re.fullmatch(r"sticker (?:remove|delete|off) (\d+)|sticker (\d+) (?:remove|delete|off)", t)
     if m:
         i = int(m.group(1) or m.group(2)) - 1
@@ -665,6 +666,7 @@ def _library_scene_cmd(data: dict, sc: dict, t: str) -> str | None:
         gone = lst.pop(i)
         if not lst:
             sc.pop("stickers")
+        _drop_pair(sc, gone)
         return f'Sticker "{gone.get("name", "")}" removed.'
     m = re.fullmatch(r"sticker (\d+) (.+)", t)
     if m:
@@ -675,9 +677,16 @@ def _library_scene_cmd(data: dict, sc: dict, t: str) -> str | None:
         o, left = _opts(m.group(2))
         if left or not o:
             return "! Sticker settings: at 1.5 · for 2 · top-right / center / bottom … · size 25% · pop / bounce / still"
-        return f"Sticker {i + 1}: " + ", ".join(_apply_sticker_opts(lst[i], o)) + "."
-    m = re.fullmatch(r"sticker (.+)", t)
+        old_at = float(lst[i].get("at") or 0)
+        done = _apply_sticker_opts(lst[i], o)
+        if "at" in o:  # its own sound moves with it
+            for x in sc.get("sfx") or []:
+                if isinstance(x, dict) and x.get("pair") and abs(float(x.get("at") or 0) - old_at) < 0.06:
+                    x["at"] = lst[i]["at"]
+        return f"Sticker {i + 1}: " + ", ".join(done) + "."
+    m = re.fullmatch(r"sticker (.+?)( silent| no sound| without sound)?", t)
     if m:
+        silent = bool(m.group(2))
         o, name = _opts(m.group(1))
         if re.fullmatch(r"\d+", name or ""):
             return f"! Say what to change, e.g. sticker {name} at 1.5 · sticker {name} top-left · sticker remove {name}."
@@ -691,7 +700,8 @@ def _library_scene_cmd(data: dict, sc: dict, t: str) -> str | None:
         st = {"file": it["file"], "name": it["name"], "at": 0.3, "dur": 2.0, "pos": "top-right", "size": 0.22, "anim": "pop"}
         _apply_sticker_opts(st, o)
         lst.append(st)
-        return f'Sticker "{it["name"]}" ({len(lst)}) at {st["at"]:g} s for {st["dur"]:g} s, {st["pos"]}.'
+        snd = "" if silent else _pair_sound(sc, it, st["at"])
+        return f'Sticker "{it["name"]}" ({len(lst)}) at {st["at"]:g} s for {st["dur"]:g} s, {st["pos"]}{snd}.'
     # ---- sound effects
     if t in ("sound off", "audio off", "sound on", "audio on"):
         return _scene_cmd(sc, "mute" if t.endswith("off") else "unmute", data)
@@ -734,6 +744,10 @@ def _library_scene_cmd(data: dict, sc: dict, t: str) -> str | None:
         if not it:
             return f'! No sound called "{name}" in the Library.' + ("" if library.catalog()["sounds"] else
                                                                      " (The Library is empty – run Library setup.)")
+        pair = [x for x in sc.get("sfx") or [] if isinstance(x, dict) and x.get("pair")]
+        if pair and "at" not in o:  # a sound picked by name replaces the one chosen for the sticker, at its moment
+            o["at"] = float(pair[-1].get("at") or 0.0)
+            sc["sfx"] = [x for x in sc["sfx"] if x is not pair[-1]]
         lst = sc.setdefault("sfx", [])
         if len(lst) >= MAX_SFX:
             return f"! At most {MAX_SFX} sound effects per scene."
@@ -742,6 +756,33 @@ def _library_scene_cmd(data: dict, sc: dict, t: str) -> str | None:
         lst.append(e)
         return f'Sound "{it["name"]}" ({len(lst)}) hits at {e["at"]:g} s into the scene.'
     return None
+
+
+def _drop_pair(sc: dict, sticker: dict) -> None:
+    """Remove the sound that was added FOR this sticker (same moment, tagged pair); the user's own sounds stay."""
+    if not isinstance(sticker, dict) or not sc.get("sfx"):
+        return
+    at = float(sticker.get("at") or 0)
+    keep = [x for x in sc["sfx"] if not (isinstance(x, dict) and x.get("pair") and abs(float(x.get("at") or 0) - at) < 0.06)]
+    if keep:
+        sc["sfx"] = keep
+    else:
+        sc.pop("sfx")
+
+
+def _pair_sound(sc: dict, sticker: dict, at: float) -> str:
+    """A sticker pops in with the sound that matches it (money -> cash register, warning -> alert, profit -> chime…),
+    unless a sound already lands within 0.3 s of it. Tagged "pair": a sound the user names later replaces it."""
+    if any(abs(float(x.get("at") or 0) - at) < 0.3 for x in sc.get("sfx") or [] if isinstance(x, dict)):
+        return ""
+    if len(sc.get("sfx") or []) >= MAX_SFX:
+        return ""
+    s = library.sticker_sound(sticker)
+    if not s:
+        return ""
+    sc.setdefault("sfx", []).append({"file": s["file"], "name": s["name"], "sync": s["sync"], "gain_db": s["gain_db"],
+                                     "at": round(at, 2), "vol": s["vol"], "pair": True})
+    return f' + “{s["name"]}” sound (say “sticker … silent” for none)'
 
 
 def _library_global_cmd(data: dict, t: str) -> str | None:
