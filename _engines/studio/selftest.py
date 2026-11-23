@@ -697,7 +697,10 @@ try:
           and pr[7] == [([5], "shake effect")] and suggest._atoms("money sticker and cash sound, no transition")
           == ["money sticker", "cash sound", "no transition"] and suggest._atoms("black and white effect") == ["black and white effect"]
           and suggest.parse('scene 2 text: Big "News" & More. Today', 7) == [([2], 'text: big "news" & more. today')]
-          and suggest._atoms('text: big "news" & more. today') == ['text: big "news" & more. today'],
+          and suggest._atoms('text: big "news" & more. today') == ['text: big "news" & more. today']
+          and suggest.FILLER_RX.sub(" ", "scene 7 follow sound accordingly, deep think as world best editor").split() == ["scene", "7", "follow", "sound", ","]
+          and bool(suggest.CONTEXT_START.match("when page ko follow karna mat bhulna"))
+          and not suggest.ACTION_RX.search("page ko follow karna mat bhulna") and suggest.ACTION_RX.search("follow button sound"),
           str(pr))
     dsg = core.load(pid)
     n1, n2 = dsg["scenes"].index(vt[0]) + 1, dsg["scenes"].index(vt[1]) + 1

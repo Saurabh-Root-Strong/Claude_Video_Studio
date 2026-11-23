@@ -91,6 +91,7 @@ SOUND_WORDS = [  # descriptor stems -> library sound id (CC0 SFX Kit)
     (("ding", "bell", "ting"), "notification-success-ding-ding"),
     (("success", "win", "correct", "positive", "chime"), "notification-success-chime"),
     (("fail", "failure", "wrong", "error", "negative", "loss", "sad"), "notification-failure-fall"),
+    (("notification", "follow", "subscribe", "like button", "bell icon", "follow button"), "notification-success-ding-ding"),
     (("alert", "warning", "alarm"), "notification-alert-clear"),
     (("boom", "bass drop", "drop", "bass"), "boom-drop-medium"),
     (("impact", "hit", "punch", "thud", "slam"), "impact-medium-firm"),
@@ -221,6 +222,20 @@ def parse(text: str, n_scenes: int, default: list[int] | None = None) -> list[tu
     return out
 
 
+# how people talk to the editor, not edits: removed before reading the note ("…, deep think")
+FILLER_RX = re.compile(r"\b(?:very\s+)?(?:deep(?:ly)?\s+think(?:ing)?|think\s+deep(?:ly)?|deep\s+dive)\b|"
+                       r"\b(?:think\s+)?as\s+(?:the\s+|a\s+)?(?:world'?s?\s+)?best\b[^.,;\n]*|"
+                       r"\b(?:accordingly|properly|nicely|asap)\b", re.I)
+# words that make a piece a REQUEST; a piece without one ("when page ko follow karna mat bhulna") is context
+ACTION_RX = re.compile(r"\b(?:stickers?|emojis?|icons?|sounds?|sfx|awaa?z|aawaz|music|song|bgm|gaana|gana|transitions?|"
+                       r"effects?|fx|filters?|zoom\w*|shake|flash|glitch|text|card|title|headline|remove|delete|hata\w*|no|"
+                       r"mute|unmute|speed|captions?|fade\w*|black|vintage|b-?roll|cut|keep|split|slow\w*|volume|louder|"
+                       r"quieter|background|logo)\b", re.I)
+HI_FILLER = {"karna", "karo", "karte", "mat", "bhulna", "bhoolna", "nahi", "hai", "hain", "tha", "thi", "wala", "wali",
+             "page", "video", "bolo", "bolna", "bole", "jab", "tab", "phir", "abhi", "yahan", "wahan", "kuch", "sab"}
+CONTEXT_START = re.compile(r"^\s*(?:when|whenever|where|while|jab|jab\s+bhi|jahan|jaha)\b", re.I)
+
+
 def _atoms(req: str) -> list[str]:
     """'money sticker and cash sound, no transition' -> ['money sticker', 'cash sound', 'no transition']."""
     if re.match(r"\s*(?:text|card|headline|title)\b\s*[:\-]", req):
@@ -285,7 +300,9 @@ def _when(atom: str, tm: SceneTime) -> tuple[float | None, str, str]:
         v = float(m.group(1).replace(",", "."))
         return round(min(max(0.0, v), max(0.0, tm.out_len - 0.3)), 2), f"at {v:g} s", (atom[:m.start()] + atom[m.end():]).strip()
     m = re.search(r"(?:\bon|\bat|\bwhen (?:i|he|she) (?:say|says|said)|\bjab .{0,12}?bol\w*)\s*[\"']([^\"']+)[\"']", atom) or \
-        re.search(r"\bwhen (?:i|he|she) (?:say|says|said) (\w+)", atom) or re.search(r"[\"']([^\"']+)[\"']", atom)
+        re.search(r"\bwhen (?:i|he|she|you) (?:say|says|said|speak|speaks) (\w+)", atom) or \
+        re.search(r"\b(?:jab|jaise\s+hi)\s+(?:mai\s+|main\s+|me\s+)?(\w+)\s+(?:bol\w*|kah\w*|aay\w*|aat\w*)\b", atom) or \
+        re.search(r"[\"']([^\"']+)[\"']", atom)  # Hindi too: "jab double bole" / "jaise hi follow bolu"
     if m:
         w = tm.find_word(m.group(1).split()[0])
         rest = (atom[:m.start()] + atom[m.end():]).strip()
@@ -568,6 +585,9 @@ def apply(pid: str, data: dict, text: str, scene_id: str | None = None) -> dict:
     n_all = len(data["scenes"])
     default = [data["scenes"].index(core.scene_by_id(data, scene_id)) + 1] if scene_id and core.scene_by_id(data, scene_id) else []
     results, queued, changed = [], [], False
+    text = FILLER_RX.sub(" ", text)
+    if not text.strip(" ,.;\n"):
+        return {"results": [], "changed": False, "queued": []}
     cased = norm_cased(text)
     low = cased.lower()
 
@@ -594,9 +614,29 @@ def apply(pid: str, data: dict, text: str, scene_id: str | None = None) -> dict:
                 results.append({"scene": k, "text": req, "reply": f"Scene {k} is cut / B-roll – it isn't in the video.", "ok": False})
                 continue
             idx = vid.index(sc)
-            for atom in _atoms(req) or [req]:
+            atoms = _atoms(req) or [req]
+            # context pieces ("when page ko follow karna mat bhulna") say WHEN, not WHAT: the first word of theirs that
+            # is really spoken in this scene times the other requests of the same note
+            ctx = [a for a in atoms if len(atoms) > 1 and (CONTEXT_START.match(a) or not ACTION_RX.search(a))]
+            hint = None
+            if ctx:
+                tm_ = SceneTime(pid, data, sc)
+                ask = " ".join(a for a in atoms if a not in ctx)
+                cands = [wd for a in ctx for wd in _content(CONTEXT_START.sub("", a), ())
+                         if len(wd) >= 3 and wd not in HI_FILLER and tm_.find_word(wd)]
+                # a word in BOTH the context and the request ("follow") wins, then the longest one
+                cands.sort(key=lambda wd: (not re.search(r"\b" + re.escape(wd) + r"\b", ask), -len(wd)))
+                hint = cands[0] if cands else None
+            for atom in atoms:
+                if atom in ctx:
+                    results.append({"scene": k, "text": atom, "ok": True, "reply":
+                                    f"read as context – timing the rest on “{hint}”." if hint else "read as context (not a change on its own)."})
+                    continue
+                a2 = atom
+                if hint and not re.search(r"\bat\s+\d|[\"']|\bwhen\b", atom):
+                    a2 = f"{atom} on '{hint}'"
                 try:
-                    r = do_atom(pid, data, sc, atom, idx, len(vid), req, orig(atom))
+                    r = do_atom(pid, data, sc, a2, idx, len(vid), req, orig(atom))
                 except Exception as e:  # noqa: BLE001  one odd request must not lose the others
                     r = f"!Could not do that ({str(e)[:80]})."
                 if r is None:
