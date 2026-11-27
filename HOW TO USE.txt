@@ -83,6 +83,19 @@
      and pictures: click "+ this project" - then pick them in "Cover with
      B-roll" or on a timeline track.
 
+     ⬇ EXTRACT & DOWNLOAD (card above the folders):
+       Source: paste a link (YouTube, Instagram, X, Facebook...), click
+       "File..." / drop a file on the card, or pick a clip "from Media".
+       Choose:  🎵 MP3 - sound only   🎞 MP4 - video with sound
+                🔇 MP4 - video only (no sound)
+       From / To (optional): just that part, e.g. 1:15 to 1:40 (or 75 /
+       100). Empty = whole clip. Click ⬇ Extract - it runs in the
+       background with a progress bar; you can keep working.
+       Each result: play it, ⬇ Download (to your Downloads folder),
+       "+ Save to Media" (Music / Sound effects / Videos / Transitions),
+       🗑 delete. Files live in Library/Extracted ("folder" link).
+       Only download what you have the right to use.
+
   TAB 4  SCENES  (the main editor)
      THE STEPS (top bar, left to right):
        ① Plan story (Claude) – OPTIONAL, for raw / long footage: Claude
@@ -127,6 +140,21 @@
         Meme sounds only when you write "meme" (no licence – warned).
         Enter sends, Shift+Enter = new line. The list under the box shows
         ✓ done · ✗ refused (why) · → sent to Claude. One Undo per note.
+        YOUR OWN CAPTIONS: paste the script, e.g.
+            captions are wrong, use these:
+            [0:00] So, gold achanak se itna downtrend mein ja raha hai
+            [0:07] Gold jo hai, woh ek safe haven commodity hai ...
+          The captions then show YOUR words exactly as typed. In the
+          background the studio listens to your voice and puts every word
+          on the moment you say it (first time: downloads a 1.2 GB voice
+          model). Time stamps are optional and can be rough. A script of
+          one part only changes that part. "captions auto" = back to the
+          automatic captions.
+        🤖 CLAUDE AUTO-REPLY (tick box in the box's top-right): what the
+          studio can't do itself is handed to Claude Code automatically –
+          no need to type "process studio inbox". It may only use the
+          studio's own commands. Each request is tried once; if it can't
+          finish you see why and a "↻ try again" link.
      "Look" dropdown at the top = which look this video USES
      (None, ★ Brand Kit, R1, R2...). A NEW video starts on
      "None · simple settings". Pick a look and its settings apply
@@ -346,10 +374,28 @@
 
      Made a mistake?  Click  "Undo".
      Want to see the result?  Click  "▶ Your edited video".
-     Happy with it?  Click  "Export final".
+     Happy with it?  Click  "Export final".  A box opens:
+
+       Where will you post it?   Same as my edit / Instagram Reel / YouTube Short /
+                                 YouTube video / TikTok / X / LinkedIn / Custom
+                                 (picks the right frame + size for you; you can change any of it)
+       Frame        9:16 vertical, 4:5 portrait, 1:1 square, 16:9 landscape
+                    (another frame than your edit: captions and titles are laid out again;
+                     vertical -> 16:9 puts you on a soft blurred copy of yourself, no black bars)
+       Resolution   As uploaded, 480p, 720p, 1080p, 2K (1440p), 4K (2160p)
+       File type    MP4 (best for uploading), MP4 H.265 (smaller), MOV (Apple),
+                    MOV ProRes (for Premiere / Final Cut – very big), WebM (websites),
+                    MKV, MP3 (sound only)
+       Quality      Standard / High / Maximum        Frame rate  same as edit, 24, 25, 30, 60
+     It shows the size, the file size and the time it takes, and warns you before you
+     make something wrong (too long for Reels, 4K that only enlarges 576p footage, ...).
+     Your edit is never changed. Several exports can wait in line (Reel, then YouTube).
+     File names say where they are for:  my-video_v3_reel_1080x1920.mp4
 
   TAB 5  EXPORTS
-     Watch your finished videos. They are saved in the  Exports  folder.
+     Watch your finished videos (MP3s play as sound). They are saved in the  Exports  folder.
+     "⬇ Download" saves a copy. ProRes / H.265 / MKV don't play in the browser – open them
+     from the folder in VLC, QuickTime or your editor.
 
 ---------------------------------------------------------------------
  3. ASKING CLAUDE (AI) TO EDIT

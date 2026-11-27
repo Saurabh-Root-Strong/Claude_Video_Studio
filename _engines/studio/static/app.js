@@ -519,9 +519,10 @@ $("#binCard").addEventListener("drop", (e) => {
 setupDrop("#dropRef", "#fileRef", "reference");
 
 /* ---------------- 📁 media (shared by every project) ---------------- */
+var CAPDRAFT = null;  // ✏ Inspector caption-text draft {sid, text}
 let MEDIA = null, MEDIA_OPEN = store.get("cve.medopen") || {};
 const MEDIA_KINDS_ORDER = ["music", "sounds", "stickers", "videos", "transitions", "pictures"];
-async function loadMedia() { try { MEDIA = (await api("/api/media")).kinds; renderMedia(); } catch (e) { toast(e.message, true); } }
+async function loadMedia() { loadExtract(); try { MEDIA = (await api("/api/media")).kinds; renderMedia(); fillXMedia(); } catch (e) { toast(e.message, true); } }
 function fmtSize(b) { return b > 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`; }
 function renderMedia() {
   const box = $("#mediaKinds"); if (!box || !MEDIA) return;
@@ -597,9 +598,103 @@ function uploadMedia(files) {
   ["dragenter", "dragover"].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add("over"); }));
   ["dragleave", "drop"].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove("over"); }));
   zone.addEventListener("drop", (e) => uploadMedia([...e.dataTransfer.files]));
-  $("#tab-media").addEventListener("drop", (e) => { if (e.target.closest("#dropMedia")) return; if (e.dataTransfer && e.dataTransfer.files.length) { e.preventDefault(); uploadMedia([...e.dataTransfer.files]); } });
+  $("#tab-media").addEventListener("drop", (e) => { if (e.target.closest("#dropMedia, #xBox")) return; if (e.dataTransfer && e.dataTransfer.files.length) { e.preventDefault(); uploadMedia([...e.dataTransfer.files]); } });
   $("#mediaFind").addEventListener("input", renderMedia);
   $("#mediaOpen").onclick = () => api("/api/media/open", { method: "POST", body: {} });
+})();
+
+/* ---------------- ⬇ extract & download: MP3 / MP4 / MP4 without sound, from a link, a file or a Media clip ---------------- */
+let XD = { jobs: [], files: [] }, XFILE = null, XMODE = store.get("cve.xmode") || "mp3", XPOLL = null, XSEEN = new Set(), XINIT = false;
+function fillXMedia() {
+  const sel = $("#xMedia"); if (!sel || !MEDIA) return;
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">or from Media…</option>` + ["videos", "transitions", "music"].filter((k) => MEDIA[k] && MEDIA[k].items.length)
+    .map((k) => `<optgroup label="${MEDIA[k].icon} ${esc(MEDIA[k].label)}">${MEDIA[k].items.map((it) => `<option value="${esc(k + "/" + it.name)}">${esc(it.name)}</option>`).join("")}</optgroup>`).join("");
+  sel.value = [...sel.options].some((o) => o.value === cur) ? cur : "";
+}
+function xSource() {  // what the next Extract uses – exactly one of link / file / Media clip
+  const url = $("#xUrl").value.trim(), m = $("#xMedia").value;
+  return XFILE ? { file: XFILE } : m ? { media: m } : url ? { url } : null;
+}
+function renderXChosen() {
+  const el = $("#xChosen"), m = $("#xMedia").value;
+  const t = XFILE ? `📁 <b>${esc(XFILE.name)}</b> (${fmtSize(XFILE.size)})` : m ? `🎞 <b>${esc(m.split("/").slice(1).join("/"))}</b> from Media` : "";
+  el.classList.toggle("hidden", !t);
+  el.innerHTML = t ? `Using ${t} <button class="lnk" id="xClear">✕ clear</button>` : "";
+  const c = $("#xClear"); if (c) c.onclick = () => { XFILE = null; $("#xMedia").value = ""; renderXChosen(); };
+  $("#xUrl").disabled = !!t;
+}
+function setXMode(m) { XMODE = m; store.set("cve.xmode", m); $$("#xModes button").forEach((b) => b.classList.toggle("active", b.dataset.m === m)); }
+async function loadExtract() {
+  try { XD = await api("/api/extract"); } catch { return; }
+  renderExtract();
+  const busy = XD.jobs.some((j) => j.status === "queued" || j.status === "running");
+  clearTimeout(XPOLL); if (busy) XPOLL = setTimeout(loadExtract, 1200);
+}
+function renderExtract() {
+  const box = $("#xList"); if (!box) return;
+  const live = XD.jobs.filter((j) => j.status !== "done" || !XD.files.some((f) => f.name === j.file));
+  for (const j of XD.jobs) if (j.status === "done" && !XSEEN.has(j.id)) { XSEEN.add(j.id); if (XINIT) toast(`Ready: ${j.file} – ⬇ Download it below.`); }
+  XINIT = true;  // the first look only learns what was already finished (no "Ready" toasts on opening the tab)
+  const jobRow = (j) => j.status === "error"
+    ? `<div class="xitem err"><span>✗</span><span class="xn"><b>${esc(j.title || "Extract")}</b> · ${esc(j.mode_label)}<br><span class="bad">${esc(j.error)}</span></span><button class="btn ghost small" data-xdis="${esc(j.id)}">OK</button></div>`
+    : `<div class="xitem"><span class="spin-s">⟳</span><span class="xn"><b>${esc(j.title || "…")}</b> · ${esc(j.mode_label)}</span><span class="muted small">${esc(j.stage)} ${j.progress ? Math.round(j.progress) + "%" : ""}</span><div class="xbar"><i style="width:${j.progress || 2}%"></i></div></div>`;
+  const fileRow = (f) => `<div class="xitem" data-xf="${esc(f.name)}">
+      ${f.audio ? `<audio controls preload="none" src="${f.url}"></audio>` : `<video controls preload="metadata" src="${f.url}#t=0.5"></video>`}
+      <span class="xn" title="${esc(f.name)}">${esc(f.name)} <span class="muted small">· ${fmtSize(f.size)}</span></span>
+      <a class="btn small" href="/api/extract/download/${encodeURIComponent(f.name)}" download data-tip="Save it to your computer (Downloads folder)">⬇ Download</a>
+      <select data-xkeep="1" data-tip="Keep a copy in Media so the editor can use it"><option value="">+ Save to Media…</option><option value="auto">Auto (sort it)</option>
+        ${f.audio ? `<option value="music">🎵 Music</option><option value="sounds">🔊 Sound effects</option>` : `<option value="videos">🎞 Videos</option><option value="transitions">✨ Transitions</option>`}</select>
+      <button class="btn ghost small" data-xdel="1" data-tip="Delete (kept in Library/.trash/extracted)">🗑</button></div>`;
+  const dismissed = store.get("cve.xdis") || [];
+  box.innerHTML = live.filter((j) => !dismissed.includes(j.id)).map(jobRow).join("") + XD.files.slice(0, 20).map(fileRow).join("")
+    + (XD.files.length > 20 ? `<div class="muted small">${XD.files.length - 20} older file(s) – open the folder to see them.</div>` : "");
+  $$("[data-xdis]", box).forEach((b) => (b.onclick = () => { store.set("cve.xdis", [...dismissed, b.dataset.xdis].slice(-50)); renderExtract(); }));
+  $$("[data-xf]", box).forEach((row) => {
+    const n = row.dataset.xf;
+    $("[data-xdel]", row).onclick = async () => { if (!confirm(`Delete “${n}”? (kept in Library/.trash/extracted)`)) return;
+      try { toast((await api("/api/extract/remove", { method: "POST", body: { name: n } })).reply); loadExtract(); } catch (e) { toast(e.message, true); } };
+    $("[data-xkeep]", row).onchange = async (e) => { const k = e.target.value; if (!k) return;
+      try { const r = (await api("/api/extract/to_media", { method: "POST", body: { name: n, kind: k === "auto" ? null : k } })).result;
+        toast(r.ok ? `Saved to ${MEDIA && MEDIA[r.kind] ? MEDIA[r.kind].label : r.kind} as “${r.name}”.` : `Not saved: ${r.why}`, !r.ok);
+        if (r.ok) { LIBCAT = null; MEDIA_OPEN[r.kind] = true; loadMedia(); }
+      } catch (er) { toast(er.message, true); } e.target.value = ""; };
+  });
+}
+async function startExtract() {
+  const src = xSource();
+  if (!src) return toast("Paste a link, choose a file, or pick a clip from Media first.", true);
+  const go = $("#xGo"); go.disabled = true; go.textContent = XFILE ? "Uploading…" : "Starting…";
+  try {
+    let j;
+    if (src.file) {
+      const fd = new FormData(); fd.append("file", src.file); fd.append("mode", XMODE); fd.append("from", $("#xFrom").value); fd.append("to", $("#xTo").value);
+      const r = await fetch("/api/extract", { method: "POST", body: fd }); j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "Upload failed");
+    } else j = await api("/api/extract", { method: "POST", body: { ...src, mode: XMODE, from: $("#xFrom").value, to: $("#xTo").value } });
+    toast("Started – it shows below; you can keep working.");
+    XFILE = null; $("#xUrl").value = ""; $("#xMedia").value = ""; renderXChosen(); loadExtract();
+  } catch (e) { toast(e.message, true); }
+  finally { go.disabled = false; go.textContent = "⬇ Extract"; }
+}
+(() => {
+  const box = $("#xBox"); if (!box) return;
+  setXMode(XMODE);
+  $$("#xModes button").forEach((b) => (b.onclick = () => setXMode(b.dataset.m)));
+  $("#xFileBtn").onclick = () => $("#xFile").click();
+  $("#xFile").onchange = () => { const f = $("#xFile").files[0]; if (f) { XFILE = f; $("#xMedia").value = ""; renderXChosen(); } $("#xFile").value = ""; };
+  $("#xMedia").onchange = () => { if ($("#xMedia").value) XFILE = null; renderXChosen(); };
+  $("#xGo").onclick = startExtract;
+  $("#xUrl").onkeydown = (e) => { if (e.key === "Enter") startExtract(); };
+  $("#xOpen").onclick = () => api("/api/extract/open", { method: "POST", body: {} });
+  ["dragenter", "dragover"].forEach((ev) => box.addEventListener(ev, (e) => { e.preventDefault(); box.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((ev) => box.addEventListener(ev, (e) => { e.preventDefault(); box.classList.remove("over"); }));
+  box.addEventListener("drop", (e) => {
+    const f = e.dataTransfer && e.dataTransfer.files[0];
+    if (f) { XFILE = f; $("#xMedia").value = ""; renderXChosen(); return; }
+    const t = e.dataTransfer && (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain"));
+    if (t && /^https?:\/\//i.test(t.trim())) { $("#xUrl").value = t.trim().split(/\s/)[0]; XFILE = null; renderXChosen(); }
+  });
 })();
 
 /* ---------------- references + brief ---------------- */
@@ -632,7 +727,7 @@ function renderRefs() {
   $$("[data-useref]", el).forEach((b) => (b.onclick = () => setEditLook(b.dataset.useref)));
   $$("[data-study]", el).forEach((b) => (b.onclick = async () => {
     const r = await api(`/api/projects/${PID}/reference/${b.dataset.study}/study`, { method: "POST" });
-    toast(r.already ? "Already in Claude's inbox." : "Sent to Claude. Say “process studio inbox” in VS Code."); refresh(true);
+    toast(r.already ? "Already in Claude's inbox." : `Sent to Claude. ${claudeHint()}`); refresh(true);
   }));
 }
 // ---- looks. Page 2 = the look LIBRARY: pick a look to edit (doesn't change the video).
@@ -936,8 +1031,8 @@ function renderPlanBtn() {
   const analyzing = j.kind === "analyze" && (j.status === "running" || j.status === "queued");
   const pend = planPending();
   b.disabled = pend || analyzing || !P.scenes.length;
-  b.textContent = pend ? "① Plan requested – say “process studio inbox”" : "① Plan story (Claude)";
-  b.title = pend ? "Waiting for Claude: type “process studio inbox” in VS Code. (Cancel it in the Claude inbox.)"
+  b.textContent = pend ? (CBAUTO() ? "① Plan requested – Claude is on it" : "① Plan requested – say “process studio inbox”") : "① Plan story (Claude)";
+  b.title = pend ? `Waiting for Claude: ${claudeHint()} (Cancel it in the Claude inbox.)`
     : analyzing ? "Wait for the analysis to finish – the scenes are about to change"
     : !P.scenes.length ? "Analyze your footage first (Footage tab)"
     : "Step ① (optional) – Claude plans the STORY beat by beat (keep / cut / reorder, hook, cards, B-roll) as a storyboard – you approve before anything changes. Then ② Auto-edit decorates the final cut.";
@@ -950,8 +1045,8 @@ $("#planBtn").onclick = async () => {
     if (P.storyboard && P.storyboard.status !== "applied" &&
         !confirm("A storyboard is already waiting for your review.\nMake a new plan? (Your reviews of beats that don't change are kept.)")) return;
     const r = await api(`/api/projects/${PID}/first_cut`, { method: "POST" });
-    if (r.already) toast("Already requested – say “process studio inbox” in VS Code.");
-    else toast("Sent to Claude. Say “process studio inbox” in VS Code – a storyboard will appear for you to approve." +
+    if (r.already) toast(`Already requested. ${claudeHint()}`);
+    else toast(`Sent to Claude. ${claudeHint()} – a storyboard will appear for you to approve.` +
       (!(P.brief || "").trim() ? " Tip: fill “About this video” on page 2 for a better plan." : ""));
     refresh(true);
   } catch (e) { toast(e.message, true); }
@@ -1344,11 +1439,17 @@ function renderDetail() {
         ${bv && !bv.ok ? `<div class="warnline">⚠ Not shown: ${esc(bv.why)}.</div>` : ""}
         ${!clipOpts.length && !assets.length ? `<div class="muted small">Nothing to show yet – click “Upload video / picture”, or add another clip in Footage.</div>` : ""}</div>
       <div class="isec libsec" id="libSec"></div>
-      <div class="isec"><div class="ilab hastip" data-tip="What you say in this scene. Click a word to change how the captions spell it, or to hide it.">Words <span class="muted small">(click a word to fix how it's written)</span></div>
+      <div class="isec"><div class="ilab hastip" data-tip="What you say in this scene. Click a word to change how the captions spell it, or to hide it. ✏ Edit text = type this scene's caption text yourself (add missing words, fix wrong ones).">Words <span class="muted small">(${s.caption_typed ? "your text – click a word or ✏ to change it" : "click a word to fix how it's written"})</span>
+        ${inVid(s) ? `<button class="lnk" id="capEditBtn" data-tip="Type what the captions should say in this scene – add missing words, fix wrong ones. Save = it is timed to your voice and the edited view updates.">✏ Edit text</button>` : ""}
+        ${s.caption_typed ? `<span class="badge okb" data-tip="These captions are YOUR text, each word timed to your voice.">your text</span> <button class="lnk" id="capAutoBtn" data-tip="Forget your text for this scene – back to the automatic captions from the audio.">↺ automatic</button>` : ""}</div>
+        <div id="capEdit" class="capedit" ${CAPDRAFT && CAPDRAFT.sid === s.id ? "" : "hidden"}>
+          <textarea id="capEditText" rows="3" placeholder="Type exactly what you say in this scene – e.g. Gold jo hai, woh ek safe haven commodity hai…">${esc(CAPDRAFT && CAPDRAFT.sid === s.id ? CAPDRAFT.text : words.join(" "))}</textarea>
+          <div class="capeditrow"><button class="btn small primary" id="capEditSave">Save</button> <button class="btn ghost small" id="capEditCancel">Cancel</button>
+            <span class="muted small">Ctrl+Enter saves · the words are placed on your voice in this scene, then the edited view updates by itself · Undo takes it back</span></div></div>
         ${s.heard ? `<div class="ibox">🎵 <b>No speech detected</b> – music or background sound, so captions stay off here.
             <button class="lnk" id="showHeard" data-tip="Speech recognition always 'hears' something in music. These are its guesses, not real words.">Show the ${s.heard.split(/\s+/).length} guessed word(s)</button>
             <div id="heardBox" class="muted small" hidden>“${esc(s.heard)}” – not real speech. To show captions anyway: Captions → On (then fix or hide the words here).</div></div>` : ""}
-        ${s.no_speech && s.captions === true && words.length ? `<div class="warnline">⚠ No real speech was detected here – these words are guesses and WILL appear as captions. Fix or hide them, or set Captions to Auto.</div>` : ""}
+        ${s.no_speech && s.captions === true && words.length && !s.caption_typed ? `<div class="warnline">⚠ No real speech was detected here – these words are guesses and WILL appear as captions. Fix or hide them, or set Captions to Auto.</div>` : ""}
         <div class="words">${words.length ? words.map((w) => `<button class="wd" data-w="${esc(w)}" data-tip="Click to fix how “${esc(w)}” is written in the captions, or hide it.">${esc(w)}</button>`).join("") : s.heard ? "" : `<span class="muted">(no speech in this scene)</span>`}</div>
         <div id="wordFix" class="wordfix" hidden></div></div>
       <div class="isec"><div class="ilab hastip" data-tip="Remove seconds from the start or end of this scene (e.g. an “umm” before you start). You can also drag the block's edge on the timeline.">Trim</div>
@@ -1467,7 +1568,32 @@ function bindInspector(s) {
     const t = $("#ovText").value.trim(); if (!t) return toast("Type the text first.", true);
     sendCommand(s.id, `text: ${t}`).then(() => { if ($("#ovPos").value !== (s.text_pos || "top")) sendCommand(s.id, `text ${$("#ovPos").value}`); });
   };
+  // ✏ the scene's caption text, typed by you (draft survives the page's 2-second refresh)
+  const ce = $("#capEdit"), ceT = $("#capEditText");
+  const openCE = () => { CAPDRAFT = { sid: s.id, text: ceT.value }; ce.hidden = false; ceT.focus(); };
+  const ceb = $("#capEditBtn"); if (ceb) ceb.onclick = () => (ce.hidden ? openCE() : ($("#capEditCancel").click()));
+  if (ceT) {
+    if (CAPDRAFT && CAPDRAFT.sid === s.id && CAPDRAFT.focus) {  // the panel was re-drawn while you typed: carry on
+      ceT.focus(); const p = Math.min(CAPDRAFT.caret ?? ceT.value.length, ceT.value.length); ceT.setSelectionRange(p, p);
+    }
+    ceT.onfocus = () => { if (CAPDRAFT && CAPDRAFT.sid === s.id) CAPDRAFT.focus = true; };
+    ceT.onblur = () => { if (CAPDRAFT && CAPDRAFT.sid === s.id) CAPDRAFT.focus = false; };
+    ceT.oninput = () => { CAPDRAFT = { sid: s.id, text: ceT.value, focus: true, caret: ceT.selectionStart }; };
+    ceT.onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("#capEditSave").click(); } if (e.key === "Escape") $("#capEditCancel").click(); };
+    $("#capEditCancel").onclick = () => { CAPDRAFT = null; ce.hidden = true; ceT.value = words.join(" "); };
+    $("#capEditSave").onclick = async () => {
+      const text = ceT.value.trim(); if (!text) return toast("Type the words first – or switch Captions off for this scene.", true);
+      const btn = $("#capEditSave"); btn.disabled = true; btn.textContent = "Saving…";
+      try { const r = await api(`/api/projects/${PID}/scene_caption`, { method: "POST", body: { scene: s.id, text } });
+        CAPDRAFT = null; toast(r.reply); SHOW = { sid: s.id, switchView: true, at: Date.now() }; refresh(true); }
+      catch (e) { toast(e.message, true); btn.disabled = false; btn.textContent = "Save"; }
+    };
+  }
+  const cab = $("#capAutoBtn"); if (cab) cab.onclick = async () => {
+    try { const r = await api(`/api/projects/${PID}/scene_caption`, { method: "POST", body: { scene: s.id, auto: true } }); CAPDRAFT = null; toast(r.reply); refresh(true); }
+    catch (e) { toast(e.message, true); } };
   $$(".wd", el).forEach((b) => (b.onclick = () => {
+    if (s.caption_typed && ce) { openCE(); return; }  // your own text: change it in the text box (spellings don't apply to it)
     const w = b.dataset.w.replace(/[.,!?।]+$/, ""), box = $("#wordFix");
     box.hidden = false;
     box.innerHTML = `Show “<b>${esc(w)}</b>” as <input id="wfVal" value="${esc(w)}"> <button class="btn small primary" id="wfSave">Save</button>
@@ -1931,21 +2057,43 @@ $("#aeClear").onclick = async () => {
 let SUG_BUSY = false;
 // ONE status line that always says what is happening: applying → updating the video (scene x/y) → done ✓,
 // plus anything still waiting for Claude. Redrawn on every poll, so it is never stale.
+// 🤖 is Claude auto-reply on? (then nobody needs to type "process studio inbox")
+function CBAUTO() { const c = (typeof P !== "undefined" && P && P.claude_bot) || {}; return !!(c.installed && c.enabled); }
+function claudeHint() { return CBAUTO() ? "Claude starts on it by itself – the reply shows in the studio." : "Say “process studio inbox” in VS Code."; }
 function renderSugStatus() {
   const el = $("#sugStatus"); if (!el || !P) return;
-  const j = P.job || {}, rendering = ["running", "queued"].includes(j.status) && ["preview", "final", "ref_audio"].includes(j.kind);
+  const j = P.job || {}, rendering = ["running", "queued"].includes(j.status) && ["preview", "final", "ref_audio", "caption_align"].includes(j.kind);
   const waiting = (P.commands || []).filter((c) => c.status === "claude").length;
   const st = typeof editedState === "function" ? editedState().k : "";
   let html = "";
   if (SUG_BUSY) html = `<span class="spin"></span> Applying your note…`;
-  else if (rendering) html = `<span class="spin"></span> Working – ${esc(j.kind === "final" ? "making the final video" : j.kind === "ref_audio" ? "taking the voice out of the reference" : "updating your edited video")}${j.progress && j.progress !== "Queued" ? ` · ${esc(j.progress)}` : j.status === "queued" ? " · starting…" : ""}`;
+  else if (rendering) html = `<span class="spin"></span> Working – ${esc(j.kind === "final" ? "making the final video" : j.kind === "ref_audio" ? "taking the voice out of the reference" : j.kind === "caption_align" ? "lining up your captions with your voice" : "updating your edited video")}${j.progress && j.progress !== "Queued" ? ` · ${esc(j.progress)}` : j.status === "queued" ? " · starting…" : ""}`;
   else if (j.status === "error" && (P.suggestions || []).length) html = `<span class="bad">✗ The last update failed – ${esc((j.error || "").split("\n")[0].slice(0, 140))}</span>`;
   else if ((P.suggestions || []).length && st === "fresh") html = `<span class="okc">✓ Done – your edited video is up to date</span> <button class="lnk" id="sugPlay">▶ watch it</button>`;
   else if ((P.suggestions || []).length && st === "stale") html = `<span class="spin"></span> Your edited video is about to update…`;
-  if (waiting) html += `${html ? " &nbsp;·&nbsp; " : ""}<span class="clw"><span class="dot"></span> ${waiting} waiting for Claude – say “process studio inbox” in VS Code</span>`;
+  const cb = P.claude_bot || {}, sep = html ? " &nbsp;·&nbsp; " : "";
+  const box = $("#cbAuto"); if (box && document.activeElement !== box) { box.checked = cb.enabled !== false; box.disabled = !cb.installed; }
+  if (cb.running) {
+    const mins = cb.started ? Math.max(0, Math.round((Date.now() - new Date(cb.started)) / 60000)) : 0;
+    html += `${sep}<span class="clw"><span class="spin"></span> 🤖 Claude is working on ${waiting || "your"} request${waiting === 1 ? "" : "s"}${mins ? ` · ${mins} min` : ""} – the reply shows here</span>`;
+  } else if (waiting) {
+    const why = !cb.installed ? "Claude Code isn't installed on this PC" : !cb.enabled ? "auto-reply is off" : cb.busy_other ? "Claude is busy with another project – yours is next" : cb.last && cb.last.error ? cb.last.error : "";
+    const auto = cb.installed && cb.enabled && !cb.busy_other && !(cb.last && cb.last.error);
+    html += `${sep}<span class="clw"><span class="dot"></span> ${waiting} waiting for Claude${auto ? " – starting by itself…" : ` – ${esc(why)}`}</span>`
+      + (cb.last && cb.last.error && cb.enabled ? ` <button class="lnk" id="cbRetry">↻ try again</button>` : "")
+      + (cb.installed && !cb.enabled ? ` <button class="lnk" id="cbOn">turn auto-reply on</button>` : "")
+      + (!auto ? ` <span class="muted small">(or say “process studio inbox” in VS Code)</span>` : "");
+  }
   el.hidden = !html;
-  if (el.dataset.h !== html) { el.dataset.h = html; el.innerHTML = html; const pb = $("#sugPlay"); if (pb) pb.onclick = () => $("#previewBtn").click(); }
+  if (el.dataset.h !== html) {
+    el.dataset.h = html; el.innerHTML = html;
+    const pb = $("#sugPlay"); if (pb) pb.onclick = () => $("#previewBtn").click();
+    const rt = $("#cbRetry"); if (rt) rt.onclick = () => api("/api/claude_auto", { method: "POST", body: { retry: PID } }).then(() => refresh(true));
+    const on = $("#cbOn"); if (on) on.onclick = () => api("/api/claude_auto", { method: "POST", body: { on: true, retry: PID } }).then(() => refresh(true));
+  }
 }
+$("#cbAuto").onchange = (e) => api("/api/claude_auto", { method: "POST", body: { on: e.target.checked } })
+  .then((r) => { toast(r.enabled ? "🤖 Claude auto-reply on – requests the studio can't do start Claude by themselves." : "Claude auto-reply off – say “process studio inbox” in VS Code for those."); refresh(true); });
 $("#sugSend").onclick = async () => {
   const ta = $("#sugText"), text = ta.value.trim(), b = $("#sugSend");
   if (!text) return toast("Type a change first – e.g. scene 5 money sticker and cash sound, or remove silences.", true);
@@ -2444,13 +2592,98 @@ function renderEditedState() {
   // asked to watch while it was being made: start playing as soon as the new version is in
   if (PENDING_PLAY && st.k === "fresh") { PENDING_PLAY = false; playerMode = "preview"; $$(".player-bar .seg button").forEach((x) => x.classList.toggle("active", x.dataset.mode === "preview")); curSrcUrl = ""; loadPlayer(true); }
 }
-$("#finalBtn").onclick = () => api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "final" } }).then(() => toast("Exporting full quality to the Exports folder…")).catch((e) => toast(e.message, true));
+/* ---------------- export dialog ----------------
+   Platform preset -> server fills frame / resolution / fps / file type (exportopts.normalize is the ONE source of
+   truth); any field the user clicks overrides the preset. Remembered per browser: the platform and the fields picked
+   by hand – never the frame (a 16:9 project must not inherit last week's 9:16 choice). */
+const XP = { cat: null, o: null, n: null, seq: 0, plan: null };
+function xpPrefs() { try { return JSON.parse(localStorage.getItem("cve_export") || "null") || {}; } catch (e) { return {}; } }
+function xpSeconds() {
+  const cur = (P.renders || []).filter((r) => !r.missing && r.sig === P.edit_sig && r.matches_edit !== false && !r.audio_only);
+  return cur.length ? cur[cur.length - 1].duration : ((P.totals && P.totals.est) || 0);
+}
+function xpOpen() { return !$("#xpModal").classList.contains("hidden"); }
+function closeExport() { $("#xpModal").classList.add("hidden"); }
+async function openExport() {
+  if (!PID) return;
+  if (!P.scenes.some((x) => inVid(x) && !x.src_skipped)) return toast("Nothing to export yet – keep at least one scene.", true);
+  try { XP.cat = await api(`/api/projects/${PID}/export_options`); } catch (e) { return toast(e.message, true); }
+  const pr = xpPrefs(), o = { platform: XP.cat.platforms.some((p) => p.id === pr.platform) ? pr.platform : "edit" };
+  for (const k of ["res", "fmt", "quality", "fps"]) if (pr[k]) o[k] = pr[k];
+  XP.o = o; XP.n = null; XP.plan = null;
+  $("#xpModal").classList.remove("hidden");
+  renderExport(); xpPlan();
+  setTimeout(() => $("#xpGo").focus(), 0);
+}
+async function xpPlan() {
+  const seq = ++XP.seq;
+  $("#xpGo").disabled = true;
+  try {
+    const j = await api(`/api/projects/${PID}/export_plan`, { method: "POST", body: { opts: XP.o, seconds: xpSeconds() } });
+    if (seq !== XP.seq || !xpOpen()) return;  // an older answer arriving after a newer click
+    XP.n = j.opts; XP.plan = j; renderExport();
+  } catch (e) { if (seq === XP.seq) $("#xpSum").textContent = e.message; }
+  finally { if (seq === XP.seq) $("#xpGo").disabled = !XP.n; }
+}
+function xpChips(el, items, cur, key) {
+  el.innerHTML = items.map((x) => `<button type="button" class="${x.id === cur ? "on" : ""}" data-v="${esc(x.id)}"${x.tip ? ` title="${esc(x.tip)}"` : ""}>${x.html || esc(x.label)}</button>`).join("");
+  $$("button", el).forEach((b) => (b.onclick = () => { XP.o[key] = b.dataset.v; xpPlan(); }));
+}
+function renderExport() {
+  const c = XP.cat, n = XP.n || {}, ed = c.edit;
+  const plat = c.platforms.find((p) => p.id === (n.platform || XP.o.platform)) || c.platforms[0];
+  $("#xpPlat").innerHTML = c.platforms.map((p) => `<button type="button" class="xp-plat ${p.id === plat.id ? "on" : ""}" data-p="${p.id}"><span class="ic">${esc(p.icon)}</span>${esc(p.label)}</button>`).join("");
+  $$("#xpPlat button").forEach((b) => (b.onclick = () => { XP.o = { platform: b.dataset.p }; xpPlan(); }));  // a preset resets every field
+  $("#xpTip").textContent = plat.tip || "";
+  const rec = plat.frames ? plat.frames[0] : null;
+  xpChips($("#xpFrame"), c.frames.map((f) => ({ ...f, html: `${esc(f.label)}${f.id === ed.frame ? ` <i>your edit</i>` : f.id === rec ? ` <i>best here</i>` : ""}` })), n.frame, "frame");
+  const srcP = Math.min(ed.src_w, ed.src_h);
+  xpChips($("#xpRes"), c.res.map((r) => ({ ...r, label: r.id === "source" ? `As uploaded (${srcP}p)` : r.label })), n.res, "res");
+  xpChips($("#xpFmt"), c.formats.map((f) => ({ ...f, tip: f.note })), n.fmt, "fmt");
+  const fm = c.formats.find((f) => f.id === n.fmt);
+  $("#xpFmtNote").textContent = fm ? fm.note : "";
+  xpChips($("#xpQ"), c.quality.map((q) => ({ ...q, label: q.label.replace(/ – .*| \(.*/, ""), tip: q.label })), n.quality, "quality");
+  xpChips($("#xpFps"), c.fps.map((f) => ({ id: f, label: f === "edit" ? `Same as edit (${ed.fps})` : `${f} fps` })), n.fps, "fps");
+  const audio = n.fmt === "mp3";
+  ["xpFrame", "xpRes", "xpQ", "xpFps"].forEach((id) => $("#" + id).classList.toggle("off", audio));
+  const pl = XP.plan;
+  $("#xpSum").innerHTML = pl ? `<b>${audio ? "Audio only" : `${pl.w}×${pl.h}`}</b>${audio ? "" : ` · ${pl.fps} fps`} · ${esc(fm ? fm.label : "")}` +
+    ` · ≈ <b>${pl.mb >= 1024 ? (pl.mb / 1024).toFixed(1) + " GB" : Math.max(1, Math.round(pl.mb)) + " MB"}</b>` +
+    ` · about ${pl.minutes < 1 ? "1 min" : Math.round(pl.minutes) + " min"} to make` : "Working out the size…";
+  $("#xpWarn").innerHTML = pl ? pl.warnings.map((w) => `<li>${esc(w)}</li>`).join("") : "";
+  $("#xpGo").textContent = `Export${plat.id !== "edit" && plat.id !== "custom" ? " for " + plat.label : ""}`;
+}
+$("#finalBtn").onclick = openExport;
+$("#xpClose").onclick = $("#xpCancel").onclick = closeExport;
+$("#xpModal").addEventListener("mousedown", (e) => { if (e.target === e.currentTarget) closeExport(); });
+// while the dialog is open the timeline's keys (Space = play, Del = cut scene, S = split…) must not fire behind it
+document.addEventListener("keydown", (e) => {
+  if (!xpOpen()) return;
+  if (e.key === "Escape") { e.preventDefault(); closeExport(); }
+  e.stopPropagation();
+}, true);
+$("#xpGo").onclick = async () => {
+  if (!XP.n) return;
+  const btn = $("#xpGo"); btn.disabled = true;
+  try {
+    const j = await api(`/api/projects/${PID}/render`, { method: "POST", body: { kind: "final", opts: XP.n } });
+    const keep = { platform: XP.n.platform };
+    for (const k of ["res", "fmt", "quality", "fps"]) if (XP.o[k]) keep[k] = XP.o[k];
+    try { localStorage.setItem("cve_export", JSON.stringify(keep)); } catch (e) { /* private mode */ }
+    closeExport();
+    toast(`Exporting: ${j.summary || "full quality"} – it appears in Exports (tab 5) when done.`);
+    refresh(true);
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; }
+};
 
 /* ---------------- player ---------------- */
 const player = $("#player");
 let curSrcUrl = "";
 // newest render of EITHER kind: after "Export final" the player must show that, not an older preview
-function latestPreview() { const r = (P?.renders || []).filter((x) => !x.missing); return r.length ? r[r.length - 1] : null; }
+// …but only an export that LOOKS like the edit: a 16:9 / 4:5 / other-fps export, an MP3 or a ProRes / H.265 / MKV file
+// (the browser can't play those) would break the player and its scene jumps
+function latestPreview() { const r = (P?.renders || []).filter((x) => !x.missing && (x.kind !== "final" || (x.matches_edit !== false && x.web !== false && !x.audio_only))); return r.length ? r[r.length - 1] : null; }
 function renderUrl(r) { return r.kind === "final" ? media("exports", r.file) : media("work", r.file); }
 function previewOffset(id) {
   const m = renderTimes(false); if (m && m.has(id)) return m.get(id)[0];
@@ -2551,15 +2784,21 @@ function renderRenders() {
   const rs = [...(P.renders || [])].reverse();
   if (!rs.length) { el.innerHTML = `<p class="muted">Nothing rendered yet.</p>`; return; }
   const latestPv = latestPreview();
-  el.innerHTML = rs.filter((r) => r.kind === "final" || r === latestPv).map((r) => `
-    <div class="render">
-      ${r.missing ? `<div class="muted small" style="padding:20px">This file is no longer in the ${r.kind === "final" ? "Exports" : "work"} folder (moved, renamed or deleted).</div>`
-        : `<video src="${media(r.kind === "final" ? "exports" : "work", r.file)}" controls preload="metadata"></video>`}
-      <div class="meta"><div><b>${esc(r.file)}</b><div class="muted">${r.kind === "final" ? "Final export" : "Latest preview"} · ${esc(r.size)} · ${fmt(r.duration)} · ${esc(r.created.replace("T", " ").slice(0, 16))}</div></div>
+  const mbTxt = (b) => !b ? "" : b >= 2 ** 30 ? ` · ${(b / 2 ** 30).toFixed(2)} GB` : ` · ${Math.max(0.1, b / 2 ** 20).toFixed(b < 10 * 2 ** 20 ? 1 : 0)} MB`;
+  el.innerHTML = rs.filter((r) => r.kind === "final" || r === latestPv).map((r) => {
+    const area = r.kind === "final" ? "exports" : "work", url = media(area, r.file);
+    const body = r.missing ? `<div class="muted small" style="padding:20px">This file is no longer in the ${r.kind === "final" ? "Exports" : "work"} folder (moved, renamed or deleted).</div>`
+      : r.audio_only ? `<div class="xp-audio"><div class="muted small">🎧 Audio only</div><audio src="${url}" controls preload="none"></audio></div>`
+      : r.web === false ? `<div class="xp-noplay muted small">▶ This file type doesn't play in the browser – open it in VLC, QuickTime, Premiere or your phone.<br><button class="btn ghost small" data-openx="1">📂 Show in Exports folder</button></div>`
+      : `<video src="${url}" controls preload="metadata"></video>`;
+    return `<div class="render">${body}
+      <div class="meta"><div><b>${esc(r.file)}</b><div class="muted">${r.kind === "final" ? (r.summary ? esc(r.summary) : "Final export") : "Latest preview"}${r.summary ? "" : ` · ${esc(r.size)}`} · ${fmt(r.duration)}${mbTxt(r.bytes)} · ${esc(r.created.replace("T", " ").slice(0, 16))}</div></div>
+      <div class="xp-acts">${r.kind === "final" && !r.missing ? `<a class="btn ghost small" href="${url}?dl=1" download="${esc(r.file)}" title="Save a copy (Downloads folder)">⬇ Download</a>` : ""}
       <span class="badge ${r.kind === "final" ? "ok" : ""}">${r.kind}</span>
       ${r.kind === "final" && r.sig ? (r.sig === P.edit_sig ? `<span class="badge ok" title="This export shows your edit exactly as it is now">✓ current edit</span>`
-        : `<span class="badge warn" title="You changed the edit after this export – click Export final for a new one">edited since</span>`) : ""}</div>
-    </div>`).join("");
+        : `<span class="badge warn" title="You changed the edit after this export – click Export final for a new one">edited since</span>`) : ""}</div></div>
+    </div>`; }).join("");
+  $$("[data-openx]", el).forEach((b) => (b.onclick = () => api(`/api/projects/${PID}/open`, { method: "POST", body: { which: "exports" } })));
 }
 
 /* ---------------- inbox ---------------- */
@@ -2599,6 +2838,8 @@ if (location.search.includes("widthdebug")) setTimeout(() => {
   console.log("WIDTHDEBUG " + W + " :: " + bad.slice(0, 25).join(" | "));
 }, 2500);
 const TABS = ["footage", "refs", "media", "scenes", "exports"];
-switchTab(TABS.includes(hashTab) ? hashTab : TABS.includes(store.get("cve.tab")) ? store.get("cve.tab") : "footage");
+switchTab(TABS.includes(hashTab) ? hashTab : hashTab === "export" ? "scenes" : TABS.includes(store.get("cve.tab")) ? store.get("cve.tab") : "footage");
+// #export: open the Export dialog once the project is loaded (a bookmark / the layout check)
+if (hashTab === "export") { const t0 = Date.now(), iv = setInterval(() => { if (P && PID) { clearInterval(iv); openExport(); } else if (Date.now() - t0 > 15000) clearInterval(iv); }, 300); }
 loadBrandKit();
 loadProjects().catch((e) => toast(e.message, true));

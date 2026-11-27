@@ -2,6 +2,16 @@
 
 The user edits in the browser UI (http://127.0.0.1:8070, launched by `D:\Claude_Video_Editor\Start Studio.bat`).
 Commands the UI can't do instantly land in project.json with `status: "claude"`.
+AUTO-REPLY (claudebot.py): the running studio starts `claude -p` by itself ~4 s after new items arrive (one run at a
+time, each item tried once, `--setting-sources project` so ONLY studio_cli.py / Read / Storyboards writes are allowed –
+never edit words.json or code by hand from such a run). Log: Library/.claude_runs.log. Toggle: 🤖 in Tell the editor.
+CAPTION SCRIPTS (typedcaps.py): a pasted script becomes data["caption_typed"] (source-time words, timed by the MMS
+forced aligner in _engines/separate/run_align.py); "captions auto" removes it. Don't "fix sync" by editing words.json.
+EXPORT DIALOG (exportopts.py = the one definition of platforms/frames/res/fps/types): POST /render {kind:"final", opts}
+-> pipeline.render_project(opts=...) renders an in-memory copy of the settings (format/fps/_vq/fit "blur"/_face_crop),
+then deliver() converts the H.264 master (mov/mkv copy, H.265 hvc1, VP9, ProRes, MP3). Records carry opts/summary/
+matches_edit/web/audio_only/ver; the page's player skips exports that don't look like the edit. Never write
+export choices into project settings. `studio_cli.py render <pid> final` = the classic export (no opts).
 When the user says **"process studio inbox"**:
 
 1. `.venv\Scripts\python.exe studio_cli.py inbox` — list pending commands.

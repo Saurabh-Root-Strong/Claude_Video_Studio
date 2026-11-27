@@ -63,7 +63,29 @@ textarea{width:100%;min-height:44px;resize:vertical;background:#11141a;color:var
 .dur b{color:var(--txt)}
 video{width:100%;max-width:420px;border-radius:8px;margin-top:8px;display:none;background:#000}
 .flag{font-size:11px;border-radius:5px;padding:1px 7px}.flag.ok{background:#14532d;color:#bbf7d0}.flag.warn{background:#713f12;color:#fde68a}
-.beat.locked input,.beat.locked .acts button[data-act=approved],.beat.locked .acts button[data-act=rejected],.beat.locked textarea{pointer-events:none;opacity:.55}
+.beat.locked input,.beat.locked .acts button[data-act=approved],.beat.locked .acts button[data-act=rejected],.beat.locked textarea[data-notes]{pointer-events:none;opacity:.55}
+.mock .play{position:absolute;left:6px;bottom:6px;z-index:2;width:34px;height:34px;border-radius:50%;padding:0;border:2px solid #fff;background:#f97316e6;color:#111;font-size:14px;font-weight:700;box-shadow:0 2px 8px #0008}
+.mock .play:hover{transform:scale(1.08);border-color:#fff}
+button.sm{padding:5px 10px;font-size:13px}
+.ed{margin-top:10px;background:#11161f;border:1px solid #2c3a52;border-radius:10px;padding:10px}
+.ed .edh{font-weight:600;font-size:13px;color:#cfe0ff;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ed .edh small{font-weight:400;color:var(--muted)}
+.ed textarea{margin-top:6px}
+.ed .acts{margin-top:6px}
+.edst{font-size:12px;color:var(--muted)}
+.edst.busy::before{content:"";display:inline-block;width:10px;height:10px;margin-right:6px;border:2px solid var(--acc);border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-1px}
+.edst.ok{color:#86efac}.edst.err{color:#fca5a5}
+@keyframes spin{to{transform:rotate(360deg)}}
+.edres{list-style:none;margin:6px 0 0;padding:0;font-size:12.5px;display:grid;gap:3px}
+.edres li{color:var(--muted)}.edres li b{color:var(--txt);font-weight:600}
+.edres .y{color:#86efac}.edres .n{color:#fca5a5}.edres .c{color:#93c5fd}
+.modal{position:fixed;inset:0;z-index:20;background:#000c;display:none;align-items:center;justify-content:center;padding:16px}
+.modal.on{display:flex}
+.modal .box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;max-width:min(560px,100%);width:100%;display:flex;flex-direction:column;gap:8px}
+.modal .mh{display:flex;gap:8px;align-items:center}.modal .mh b{flex:1}
+.modal video{display:block;max-width:100%;width:auto;max-height:72vh;margin:0 auto}
+.modal .wait{padding:40px 10px;text-align:center;color:var(--muted)}
+.modal .mi{font-size:12px;color:var(--muted)}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#20242d;border:1px solid var(--line);padding:9px 16px;border-radius:9px;display:none}
 .offline{background:#3b2f00;color:#ffe08a;padding:8px 20px;font-size:13px;display:none}
 @media (max-width:640px){.beat{grid-template-columns:1fr}.mock{width:130px}}
@@ -79,6 +101,7 @@ video{width:100%;max-width:420px;border-radius:8px;margin-top:8px;display:none;b
   <span class="chip" id="setChip"></span>
   <span class="spacer"></span>
   <button id="allOk" title="Approve every beat you haven't decided yet – then you can apply them to the video">Approve all pending</button>
+  <button id="watchBtn" title="Play the whole edited video as it is now (it's re-made first if you changed something)">▶ Your edited video</button>
   <button id="copyBtn" title="Copy your decisions + notes as text">Copy feedback</button>
   <button id="sendBtn" title="Only for REJECTED beats with notes: Claude reworks them (needs Claude Code: 'process studio inbox')">Send notes to Claude</button>
   <button class="pri" id="applyBtn" title="Apply the approved beats to your video now (one Undo step) and go back to the Scenes page">✓ Apply to video &amp; back to Scenes</button>
@@ -94,6 +117,10 @@ video{width:100%;max-width:420px;border-radius:8px;margin-top:8px;display:none;b
   <div id="beats"></div>
 </main>
 <div class="toast" id="toast"></div>
+<div class="modal" id="modal"><div class="box">
+  <div class="mh"><b id="mTitle">Edited video</b><button class="sm" id="mWhole" title="Play the whole edited video">▶ Whole video</button><button class="sm" id="mClose" title="Close (Esc)">✕</button></div>
+  <div id="mBody"></div><div class="mi" id="mInfo"></div>
+</div></div>
 <script>
 const EMBED = /*__EMBEDDED__*/null;
 const m = location.pathname.match(/^\/storyboard\/([a-z0-9-]+)/);
@@ -146,7 +173,8 @@ function mock(b) {
   const thumb = b.thumb ? `<img src="${LIVE ? `/media/${PID}/thumbs/${encodeURIComponent(b.thumb)}` : `work/thumbs/${encodeURIComponent(b.thumb)}`}" alt="">` : "";
   return `<div class="mock" title="Planned frame: card on top, you below, caption on the seam. Dashed = safe zone (clear of Reels/Shorts buttons).">
     <div class="top">${top}</div>${thumb}<div class="seam"></div><div class="cap">${w}</div><div class="safe"></div>
-    ${punch ? `<span class="zoom">${punch.zoom}× punch</span>` : ""}</div>`;
+    ${punch ? `<span class="zoom">${punch.zoom}× punch</span>` : ""}
+    ${LIVE ? `<button class="play" data-act="playedit" title="Play this scene as it is edited now">▶</button>` : ""}</div>`;
 }
 function timeline(b) {
   const span = b.out - b.in || 1, pct = (t) => (((t - b.in) / span) * 100).toFixed(2) + "%";
@@ -196,9 +224,10 @@ function render() {
         <div class="acts">
           <button class="ok ${b.status === "approved" ? "on" : ""}" data-act="approved">✓ Approve</button>
           <button class="bad ${b.status === "rejected" ? "on" : ""}" data-act="rejected">✕ Reject</button>
-          ${b.proxy && LIVE ? `<button data-act="play">▶ Play original</button>` : ""}
+          ${LIVE ? `<button data-act="playedit" title="Play this scene as it is edited now (re-made first if needed)">▶ Play edited</button>` : ""}
+          ${b.proxy && LIVE ? `<button data-act="play" title="Play the raw footage of this scene, before any edit">▶ Play original</button>` : ""}
         </div>
-        <textarea placeholder="Notes for Claude (e.g. keep the second 'to dosto', different card text, zoom later)…" data-notes>${esc(b.notes)}</textarea>
+        ${edBox(b)}
         <video data-v preload="none" controls></video>
       </div>
     </section>`).join("");
@@ -206,14 +235,144 @@ function render() {
     const b = SB.beats.find((x) => x.scene === sec.dataset.id);
     sec.querySelectorAll("[data-act]").forEach((btn) => (btn.onclick = () => {
       const a = btn.dataset.act;
-      if (a === "play") { const v = sec.querySelector("video"); v.style.display = "block"; v.src = `/media/${PID}/proxy/${encodeURIComponent(b.proxy)}#t=${b.in},${b.out}`; v.play(); return; }
+      if (a === "playedit") return playEdited(b.scene, `Beat ${b.no}${b.role ? " · " + b.role : ""}`);
+      if (a === "play") {
+        const v = sec.querySelector("video"); v.style.display = "block";
+        v.src = `/media/${PID}/proxy/${encodeURIComponent(b.proxy)}#t=${b.in},${b.out}`;
+        v.ontimeupdate = () => { if (v.currentTime >= b.out - 0.03) v.pause(); };  // #t end isn't honoured by every browser
+        v.play().catch(() => {}); return;
+      }
       save(b, { status: b.status === a ? "pending" : a });
     }));
     sec.querySelectorAll("[data-item]").forEach((cb) => (cb.onchange = () => save(b, { items_on: { [cb.dataset.item]: cb.checked } })));
     const ta = sec.querySelector("[data-notes]");
-    ta.onchange = () => save(b, { notes: ta.value });
+    if (ta) ta.onchange = () => save(b, { notes: ta.value });
+    const et = sec.querySelector("[data-ed]");
+    if (et) {
+      et.oninput = () => (edOf(b.scene).text = et.value);
+      et.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendEd(b); } };
+      sec.querySelector("[data-send]").onclick = () => sendEd(b);
+      const w = sec.querySelector("[data-watch]"); if (w) w.onclick = () => playEdited(b.scene, `Beat ${b.no} · after your change`);
+    }
   }
 }
+
+// ---- 💬 per-scene editor box: once a beat is applied its scene is edited directly (same engine as Scenes → Tell the editor)
+const ED = {};  // scene id -> {text, busy, status, cls, results, watch}
+const edOf = (sid) => (ED[sid] ||= { text: "", status: "", cls: "", results: [] });
+function edBox(b) {
+  if (!(LIVE && (b.applied || b.stale))) {
+    return `<textarea placeholder="Notes for Claude (e.g. keep the second 'to dosto', different card text, zoom later)…" data-notes>${esc(b.notes)}</textarea>`;
+  }
+  const e = edOf(b.scene);
+  const icon = (r) => (r.ok === true ? `<span class="y">✓</span>` : r.ok === false ? `<span class="n">✗</span>` : `<span class="c">→ Claude</span>`);
+  return `<div class="ed">
+    <div class="edh">💬 Tell the editor – this scene <small>sticker, sound, zoom, text, music, transition, effect… in your words (Hinglish fine)</small></div>
+    <textarea data-ed ${e.busy ? "disabled" : ""} placeholder="e.g. money sticker with cash sound on 'IPO', zoom on 'listing', text: 2x listing gain   (Enter = send · Shift+Enter = new line)">${esc(e.text)}</textarea>
+    <div class="acts"><button class="pri sm" data-send ${e.busy ? "disabled" : ""}>Send</button>
+      <span class="edst ${e.cls}">${e.status}</span>${e.watch ? `<button class="sm" data-watch>▶ Watch this scene</button>` : ""}</div>
+    ${e.results.length ? `<ul class="edres">${e.results.map((r) => `<li>${icon(r)} <b>${esc(r.text)}</b> – ${esc(r.reply || "")}</li>`).join("")}</ul>` : ""}
+  </div>`;
+}
+function edSet(b, patch) {
+  Object.assign(edOf(b.scene), patch);
+  const sec = document.querySelector(`.beat[data-id="${CSS.escape(b.scene)}"]`);
+  const old = sec && sec.querySelector(".ed");
+  if (!old) return render();
+  const tmp = document.createElement("div"); tmp.innerHTML = edBox(b);
+  old.replaceWith(tmp.firstElementChild);
+  const et = sec.querySelector("[data-ed]");
+  et.oninput = () => (edOf(b.scene).text = et.value);
+  et.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendEd(b); } };
+  sec.querySelector("[data-send]").onclick = () => sendEd(b);
+  const w = sec.querySelector("[data-watch]"); if (w) w.onclick = () => playEdited(b.scene, `Beat ${b.no} · after your change`);
+}
+async function sendEd(b) {
+  const e = edOf(b.scene), text = (e.text || "").trim();
+  if (e.busy) return;
+  if (!text) { toast("Type what to change in this scene first."); return; }
+  edSet(b, { busy: true, status: "Applying…", cls: "busy", watch: false });
+  try {
+    const r = await fetch(`/api/projects/${PID}/suggest`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, scene: b.scene }) });
+    let j = {}; try { j = await r.json(); } catch {}
+    if (!r.ok) { edSet(b, { busy: false, status: "✗ " + (j.error || "Could not send – is the studio still running?"), cls: "err" }); return; }
+    const res = j.results || [], q = res.filter((x) => x.ok == null).length;
+    const qNote = q ? ` · ${q} sent to Claude (in VS Code: process studio inbox)` : "";
+    if (!res.length) { edSet(b, { busy: false, status: "Nothing to change in that note.", cls: "", results: [] }); return; }
+    if (!j.changed) { edSet(b, { busy: false, text: "", status: (q ? "Sent to Claude" : "No change made") + qNote, cls: q ? "" : "err", results: res }); return; }
+    edSet(b, { text: "", results: res, status: "Done – updating the edited view…" + qNote, cls: "busy" });
+    const ok = await waitFresh((p) => edSet(b, { status: `Updating the edited view… ${p}${qNote}` }));
+    edSet(b, ok ? { busy: false, status: "✓ Done" + qNote, cls: "ok", watch: true } : { busy: false, status: "⚠ The edit is saved, but the edited view failed to update – see Activity in Scenes." + qNote, cls: "err" });
+  } catch { edSet(b, { busy: false, status: "✗ Could not reach the studio.", cls: "err" }); }
+}
+
+// ---- edited video player (the studio's latest preview render, cut to one scene or whole)
+async function project() { const r = await fetch(`/api/projects/${PID}`); if (!r.ok) throw new Error("studio"); return r.json(); }
+function latest(P) { const r = (P.renders || []).filter((x) => !x.missing); return r.length ? r[r.length - 1] : null; }
+function state(P) {  // fresh | updating | stale | failed | none  (same rules as the studio's Edited view)
+  const pv = latest(P), j = P.job || {};
+  if (((j.kind === "preview" || j.kind === "final") && (j.status === "running" || j.status === "queued")) || (j.pending || []).includes("preview"))
+    return { k: "updating", p: j.kind === "preview" && j.progress ? j.progress : "" };
+  if (j.kind === "preview" && j.status === "error" && (!pv || pv.sig !== P.edit_sig)) return { k: "failed" };
+  if (!pv) return { k: "none" };
+  return { k: pv.sig && pv.sig === P.edit_sig ? "fresh" : "stale" };
+}
+async function waitFresh(onProgress, maxMs = 15 * 60e3) {  // ask for a preview if needed, then wait until it shows every change
+  const t0 = Date.now(); let asked = false;
+  while (Date.now() - t0 < maxMs) {
+    let P; try { P = await project(); } catch { await new Promise((r) => setTimeout(r, 2000)); continue; }
+    const st = state(P);
+    if (st.k === "fresh") return P;
+    if (st.k === "failed" && asked) return null;
+    if ((st.k === "stale" || st.k === "none" || st.k === "failed") && !asked) {
+      asked = true;
+      await fetch(`/api/projects/${PID}/render`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "preview" }) }).catch(() => {});
+    }
+    if (onProgress) onProgress(st.p || "");
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return null;
+}
+let PLAY_TOKEN = 0;
+async function playEdited(sid, title) {
+  const tok = ++PLAY_TOKEN;
+  $("#mTitle").textContent = title || "Your edited video";
+  $("#mWhole").style.display = sid ? "" : "none";
+  $("#mInfo").textContent = "";
+  $("#modal").classList.add("on");
+  $("#mBody").innerHTML = `<div class="wait"><span class="edst busy">Getting the edited view…</span></div>`;
+  let P;
+  try { P = await project(); } catch { $("#mBody").innerHTML = `<div class="wait">Could not reach the studio.</div>`; return; }
+  if (state(P).k !== "fresh") {
+    P = await waitFresh((p) => { if (tok === PLAY_TOKEN) $("#mBody").innerHTML = `<div class="wait"><span class="edst busy">Making the edited view with your latest changes… ${esc(p)}</span><br><small>It plays here when ready – usually a few seconds per changed scene.</small></div>`; });
+    if (tok !== PLAY_TOKEN || !$("#modal").classList.contains("on")) return;
+    if (!P) { $("#mBody").innerHTML = `<div class="wait">⚠ The edited view could not be made – open Scenes → Activity for the reason.</div>`; return; }
+  }
+  const pv = latest(P);
+  const url = `/media/${encodeURIComponent(PID)}/${pv.kind === "final" ? "exports" : "work"}/${encodeURIComponent(pv.file)}`;
+  let a = 0, z = null;
+  if (sid) {
+    const t = (pv.times || []).find((x) => x[0] === sid);
+    if (!t) {
+      const sc = (P.scenes || []).find((x) => x.id === sid);
+      $("#mBody").innerHTML = `<div class="wait">${!sc ? "This scene is no longer in the project." : sc.keep === false ? "This scene is cut from the video – nothing to play." : "This scene's place in the edited video is unknown – play the whole video instead."}</div>`;
+      return;
+    }
+    a = t[1]; z = t[1] + t[2];
+  }
+  $("#mBody").innerHTML = `<video controls playsinline preload="auto"></video>`;
+  const v = $("#mBody video");
+  v.src = url + `#t=${a.toFixed(2)}`;
+  v.ontimeupdate = () => { if (z != null && v.currentTime >= z - 0.04) { v.pause(); z = null; } };  // stop at the scene's end once; ▶ again continues
+  v.play().catch(() => {});
+  $("#mInfo").textContent = sid ? `Scene ${fmt(a)}–${fmt(z)} of the edited video · ${pv.file}` : `${pv.file} · ${fmt(pv.duration || 0)}`;
+}
+function closeModal() { PLAY_TOKEN++; const v = $("#mBody video"); if (v) { v.pause(); v.removeAttribute("src"); v.load(); } $("#modal").classList.remove("on"); }
+$("#mClose").onclick = closeModal;
+$("#modal").onclick = (e) => { if (e.target.id === "modal") closeModal(); };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#modal").classList.contains("on")) closeModal(); });
+$("#mWhole").onclick = () => playEdited(null, "Your edited video");
+$("#watchBtn").onclick = () => { if (!LIVE) { toast("Open the storyboard from the studio to watch the edited video."); return; } playEdited(null, "Your edited video"); };
 function feedbackText() {
   return SB.beats.map((b) => `Beat ${b.no}: ${b.status.toUpperCase()}` +
     b.items.filter((i) => i.type !== "pause").map((i) => `\n  [${b.items_on[i.id] ? "x" : " "}] ${i.label}`).join("") +

@@ -8,14 +8,18 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import cards
 import commands
 import core
+import exportopts
 import library
 import tracks as tracks_mod
 import hinglish
+import typedcaps
 from core import FFMPEG, FFPROBE, YTDLP
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -775,6 +779,8 @@ def target_size(data: dict, preview: bool) -> tuple[int, int]:
         w, h = 1080, 1080
     elif fmt == "16:9":
         w, h = 1920, 1080
+    elif fmt == "4:5":  # export-only frame (Instagram feed / LinkedIn)
+        w, h = 1080, 1350
     else:
         src = next((s for s in data["sources"] if s.get("width")), None)
         w, h = (src["width"], src["height"]) if src else (1920, 1080)
@@ -971,7 +977,8 @@ def write_ass(path: Path, scene: dict, words: list[dict], ranges, settings: dict
         e = _map_time(min(x["e"], scene["out"]) - scene["in"], ranges, speed)
         if s is None or e is None or e - s < 0.02:
             continue
-        txt = hinglish.caption_word(x["w"], settings)  # Hindi script as spoken, or Hinglish; plus user spellings
+        # Hindi script as spoken, or Hinglish; plus user spellings. Your typed captions are shown exactly as written.
+        txt = x["w"] if x.get("fixed") else hinglish.caption_word(x["w"], settings)
         txt = txt.replace("{", "(").replace("}", ")").replace("\\", "/").strip()
         if not txt:  # "spell X as -" style removals: drop the word, keep the others' timing
             continue
@@ -1268,8 +1275,22 @@ def _sfx_events(scenes: list[dict], durs: list[float]) -> tuple[list[tuple], lis
     return trans, out[:60]
 
 
+VQ = {"standard": (25, 23), "high": (21, 20), "max": (17, 16)}  # export quality -> (NVENC cq, x264 crf)
+
+
+def venc_args(nvenc: bool, preview: bool, vq: str | None = None) -> list[str]:
+    """H.264 encoder settings. Preview = fast + small; final = the Export dialog's quality (default High = the old
+    fixed cq 21 / crf 20, so default exports are byte-for-byte what they always were)."""
+    if preview:
+        return (["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "30", "-b:v", "0"] if nvenc
+                else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])
+    cq, crf = VQ.get(vq or "high", VQ["high"])
+    return (["-c:v", "h264_nvenc", "-preset", "p5", "-cq", str(cq), "-b:v", "0"] if nvenc
+            else ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)])
+
+
 def assemble(wd: Path, scenes: list[dict], segs: list[Path], durs: list[float], out: Path, fps: int,
-             preview: bool, extra_sounds: list[dict] | None = None) -> bool:
+             preview: bool, extra_sounds: list[dict] | None = None, vq: str | None = None) -> bool:
     """Join the scene segments WITH transitions and sound effects. False = nothing to add (caller stream-copies).
     Transitions don't change any length: the outgoing scene's last frame is held for the transition (the voice of the
     next scene starts exactly at the cut), so captions, music and the page's scene times all stay in place."""
@@ -1324,9 +1345,7 @@ def assemble(wd: Path, scenes: list[dict], segs: list[Path], durs: list[float], 
     def enc(nvenc: bool) -> list[str]:
         if not trans:
             return []
-        if nvenc:
-            return ["-c:v", "h264_nvenc", "-preset", "p1" if preview else "p5", "-cq", "30" if preview else "21", "-b:v", "0"]
-        return ["-c:v", "libx264", "-preset", "veryfast" if preview else "medium", "-crf", "28" if preview else "20"]
+        return venc_args(nvenc, preview, vq)
     base_cmd = [FFMPEG, "-y", "-v", "error", *inputs, "-filter_complex", ";".join(g), *vmap, "-map", "[aout]"]
     tail = ["-r", str(fps), "-g", str(fps * 2), "-c:a", "aac", "-b:a", "256k", "-t", f"{total:.3f}",
             "-movflags", "+faststart", out.name]
@@ -1392,7 +1411,10 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
                     w, h, fps, preview, words_in(words, scene["in"], scene["out"]), st.st_size, st.st_mtime,
                     logo_sig, "nvenc" if nvenc else "x264", gkey, _sticker_sigs(scene),
                     (bg_src_[2], round(bg_t0, 3)) if gkey and bg_src_ and bg_src_[0] != "color" else None,
-                    20)  # bump when caption/card/render logic changes
+                    20,  # bump when caption/card/render logic changes
+                    # export-only knobs (Export dialog): appended only when set, so normal renders keep their cache
+                    *([("x", settings.get("_vq"), settings.get("_face_crop"), settings.get("fit"))]
+                      if settings.get("_vq") or settings.get("_face_crop") or settings.get("fit") == "blur" else []))
     out = seg_dir / f"seg_{key}.mp4"
     if out.exists() and out.stat().st_size > 1000:
         return out
@@ -1486,10 +1508,30 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
             v.append("eq=brightness=0.03:contrast=1.04")
         v.append(zoom_pieces(zw, geo, z) if zw else ",".join(geo(z)))
     else:
+        blur_n = [0]
+
         def geo(zz):
             g = [f"crop=trunc(iw/{zz:.3f}/2)*2:trunc(ih/{zz:.3f}/2)*2"] if zz > 1.001 else []
-            if settings.get("fit") == "pad":
+            fit_ = settings.get("fit")
+            if fit_ == "pad":
                 g.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black")
+            elif fit_ == "blur":
+                # export to the other orientation (vertical edit -> 16:9): the whole picture on a soft, darkened,
+                # blurred copy of itself – no black bars, nothing cut. Labels unique per call (zoom pieces call geo
+                # once per piece).
+                k = blur_n[0]
+                blur_n[0] += 1
+                sw, sh = max(16, w // 8 // 2 * 2), max(16, h // 8 // 2 * 2)
+                g.append(f"split=2[bz{k}a][bz{k}b];"
+                         f"[bz{k}a]scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh},boxblur=6:2,"
+                         f"scale={w}:{h},eq=brightness=-0.12:saturation=0.8,setsar=1[bz{k}g];"
+                         f"[bz{k}b]scale={w}:{h}:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+                         f"setsar=1[bz{k}f];[bz{k}g][bz{k}f]overlay=(W-w)/2:(H-h)/2")
+            elif settings.get("_face_crop"):
+                # export to a shorter frame (9:16 -> 4:5 / 1:1): cut from the bottom, keep the face (face_y)
+                fy = min(max(float(settings.get("face_y", 0.27) or 0.27), 0.05), 0.95)
+                g.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+                         f"crop={w}:{h}:(iw-ow)/2:'max(0,min(ih-oh,ih*{fy:.3f}-oh*0.42))'")
             else:
                 g.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}")
             return g + ["setsar=1"]
@@ -1653,10 +1695,7 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
         inputs += ["-f", "lavfi", "-t", f"{out_dur:.6f}", "-i", "anullsrc=r=48000:cl=stereo"]
         graph.append(f"[{in_idx}:a]anull[aout]")
 
-    if nvenc:
-        venc = ["-c:v", "h264_nvenc", "-preset", "p1" if preview else "p5", "-cq", "30" if preview else "21", "-b:v", "0"]
-    else:
-        venc = ["-c:v", "libx264", "-preset", "veryfast" if preview else "medium", "-crf", "28" if preview else "20"]
+    venc = venc_args(nvenc, preview, settings.get("_vq"))
     cmd = [FFMPEG, "-y", "-v", "error", *inputs, "-filter_complex", ";".join(graph),
            "-map", "[vout]", "-map", "[aout]", *venc, "-r", str(fps), "-g", str(fps * 2),
            "-frames:v", str(n_frames), "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", out.name]
@@ -1909,7 +1948,91 @@ def finish_audio(src: Path, dst: Path, dur: float, music: Path | None, polish: b
         timeout=max(600, int(dur * 3)))
 
 
-def render_project(pid: str, preview: bool) -> Path:
+def run_progress(cmd: list, total: float, label: str, pid: str, timeout: float) -> None:
+    """Run ffmpeg, showing '<label> 37 %' in the job box (ffmpeg -progress); same errors as run()."""
+    cmd = [str(c) for c in cmd]
+    cmd = cmd[:1] + ["-progress", "pipe:1", "-nostats"] + cmd[1:]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                         errors="replace", creationflags=NO_WINDOW)
+    err: list[str] = []
+    t_err = threading.Thread(target=lambda: err.extend(p.stderr), daemon=True)  # drain: a full pipe would hang ffmpeg
+    t_err.start()
+    t0, last = time.time(), -1
+    try:
+        for line in p.stdout:
+            if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                try:
+                    pct = int(min(99, max(0, int(line.split("=", 1)[1]) / 1e6 / max(total, 0.1) * 100)))
+                except ValueError:
+                    continue
+                if pct >= last + 3:
+                    last = pct
+                    core.set_job(pid, progress=f"{label} {pct} %")
+            if time.time() - t0 > timeout:
+                p.kill()
+                raise PipelineError(f"{label}: took longer than {int(timeout // 60)} min – stopped.")
+        p.wait(timeout=60)
+    finally:
+        if p.poll() is None:
+            p.kill()
+        t_err.join(timeout=5)
+    if p.returncode != 0:
+        tail = "\n".join("".join(err).strip().splitlines()[-12:])
+        raise PipelineError(f"ffmpeg failed (exit {p.returncode}):\n{tail}")
+
+
+def deliver(pid: str, master: Path, out: Path, fmt: str, quality: str) -> None:
+    """The finished H.264 MP4 master -> the file type picked in the Export dialog. Writes <out>.part first, renamed
+    only when complete (a crash / full disk never leaves a broken file in Exports)."""
+    dur = max(probe(master)["duration"], 0.1)
+    part = out.with_name(out.stem + ".conv.part" + out.suffix)  # NOT <stem>.part.mp4: that is the master itself
+    if part.resolve() == master.resolve():
+        raise PipelineError("Export: the converted file would overwrite its own source.")
+    q = {"standard": 0, "high": 1, "max": 2}.get(quality, 1)
+    base = [FFMPEG, "-y", "-v", "error", "-i", master]
+    tmo = max(900, dur * 60)
+    label = {"mov": "Saving as MOV", "mkv": "Saving as MKV", "mp4_hevc": "Converting to H.265",
+             "webm": "Converting to WebM (slow)", "mov_prores": "Converting to ProRes", "mp3": "Saving the MP3"}[fmt]
+    core.set_job(pid, progress=label + "…")
+    try:
+        if fmt == "mov":
+            run(base + ["-map", "0", "-c", "copy", "-movflags", "+faststart", "-f", "mov", part], timeout=tmo)
+        elif fmt == "mkv":
+            run(base + ["-map", "0", "-c", "copy", "-f", "matroska", part], timeout=tmo)
+        elif fmt == "mp3":
+            run(base + ["-vn", "-c:a", "libmp3lame", "-b:a", "320k", "-id3v2_version", "3", "-f", "mp3", part],
+                timeout=tmo)
+        elif fmt == "mp4_hevc":
+            tail = ["-c:a", "copy", "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", part]
+            try:  # hvc1 tag: without it iPhones / Macs / QuickTime refuse to play HEVC in MP4
+                run_progress(base + ["-c:v", "hevc_nvenc", "-preset", "p5", "-cq", str((28, 24, 20)[q]), "-b:v", "0"]
+                             + tail, dur, label, pid, tmo)
+            except PipelineError as e:
+                core.job_log(pid, f"GPU H.265 encoder failed ({str(e).splitlines()[-1][:100]}) – using the CPU (slower)")
+                part.unlink(missing_ok=True)
+                run_progress(base + ["-c:v", "libx265", "-preset", "medium", "-crf", str((26, 23, 20)[q]),
+                                     "-x265-params", "log-level=error"] + tail, dur, label, pid, tmo * 3)
+        elif fmt == "webm":
+            run_progress(base + ["-c:v", "libvpx-vp9", "-crf", str((36, 32, 28)[q]), "-b:v", "0", "-row-mt", "1",
+                                 "-deadline", "good", "-cpu-used", "4", "-pix_fmt", "yuv420p",
+                                 "-c:a", "libopus", "-b:a", "160k", "-f", "webm", part], dur, label, pid, tmo * 3)
+        elif fmt == "mov_prores":  # 422 (HQ at Maximum), 10-bit like a camera master; PCM sound as editors expect
+            run_progress(base + ["-c:v", "prores_ks", "-profile:v", "3" if q == 2 else "2", "-vendor", "apl0",
+                                 "-pix_fmt", "yuv422p10le", "-c:a", "pcm_s16le", "-f", "mov", part],
+                         dur, label, pid, tmo * 2)
+        else:
+            raise PipelineError(f"Unknown file type {fmt}")
+        if not part.is_file() or part.stat().st_size < 1000:
+            raise PipelineError(f"{label}: ffmpeg wrote no file.")
+        os.replace(part, out)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+
+
+def render_project(pid: str, preview: bool, opts: dict | None = None) -> Path:
+    """preview = small fast file for the page. Final: opts = the Export dialog's choices (exportopts.normalize);
+    None = the classic export (the edit's frame, H.264 MP4, High) named <id>_vN.mp4."""
     data = core.load(pid)
     skipped = {s["file"] for s in data["sources"] if s.get("include") is False}  # clip set to "Skip" in Footage
     scenes = [s for s in data["scenes"] if s.get("keep", True) and s["src"] not in skipped]
@@ -1923,14 +2046,41 @@ def render_project(pid: str, preview: bool) -> Path:
     if missing:
         raise PipelineError(f"Source video missing from Raw Footage: {', '.join(missing)}")
     sig = core.edit_sig(data)  # what this render shows – lets the page say "edited since this render"
-    w, h = target_size(data, preview)
+    xo = exportopts.normalize(data, opts) if (opts and not preview) else None
+    xinfo = None
+    if xo:
+        # the export's frame / size / fps / quality – on this in-memory copy only; the project keeps its settings
+        st0 = data["settings"]
+        xinfo = {"summary": exportopts.summary(data, xo), "matches_edit": not exportopts.reframes(data, xo)
+                 and exportopts.fps_of(data, xo) == exportopts.edit_fps(data),
+                 "web": exportopts.FORMATS[xo["fmt"]]["web"], "audio_only": xo["fmt"] == "mp3"}
+        flips, refr = exportopts.flips_orientation(data, xo), exportopts.reframes(data, xo)
+        w, h = exportopts.dims(data, xo)
+        st0["fps"] = exportopts.fps_of(data, xo)
+        if refr:
+            st0["format"] = xo["frame"]
+        if xo["fmt"] in ("mp4", "mov", "mkv"):  # stream-copied: the quality you picked is the final encode
+            if xo["quality"] != "high":
+                st0["_vq"] = xo["quality"]
+        else:  # converted afterwards: start from a near-lossless master so the conversion is the only loss
+            st0["_vq"] = "max"
+        if refr and st0.get("fit") != "pad":
+            if flips:
+                st0["fit"] = "blur"
+            elif abs(float(st0.get("face_y", core.DEFAULT_SETTINGS["face_y"]) or 0) - core.DEFAULT_SETTINGS["face_y"]) > 1e-6:
+                # the user placed their face ("framing up/down"): keep it in the shorter frame. The 0.27 default is
+                # only a guess – a centre crop is safer than trusting it (a face at 56 % lost its chin with 0.27)
+                st0["_face_crop"] = True
+    else:
+        w, h = target_size(data, preview)
     wd = core.work_dir(pid)
     cache: dict[str, tuple[list, list]] = {}
     scenes = with_effective_cards(scenes, data["settings"])
 
     for sc in scenes:
         if sc["src"] not in cache:
-            cache[sc["src"]] = (core.read_json(core.work_file(pid, sc["src"], "words.json"), []) or [],
+            # captions show YOUR pasted text when you gave one (typedcaps); the timing stays the spoken words'
+            cache[sc["src"]] = (typedcaps.words_for(data, sc["src"], core.read_json(core.work_file(pid, sc["src"], "words.json"), []) or []),
                                 load_silences(pid, sc["src"]))
     # word cuts may remove a whole scene: skip it rather than render an empty segment
     scenes = [sc for sc in scenes if kept_ranges(sc, cache[sc["src"]][1], data["settings"])]
@@ -1951,6 +2101,18 @@ def render_project(pid: str, preview: bool) -> Path:
         scenes = out_sc
     elif data["settings"].get("bg_mode") in ("picture", "video"):
         core.job_log(pid, "Green screen: the chosen picture / video is missing – using the clean wall colour instead.")
+
+    if xo:  # an 87 s ProRes 4K is ~6 GB: say so BEFORE minutes of rendering, not with a half-written file
+        secs = sum(scene_out_len(sc, cache[sc["src"]][1], data["settings"]) for sc in scenes)
+        master_mb = exportopts.est_mb(data, dict(xo, fmt="mp4", quality="max"), secs)
+        need_mb = exportopts.est_mb(data, xo, secs) * 1.3 + master_mb * 1.5 + 300  # file + master + segments
+        core.EXPORTS.mkdir(exist_ok=True)
+        free_mb = shutil.disk_usage(core.EXPORTS).free / 2 ** 20
+        if free_mb < need_mb:
+            raise PipelineError(f"Not enough disk space for this export: it needs about {need_mb / 1024:.1f} GB, "
+                                f"{free_mb / 1024:.1f} GB is free. Free some space (empty the Recycle Bin, delete old "
+                                f"exports) or pick a smaller file type / resolution.")
+        core.job_log(pid, f"Export: {xinfo['summary']}")
 
     def render_all(nvenc: bool) -> list[Path]:
         segs = []
@@ -1978,10 +2140,15 @@ def render_project(pid: str, preview: bool) -> Path:
         out = wd / f"preview_{stamp}.mp4"
     else:
         core.EXPORTS.mkdir(exist_ok=True)
-        used = [int(m.group(1)) for p in core.EXPORTS.glob(f"{data['id']}_v*.mp4")
-                for m in [re.match(re.escape(data["id"]) + r"_v(\d+)(?: \(\d+\))?\.mp4$", p.name)] if m]
-        n = max([len([r for r in data.get("renders", []) if r.get("kind") == "final"])] + used) + 1
-        out = core.unique_path(core.EXPORTS, f"{data['id']}_v{n}.mp4")
+        used = [int(m.group(1)) for p in core.EXPORTS.glob(f"{data['id']}_v*.*")
+                for m in [re.match(re.escape(data["id"]) + r"_v(\d+)(?:_[a-z]+_(?:\d+x\d+|audio))?(?: \(\d+\))?"
+                                   r"\.(?:mp4|mov|mkv|webm|mp3)$", p.name)] if m]
+        finals = [r for r in data.get("renders", []) if r.get("kind") == "final"]
+        # the same edit exported for several platforms shares ONE version number (v3_reel…, v3_youtube…)
+        same = next((r.get("ver") for r in reversed(finals) if xo and r.get("sig") == sig and r.get("ver")), None)
+        n = same or (max([len(finals)] + used + [int(r.get("ver") or 0) for r in finals]) + 1)
+        ext = exportopts.FORMATS[xo["fmt"]]["ext"] if xo else "mp4"
+        out = core.unique_path(core.EXPORTS, f"{data['id']}_v{n}{exportopts.tag(data, xo) if xo else ''}.{ext}")
     tmp_out = out.with_name(out.stem + ".part.mp4")
     st = data["settings"]
     music = music_file(pid, st)
@@ -2003,7 +2170,8 @@ def render_project(pid: str, preview: bool) -> Path:
     try:
         core.set_job(pid, progress="Joining scenes")
         has_fx = all(d > 0 for d in durs) and assemble(wd, scenes, segs, durs, fx_join,
-                                                       int(st.get("fps", 30) or 30), preview, track_sounds)
+                                                       int(st.get("fps", 30) or 30), preview, track_sounds,
+                                                       vq=st.get("_vq"))
     except PipelineError as e:
         fx_join.unlink(missing_ok=True)
         core.job_log(pid, f"Transitions / sound effects could not be added ({str(e).splitlines()[-1][:120]}) – "
@@ -2049,7 +2217,13 @@ def render_project(pid: str, preview: bool) -> Path:
         tmp_out.unlink(missing_ok=True)  # never leave a half-written file in Exports
         tmp_out.with_name(tmp_out.stem + "2.mp4").unlink(missing_ok=True)
         raise
-    os.replace(tmp_out, out)  # never leave a half-written file in Exports
+    if xo and xo["fmt"] != "mp4":
+        try:
+            deliver(pid, tmp_out, out, xo["fmt"], xo["quality"])
+        finally:
+            tmp_out.unlink(missing_ok=True)
+    else:
+        os.replace(tmp_out, out)  # never leave a half-written file in Exports
     dur = probe(out)["duration"]
     _prune_segments(wd, "preview" if preview else "final", segs)
     # REAL scene start/length in this file (the page's playhead/scene jumps; estimates drift by frames per scene)
@@ -2062,9 +2236,15 @@ def render_project(pid: str, preview: bool) -> Path:
         t += d_
 
     def fn(d):
-        d.setdefault("renders", []).append({"kind": "preview" if preview else "final", "file": out.name,
-                                            "created": core.now_iso(), "duration": dur, "size": f"{w}x{h}",
-                                            "sig": sig, "times": times})
+        rec = {"kind": "preview" if preview else "final", "file": out.name, "created": core.now_iso(),
+               "duration": dur, "size": f"{w}x{h}" if not (xinfo and xinfo["audio_only"]) else "audio",
+               "sig": sig, "times": times if not (xinfo and xinfo["audio_only"]) else None}
+        if not preview:
+            rec["ver"] = n
+            rec["bytes"] = out.stat().st_size
+        if xinfo:
+            rec.update(opts=xo, **xinfo)
+        d.setdefault("renders", []).append(rec)
         # keep EVERY final export's record (the Exports page lists them) – auto-preview adds a record per edit and a
         # plain "last 30" made finals vanish from the page after ~30 edits; previews: only the last 5 matter
         rs = d["renders"]

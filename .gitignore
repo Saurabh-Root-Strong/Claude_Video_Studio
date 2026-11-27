@@ -30,6 +30,7 @@
 !/_engines/separate/
 /_engines/separate/*
 !/_engines/separate/run_sep.py
+!/_engines/separate/run_align.py
 
 # Remotion project (sources only)
 !/_engines/remotion/

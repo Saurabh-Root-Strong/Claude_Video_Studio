@@ -281,7 +281,10 @@ def edit_sig(d: dict) -> str:
     scenes = [{k: v for k, v in s.items() if k not in _SIG_SKIP} for s in d.get("scenes", [])]
     srcs = [(s.get("file"), s.get("include", True)) for s in d.get("sources", [])]
     trk = [{k: v for k, v in t.items() if k != "locked"} for t in (d.get("tracks") or []) if isinstance(t, dict)]
-    blob = json.dumps([scenes, d.get("settings", {}), srcs, trk], sort_keys=True, default=str)
+    parts = [scenes, d.get("settings", {}), srcs, trk]
+    if d.get("caption_typed"):  # your own caption text (only when set: older renders stay up to date)
+        parts.append(d["caption_typed"])
+    blob = json.dumps(parts, sort_keys=True, default=str)
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 

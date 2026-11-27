@@ -5,6 +5,7 @@ Run:  .venv\\Scripts\\python.exe app.py      then open http://127.0.0.1:8070
 from __future__ import annotations
 
 import copy
+import json
 import os
 import queue
 import re
@@ -19,8 +20,12 @@ import commands
 import core
 import hinglish
 import autoedit
+import claudebot
+import exportopts
+import extract
 import media as media_lib
 import refaudio
+import typedcaps
 import suggest
 import library
 import tracks
@@ -80,7 +85,10 @@ def _worker():
                 # "Edited video" shows it, instead of an old render from before these clips were added
                 auto_preview = bool(n_done) and args.get("auto_preview", True)
             elif kind in ("preview", "final"):
-                out = pipeline.render_project(pid, preview=(kind == "preview"))
+                if kind == "final":
+                    with _pend_lock:
+                        _pend_final.get(pid, set()).discard(args.get("_key"))
+                out = pipeline.render_project(pid, preview=(kind == "preview"), opts=args.get("opts"))
                 msg = f"Rendered {out.name}"
             elif kind == "ref_download":
                 core.job_log(pid, f"Downloading {args['url']}")
@@ -98,6 +106,10 @@ def _worker():
                     refaudio.bg_audio(pid, r_, log=lambda m: core.job_log(pid, m))
                     msg = f"Background audio of {r_['file']} is ready."
                     auto_preview = bool(core.load(pid)["scenes"])
+            elif kind == "caption_align":  # your pasted caption text -> the exact moment each word is said
+                core.set_job(pid, progress="Lining up your captions with your voice… (first time: downloads the 1.2 GB voice model)")
+                msg = typedcaps.align(pid, log=lambda m: core.job_log(pid, m))
+                auto_preview = bool(core.load(pid)["scenes"])
             elif kind == "ref_analyze":
                 for name in args["files"]:
                     core.job_log(pid, f"Analysing reference {name}")
@@ -144,15 +156,26 @@ def _worker():
 threading.Thread(target=_worker, daemon=True).start()
 
 
+_pend_final: dict[str, set] = {}  # pid -> export choices waiting (one Reel + one YouTube export may both wait)
+_pend_lock = threading.Lock()
+
+
 def enqueue(pid: str, kind: str, **args):
     dup = {}
+    if kind == "final":
+        # the SAME export waiting twice (double click) is waste; DIFFERENT choices (Reel, then YouTube) both run
+        args["_key"] = json.dumps(args.get("opts") or {}, sort_keys=True)
+        with _pend_lock:
+            if args["_key"] in _pend_final.setdefault(pid, set()):
+                return
+            _pend_final[pid].add(args["_key"])
 
     def fn(d):
         job = d.get("job") or {}
         if core.job_busy(d):          # don't clobber the running job's status – just note it's waiting
-            # a preview/export already WAITING renders the newest edits when it starts – a second one is pure waste
+            # a preview already WAITING renders the newest edits when it starts – a second one is pure waste
             # (auto-preview from two open tabs, double clicks)
-            if kind in ("preview", "final") and kind in (job.get("pending") or []):
+            if kind == "preview" and kind in (job.get("pending") or []):
                 dup["skip"] = True
                 return
             job.setdefault("pending", []).append(kind)
@@ -206,6 +229,8 @@ def _decorate(data: dict) -> dict:
     data["brandkit"] = {"available": bool(bk), "missing_but_used": active == core.BRANDKIT and not bk}
     data["looks_view"] = view
     sil_cache: dict[str, list] = {}
+    typed_cache: dict[str, list] = {}
+    pid = data.get("id") or ""
     total_orig = total_est = 0.0
     skipped = {s["file"] for s in data["sources"] if s.get("include") is False}
     per_src: dict[str, dict] = {}
@@ -251,7 +276,11 @@ def _decorate(data: dict) -> dict:
         ps["est"] += sc["est"]
         # what the captions will actually say (Hinglish and/or user spellings), so the page matches the video
         st = data["settings"]
-        if st.get("caption_script") == "hinglish" or st.get("caption_fixes"):
+        typed = typedcaps.view(pid, data, sc, typed_cache)
+        sc["caption_typed"] = bool(typed is not None and typedcaps.scene_has_typed(data, sc))
+        if typed is not None:
+            sc["caption_view"] = typed
+        elif st.get("caption_script") == "hinglish" or st.get("caption_fixes"):
             sc["caption_view"] = hinglish.caption_text((sc.get("transcript") or "").split(), st)
         else:
             sc.pop("caption_view", None)
@@ -289,6 +318,7 @@ def _decorate(data: dict) -> dict:
     mdir = core.BRAND / "music"
     data.setdefault("ui_locks", {})
     data["ref_audio_tool"] = refaudio.available()
+    data["claude_bot"] = claudebot.status(data.get("id") or "")
     bgm = {}  # pictures / videos from the Media tab, for "Green screen: picture / video"
     for k, sub in (("pictures", "Pictures"), ("videos", "Videos")):
         d_ = library.LIB / sub
@@ -369,6 +399,8 @@ def media(pid, area, name):
     p = (base / name).resolve()
     if not p.is_relative_to(base.resolve()) or not p.is_file():
         abort(404)
+    if area == "exports" and request.args.get("dl"):  # "⬇ Download" on the Exports page: save, don't play
+        return send_file(p, as_attachment=True, download_name=p.name, conditional=True)
     resp = send_file(p, conditional=True)
     # library files (1,600 sticker pictures, 64 preview clips) are re-drawn on every Inspector change: let the browser
     # keep them a day instead of re-asking for each one every time; everything else may change any moment
@@ -461,8 +493,12 @@ def api_suggest(pid):
         if not any(s.get("keep", True) and s.get("role") != "broll" for s in d["scenes"]):
             res["error"] = "No scenes yet – add footage and click Analyze first."
             return
+        sc0 = body.get("scene") or None
+        if sc0 and not core.scene_by_id(d, sc0):  # a per-scene box for a scene that's gone must not edit the whole video
+            res["error"] = "That scene is no longer in the project – open Scenes and type it in 💬 Tell the editor."
+            return
         core.snapshot(pid, d)
-        out = suggest.apply(pid, d, text, body.get("scene") or None)
+        out = suggest.apply(pid, d, text, sc0)
         if not out["changed"]:
             core.drop_snapshot(pid)
         for sid, req in out["queued"]:
@@ -484,8 +520,46 @@ def api_suggest(pid):
     if res.get("error"):
         return jsonify(error=res["error"]), 400
     if res.get("changed"):
-        enqueue(pid, "preview")
+        d_ = core.load(pid)
+        if typedcaps.needs_align(d_) and typedcaps.aligner_available():
+            enqueue(pid, "caption_align")  # renders the preview itself when done (one render, with exact timing)
+        else:
+            enqueue(pid, "preview")
     return jsonify(ok=True, **res)
+
+
+@app.post("/api/projects/<pid>/scene_caption")
+def api_scene_caption(pid):
+    """✏ Inspector → Words → Edit text: {"scene": id, "text": "..."} = this scene's captions say exactly that (timed
+    to your voice, one undo step); {"scene": id, "auto": true} = back to the automatic captions for this scene."""
+    _exists(pid)
+    b = request.json or {}
+    res = {}
+
+    def fn(d):
+        core.snapshot(pid, d)
+        try:
+            if b.get("auto"):
+                res["reply"] = typedcaps.scene_auto(pid, d, str(b.get("scene") or ""))
+            else:
+                res["reply"] = typedcaps.set_scene_text(pid, d, str(b.get("scene") or ""), str(b.get("text") or ""))
+        except ValueError as e:
+            core.drop_snapshot(pid)
+            res["error"] = str(e)
+            return
+        d["commands"].append({"id": core.new_id("cmd"), "scene": b.get("scene"), "scene_no": None,
+                              "text": "caption text" + (" auto" if b.get("auto") else f": {str(b.get('text'))[:200]}"),
+                              "status": "done", "reply": res["reply"], "by": "studio", "created": core.now_iso()})
+        _cap_commands(d)
+    core.mutate(pid, fn)
+    if res.get("error"):
+        return jsonify(error=res["error"]), 400
+    d_ = core.load(pid)
+    if typedcaps.needs_align(d_) and typedcaps.aligner_available():
+        enqueue(pid, "caption_align")  # renders the edited view itself when done
+    else:
+        enqueue(pid, "preview")
+    return jsonify(ok=True, reply=res["reply"])
 
 
 @app.post("/api/projects/<pid>/media_assets")
@@ -594,6 +668,85 @@ def api_media_upload():
             continue
         results.append(media_lib.add_file(tmp, f.filename or "upload", want if want in media_lib.KINDS else None))
     return jsonify(ok=True, results=results)
+
+
+@app.post("/api/claude_auto")
+def api_claude_auto():
+    """🤖 {"on": true|false} switch Claude auto-reply; {"retry": pid} give a project's open requests one more run."""
+    b = request.json or {}
+    if "on" in b:
+        claudebot.set_enabled(bool(b["on"]))
+    if b.get("retry") and core.valid_pid(str(b["retry"])):
+        claudebot.retry(str(b["retry"]))
+    return jsonify(ok=True, enabled=claudebot.enabled())
+
+
+@app.get("/api/extract")
+def api_extract_list():
+    return jsonify(jobs=extract.jobs(), files=extract.files(), modes={k: v[0] for k, v in extract.MODES.items()})
+
+
+@app.post("/api/extract")
+def api_extract_start():
+    """⬇ Extract: {mode: mp3|mp4|mute, from, to} + ONE of: url (link), media "kind/name" (a clip in Media),
+    or a multipart file. Runs in the background; poll GET /api/extract."""
+    form = request.form if request.files else (request.json or {})
+    mode, frm, to = str(form.get("mode") or ""), form.get("from"), form.get("to")
+    try:
+        f = request.files.get("file")
+        if f:
+            name = core.safe_filename(f.filename or "upload")
+            ext = Path(name).suffix.lower()
+            if ext not in media_lib.VIDEO_EXT | media_lib.AUDIO_EXT:
+                return jsonify(error="Choose a video or sound file."), 400
+            extract.TMP.mkdir(parents=True, exist_ok=True)
+            tmp = extract.TMP / f"{core.new_id('up')}{ext}"
+            f.save(tmp)
+            job = extract.start(mode, frm, to, src=tmp, stem=Path(name).stem, tmp_src=True)
+        elif form.get("media"):
+            kind, _, nm = str(form.get("media")).partition("/")
+            try:
+                src = media_lib._path(kind, nm)
+            except ValueError as e:
+                return jsonify(error=str(e)), 400
+            job = extract.start(mode, frm, to, src=src, stem=src.stem)
+        else:
+            job = extract.start(mode, frm, to, url=str(form.get("url") or ""))
+    except extract.ExtractError as e:
+        return jsonify(error=str(e)), 400
+    except OSError as e:
+        return jsonify(error=f"Could not save the file ({e.strerror or e}) – is the disk full?"), 400
+    return jsonify(ok=True, job=job)
+
+
+@app.post("/api/extract/<action>")
+def api_extract_action(action):
+    b = request.json or {}
+    try:
+        if action == "remove":
+            return jsonify(ok=True, reply=extract.remove(str(b.get("name"))))
+        if action == "to_media":
+            r = extract.to_media(str(b.get("name")), b.get("kind") or None)
+            if r.get("ok"):
+                library._cache["sig"] = None
+            return jsonify(ok=True, result=r)
+        if action == "open":
+            extract.OUT.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(extract.OUT)
+            return jsonify(ok=True)
+    except extract.ExtractError as e:
+        return jsonify(error=str(e)), 400
+    abort(404)
+
+
+@app.get("/api/extract/download/<path:name>")
+def api_extract_download(name):
+    try:
+        p = extract.path_of(name)
+    except extract.ExtractError:
+        abort(404)
+    return send_file(p, as_attachment=True, download_name=p.name, conditional=True)
 
 
 @app.post("/api/media/<action>")
@@ -1204,11 +1357,42 @@ def api_analyze(pid):
 @app.post("/api/projects/<pid>/render")
 def api_render(pid):
     _exists(pid)
-    kind = (request.json or {}).get("kind", "preview")
+    body = request.json or {}
+    kind = body.get("kind", "preview")
     if kind not in ("preview", "final"):
         return jsonify(error="bad kind"), 400
+    if kind == "final" and isinstance(body.get("opts"), dict):
+        data = core.load(pid)
+        if not any(s.get("keep", True) for s in data["scenes"]):
+            return jsonify(error="Nothing to export yet – no scenes are kept."), 400
+        opts = exportopts.normalize(data, body["opts"])  # never trust the page's values as ffmpeg arguments
+        enqueue(pid, kind, opts=opts)
+        return jsonify(ok=True, opts=opts, summary=exportopts.summary(data, opts))
     enqueue(pid, kind)
     return jsonify(ok=True)
+
+
+@app.get("/api/projects/<pid>/export_options")
+def api_export_options(pid):
+    _exists(pid)
+    return jsonify(exportopts.catalog(core.load(pid)))
+
+
+@app.post("/api/projects/<pid>/export_plan")
+def api_export_plan(pid):
+    """What the Export dialog shows for the current choices: size, file estimate, heads-ups. No side effects."""
+    _exists(pid)
+    body = request.json or {}
+    data = core.load(pid)
+    opts = exportopts.normalize(data, body.get("opts"))
+    try:
+        secs = min(max(float(body.get("seconds") or 0), 0.0), 6 * 3600)
+    except (TypeError, ValueError):
+        secs = 0.0
+    w, h = exportopts.dims(data, opts)
+    return jsonify(opts=opts, w=w, h=h, fps=exportopts.fps_of(data, opts), summary=exportopts.summary(data, opts),
+                   mb=round(exportopts.est_mb(data, opts, secs), 1), minutes=round(exportopts.est_minutes(data, opts, secs), 1),
+                   warnings=exportopts.warnings(data, opts, secs), reframes=exportopts.reframes(data, opts))
 
 
 @app.post("/api/projects/<pid>/command")
@@ -1605,4 +1789,6 @@ if __name__ == "__main__":
         print(f"Reset {n} job(s) interrupted when the studio was last closed.")
     if os.environ.get("CVE_NO_BROWSER") != "1":
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+    if "CVE_ROOT" not in os.environ:  # never in self-tests / sandboxes (temp roots): they'd start real Claude runs
+        claudebot.start()
     app.run(host="127.0.0.1", port=PORT, debug=False, threaded=True)

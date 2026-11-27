@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
 import os
 import shutil
@@ -28,6 +29,7 @@ make_fixtures.main()  # test videos are generated, not stored in git
 import app as appmod  # noqa: E402  (imports core with CVE_ROOT set)
 import core  # noqa: E402
 import pipeline  # noqa: E402
+import exportopts  # noqa: E402
 
 client = appmod.app.test_client()
 results: list[tuple[str, bool, str]] = []
@@ -432,6 +434,80 @@ try:
     on_disk = {p.name for p in (wdp / "segs").glob("seg_*.mp4")}
     check("segment cache pruned to latest preview + final", on_disk <= keep, f"{len(on_disk)} files, {len(keep)} in use")
     check("no half-written .part files left in Exports", not list(core.EXPORTS.glob("*.part.mp4")))
+
+    # ---------------------------------------------------------------- Export dialog: platform / frame / size / type
+    def streams(path):
+        o = subprocess.run([core.FFPROBE, "-v", "error", "-show_entries",
+                            "stream=codec_type,codec_name,codec_tag_string,width,height,r_frame_rate:format=format_name,duration",
+                            "-of", "json", str(path)], capture_output=True, text=True).stdout
+        return json.loads(o or "{}")
+
+    st_before = dict(core.load(pid)["settings"])
+    ver_before = {r.get("ver") for r in core.load(pid)["renders"] if r.get("kind") == "final"}
+    xp_runs = [({"platform": "youtube", "res": "480"}, "mp4", ("h264",), (854, 480)),       # vertical edit -> 16:9 blur
+               ({"platform": "custom", "frame": "4:5", "res": "480", "fmt": "mov", "fps": "60"}, "mov", ("h264",), (480, 600)),
+               ({"platform": "reel", "res": "480", "fmt": "mp4_hevc", "quality": "standard"}, "mp4", ("hevc",), None),
+               ({"platform": "x", "res": "480", "fmt": "webm"}, "webm", ("vp9", "opus"), None),
+               ({"platform": "custom", "res": "480", "fmt": "mov_prores"}, "mov", ("prores", "pcm_s16le"), None),
+               ({"platform": "linkedin", "res": "480", "fmt": "mkv"}, "mkv", ("h264",), None),
+               ({"platform": "edit", "fmt": "mp3"}, "mp3", ("mp3",), "audio")]
+    xp_res = []
+    for opts_, ext_, codecs_, size_ in xp_runs:
+        r_ = post(f"/api/projects/{pid}/render", {"kind": "final", "opts": opts_})
+        j = wait_job(pid, "final")
+        rec = core.load(pid)["renders"][-1]
+        f_ = core.EXPORTS / rec["file"]
+        s_ = streams(f_) if f_.is_file() else {}
+        cods = {x.get("codec_name") for x in s_.get("streams", [])}
+        vs = next((x for x in s_.get("streams", []) if x.get("codec_type") == "video"), {})
+        ok = (r_.status_code == 200 and j["status"] == "done" and f_.suffix == "." + ext_ and set(codecs_) <= cods
+              and (size_ is None or size_ == "audio" and not vs or size_ == (vs.get("width"), vs.get("height")))
+              and abs(float((s_.get("format") or {}).get("duration") or 0) - core.load(pid)["renders"][-2]["duration"]) < 0.5
+              and rec.get("summary") and rec.get("opts", {}).get("platform") == opts_["platform"])
+        xp_res.append((opts_.get("fmt", "mp4"), ok, rec["file"], sorted(c for c in cods if c), vs.get("width"), vs.get("height"),
+                       vs.get("r_frame_rate"), j.get("error")))
+    check("Export dialog: YouTube 16:9 / 4:5 MOV 60 fps / H.265 / WebM / ProRes / MKV / MP3 each make the right file "
+          "(container, codecs, size, length)", all(x[1] for x in xp_res), str([x for x in xp_res if not x[1]] or xp_res[:2]))
+    recs_ = [r for r in core.load(pid)["renders"] if r.get("opts")]
+    hev = next((streams(core.EXPORTS / r["file"]) for r in recs_ if r["opts"]["fmt"] == "mp4_hevc"), {})
+    check("H.265 MP4 is tagged hvc1 (plays on iPhone / Mac)",
+          any(x.get("codec_tag_string") == "hvc1" for x in hev.get("streams", [])), str(hev.get("streams")))
+    f60 = next((streams(core.EXPORTS / r["file"]) for r in recs_ if r["opts"]["fmt"] == "mov"), {})
+    check("fps choice applies (60 fps MOV)", any(x.get("r_frame_rate") == "60/1" for x in f60.get("streams", [])), str(f60))
+    check("exports of ONE edit share one version number; names say platform + size",
+          len({r.get("ver") for r in recs_}) == 1 and {r.get("ver") for r in recs_} <= ver_before  # = the plain export above (same edit)
+          and any("_youtube_854x480." in r["file"] for r in recs_) and any(r["file"].endswith("_edit_audio.mp3") for r in recs_),
+          str([r["file"] for r in recs_]))
+    check("player only uses exports that look like the edit (16:9 / MP3 / ProRes flagged)",
+          all(r.get("matches_edit") == (r["opts"]["frame"] == exportopts.edit_frame(core.load(pid)) and r["opts"]["fps"] == "edit")
+              for r in recs_ if r["opts"]["fmt"] != "mp3") and
+          all(r.get("web") is False for r in recs_ if r["opts"]["fmt"] in ("mov_prores", "mkv", "mp4_hevc")) and
+          all(r.get("audio_only") for r in recs_ if r["opts"]["fmt"] == "mp3"), str([(r["file"], r.get("matches_edit"), r.get("web")) for r in recs_]))
+    st_after = core.load(pid)["settings"]
+    check("an export never changes the project's own settings (format, fps, fit)",
+          all(st_after.get(k) == st_before.get(k) for k in ("format", "fps", "fit", "layout")) and "_vq" not in st_after
+          and "_face_crop" not in st_after, f"{[(k, st_before.get(k), st_after.get(k)) for k in ('format', 'fps', 'fit')]}")
+    check("no half-written .part files after converted exports", not [p for p in core.EXPORTS.iterdir() if ".part" in p.name])
+    pl_ = post(f"/api/projects/{pid}/export_plan", {"opts": {"platform": "nope", "frame": "7:3", "res": "99999", "fmt": "exe;rm",
+                                                            "fps": "1000", "quality": "ultra"}, "seconds": "x"}).get_json()
+    pl4 = post(f"/api/projects/{pid}/export_plan", {"opts": {"platform": "reel", "res": "2160"}, "seconds": 200}).get_json()
+    check("export plan: junk values fall back to safe defaults; 4K Reel / too long / big file warned",
+          pl_["opts"]["platform"] == "edit" and pl_["opts"]["fmt"] == "mp4" and pl_["opts"]["res"] in ("1080", "source")
+          and pl_["opts"]["fps"] == "edit" and pl_["opts"]["quality"] == "high" and pl_["opts"]["frame"] in ("9:16", "16:9", "1:1", "4:5")
+          and pl4["w"] == 2160 and pl4["h"] == 3840 and any("3:00" in w for w in pl4["warnings"])
+          and any("1080 wide" in w for w in pl4["warnings"]), f"{pl_['opts']} {pl4['warnings']}")
+    # queue: the SAME export clicked twice waits once; a DIFFERENT one (Reel, then YouTube) waits too
+    core.mutate(pid, lambda d: d.update(job={"kind": "analyze", "status": "running", "pending": [], "log": []}))
+    real_q, appmod._jobs = appmod._jobs, queue.Queue()  # the worker stays blocked on the real queue: nothing renders
+    try:
+        for o_ in ({"platform": "reel"}, {"platform": "reel"}, {"platform": "youtube"}):
+            appmod.enqueue(pid, "final", opts=o_)
+        q1, q0 = appmod._jobs.qsize(), 0
+    finally:
+        appmod._jobs = real_q
+        appmod._pend_final.pop(pid, None)
+    core.mutate(pid, lambda d: d.update(job={"kind": "final", "status": "done", "pending": [], "log": []}))
+    check("export queue: identical export dropped, a different one kept", q1 - q0 == 2, f"{q1 - q0} queued")
 
     # ---------------------------------------------------------------- GPU encoder failure -> whole render on CPU
     real_run = pipeline.run

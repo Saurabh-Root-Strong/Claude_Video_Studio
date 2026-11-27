@@ -23,6 +23,7 @@ import core
 import library
 import pipeline
 import tracks as tracks_mod
+import typedcaps
 
 NUM_WORDS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
                                           "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
@@ -585,6 +586,19 @@ def apply(pid: str, data: dict, text: str, scene_id: str | None = None) -> dict:
     n_all = len(data["scenes"])
     default = [data["scenes"].index(core.scene_by_id(data, scene_id)) + 1] if scene_id and core.scene_by_id(data, scene_id) else []
     results, queued, changed = [], [], False
+    # a pasted caption script ("your captions aren't clear, use these: [0:00] So, gold …") is ONE request: show
+    # those words as the captions, timed to the voice – never 30 lines each read as a separate edit
+    if typedcaps.RESET.match(text):
+        r = typedcaps.reset(data)
+        return {"results": [{"scene": None, "text": text.strip(), "reply": r, "ok": True}], "changed": "again" in r, "queued": []}
+    script = typedcaps.split_script(text)
+    if script:
+        label = f"your caption text ({sum(len(l.split()) for _, l in script)} words, {len(script)} lines)"
+        try:
+            r = typedcaps.apply_script(pid, data, script)
+            return {"results": [{"scene": None, "text": label, "reply": r, "ok": True}], "changed": True, "queued": []}
+        except ValueError as e:
+            return {"results": [{"scene": None, "text": label, "reply": str(e), "ok": False}], "changed": False, "queued": []}
     text = FILLER_RX.sub(" ", text)
     if not text.strip(" ,.;\n"):
         return {"results": [], "changed": False, "queued": []}
@@ -641,7 +655,7 @@ def apply(pid: str, data: dict, text: str, scene_id: str | None = None) -> dict:
                     r = f"!Could not do that ({str(e)[:80]})."
                 if r is None:
                     queued.append((sc["id"], orig(atom)))
-                    results.append({"scene": k, "text": atom, "reply": "Sent to Claude – say “process studio inbox” in VS Code.", "ok": None})
+                    results.append({"scene": k, "text": atom, "reply": "Sent to Claude (its reply shows here).", "ok": None})
                 else:
                     ok = not r.startswith("!")
                     changed |= ok

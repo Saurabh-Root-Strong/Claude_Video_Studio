@@ -202,6 +202,29 @@
         <button class="btn ghost small" id="mediaOpen" data-tip="Open the Library folder in Explorer">📂 Open folder</button>
       </div>
       <div id="mediaResult" class="medresult hidden"></div>
+      <div class="card xbox" id="xBox">
+        <div class="medhead" id="xHead"><b>⬇ Extract &amp; download</b>
+          <span class="muted small">MP3 sound only · MP4 video · MP4 video only (no sound) – from a link or a file, any part of it</span>
+          <span class="grow"></span><button class="lnk" id="xOpen" data-tip="Open the Library/Extracted folder in Explorer">folder</button></div>
+        <div class="xrow">
+          <input id="xUrl" placeholder="Paste a link (YouTube, Instagram, X, Facebook…) – or drop / choose a file →" data-tip="Any link yt-dlp can read. Only download what you have the right to use." />
+          <button class="btn ghost small" id="xFileBtn" data-tip="Choose a video or sound file from your computer">📁 File…</button>
+          <select id="xMedia" data-tip="Or take it from a clip already in Media"><option value="">or from Media…</option></select>
+          <input type="file" id="xFile" hidden accept="video/*,audio/*" />
+        </div>
+        <div class="xchosen muted small hidden" id="xChosen"></div>
+        <div class="xrow">
+          <div class="seg xmodes" id="xModes">
+            <button data-m="mp3" class="active" data-tip="Sound only – MP3 (best VBR quality)">🎵 MP3 – sound</button>
+            <button data-m="mp4" data-tip="Video with its sound – MP4 (H.264 + AAC, plays everywhere)">🎞 MP4 – video</button>
+            <button data-m="mute" data-tip="Video WITHOUT sound – MP4 (for B-roll, a green-screen background, a transition)">🔇 MP4 – video only</button>
+          </div>
+          <label class="muted small">From <input id="xFrom" class="xt" placeholder="0:00" data-tip="Optional: start here (1:15 or 75). Empty = from the start." /></label>
+          <label class="muted small">To <input id="xTo" class="xt" placeholder="end" data-tip="Optional: stop here (2:30 or 150). Empty = to the end." /></label>
+          <button class="btn" id="xGo">⬇ Extract</button>
+        </div>
+        <div id="xList" class="xlist"></div>
+      </div>
       <div id="mediaKinds" class="medkinds"></div>
     </section>
 
@@ -220,12 +243,13 @@
           <span class="aegrp"><button id="autoBtn" class="btn primary" data-tip="Step ② – ✨ Auto-edit: reads every scene (its words and their timing) and places stickers, matching sounds, zoom moments, transitions at topic changes and effects – then renders the edited view for you to review. Your own edits are kept; Undo removes the whole pass. Run it AFTER step ① (if you use it): the plan may cut or reorder scenes.">② ✨ Auto-edit</button><select id="autoLevel" data-tip="How much to add: Subtle = a few key moments · Balanced · Energetic = punchy reels style"><option value="">auto strength</option><option value="subtle">Subtle</option><option value="balanced">Balanced</option><option value="energetic">Energetic</option></select></span>
         </div>
         <div class="grp end">
-          <button id="finalBtn" class="btn primary" data-tip="Make the full-quality video file for upload. Saved in the Exports folder (tab 4).">Export final</button>
+          <button id="finalBtn" class="btn primary" data-tip="Make the video file for upload – pick Instagram / YouTube / X / LinkedIn…, the frame, resolution and file type. Saved in the Exports folder (tab 5).">Export final</button>
         </div>
       </div>
       <span class="muted small" id="lookPickInfo"></span>
       <div id="sugBox" class="sugbox">
-        <div class="sughead"><b>💬 Tell the editor</b> <span class="muted small" id="sugHint">one box for every change, in plain words – name a scene for that scene (“scene 5: money sticker”), no scene = the whole video (“format 9:16”, “remove silences”). Enter sends · Shift+Enter = new line.</span></div>
+        <div class="sughead"><b>💬 Tell the editor</b> <span class="muted small" id="sugHint">one box for every change, in plain words – name a scene for that scene (“scene 5: money sticker”), no scene = the whole video (“format 9:16”, “remove silences”). Paste a caption script to use your own caption text. Enter sends · Shift+Enter = new line.</span>
+          <label class="muted small cbauto" data-tip="On: what the studio can't do by itself is handed to Claude Code automatically (it starts on its own, the reply shows here). Off: it waits until you say “process studio inbox” in VS Code."><input type="checkbox" id="cbAuto" checked> 🤖 Claude auto-reply</label></div>
         <div class="sugrow">
           <textarea id="sugText" rows="2" data-tip="One box for everything. Many scenes at once: scene 6 calm music · scene 5 money sticker and cash sound · scene 3 zoom on 'double', no transition · last scene thumbs up sticker top left · scenes 2-4 black and white effect · a sticker / sound at 2 s. A line without a scene = the whole video: format 9:16 · remove silences · broll auto · highlight #22C55E · captions upper · music off. Anything the studio can't do goes to Claude." placeholder="e.g.  scene 5: money sticker and cash sound.  scene 3: zoom on 'double'.  remove silences  (no scene = whole video)"></textarea>
           <button id="sugSend" class="btn primary" data-tip="Apply it (one Undo step) and update your edited video. Enter sends, Shift+Enter makes a new line.">Send</button>
@@ -320,6 +344,32 @@
     </div>
     <div id="inboxList" class="history"></div>
   </aside>
+
+  <!-- EXPORT DIALOG: where it goes -> frame, resolution, file type, quality, fps -->
+  <div id="xpModal" class="xp-back hidden" role="dialog" aria-modal="true" aria-labelledby="xpTitle">
+    <div class="xp">
+      <div class="xp-head"><h3 id="xpTitle">Export your video</h3><button id="xpClose" class="btn ghost small" aria-label="Close">✕</button></div>
+      <div class="xp-body">
+        <div class="xp-lbl">Where will you post it?</div>
+        <div id="xpPlat" class="xp-plats"></div>
+        <div id="xpTip" class="xp-tip muted small"></div>
+        <div class="xp-grid">
+          <div class="xp-lbl">Frame</div><div id="xpFrame" class="xp-chips"></div>
+          <div class="xp-lbl">Resolution</div><div id="xpRes" class="xp-chips"></div>
+          <div class="xp-lbl">File type</div><div><div id="xpFmt" class="xp-chips"></div><div id="xpFmtNote" class="muted small"></div></div>
+          <div class="xp-lbl">Quality</div><div id="xpQ" class="xp-chips"></div>
+          <div class="xp-lbl">Frame rate</div><div id="xpFps" class="xp-chips"></div>
+        </div>
+        <div id="xpSum" class="xp-sum"></div>
+        <ul id="xpWarn" class="xp-warn"></ul>
+      </div>
+      <div class="xp-foot">
+        <span class="muted small">Your edit is not changed – this only makes a file in the Exports folder.</span>
+        <button id="xpCancel" class="btn ghost">Cancel</button>
+        <button id="xpGo" class="btn primary">Export</button>
+      </div>
+    </div>
+  </div>
 
   <div id="toast" class="toast hidden"></div>
   <script src="/static/app.js"></script>
