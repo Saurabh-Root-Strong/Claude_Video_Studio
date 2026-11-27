@@ -2112,8 +2112,157 @@ $("#sugSend").onclick = async () => {
 };
 $("#sugText").addEventListener("keydown", (e) => {  // chat style: Enter sends, Shift+Enter = a new line
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#sugSend").click(); } });
+// 🖼 PICTURES FOR THE STORY: upload many → ▶ Place → each lands on the scene where you talk about it (pictures.py)
+let PIC_BUSY = false;
+const picPool = () => ((P && P.pictures && P.pictures.items) || []);
+async function picApi(body) { return api(`/api/projects/${PID}/pictures`, { method: "POST", body }); }
+async function uploadPictures(fileList) {
+  const files = [...fileList].filter((f) => f && f.size !== undefined);
+  if (!files.length || PIC_BUSY) return;
+  const bad = files.filter((f) => /\.(heic|heif|avif|tiff?|svg|psd)$/i.test(f.name));
+  PIC_BUSY = true;
+  const hint = $("#picHint"), ok = [], fails = [];
+  try {
+    for (const [i, f] of files.entries()) {
+      if (bad.includes(f)) { fails.push(`${f.name}: save it as JPG or PNG first (this type can't be read)`); continue; }
+      hint.innerHTML = `<span class="spin"></span> Uploading ${i + 1} of ${files.length}: ${esc(f.name)}…`;
+      const fd = new FormData(); fd.append("files", f, f.name || `pasted-${Date.now()}.png`);
+      try {
+        const r = await fetch(`/api/projects/${PID}/upload?kind=asset`, { method: "POST", body: fd });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) fails.push(`${f.name}: ${j.error || "upload failed"}`);
+        else if (j.audio) fails.push(`${f.name}: a sound – put it on an Audio track`);
+        else ok.push(j.file);
+      } catch { fails.push(`${f.name}: upload failed – is the black Start Studio window still open?`); }
+    }
+    if (ok.length) { const r = await picApi({ op: "add", files: ok }); if (r.reply) toast(r.reply.trim()); }
+    if (fails.length) toast(fails.join(" · "), true);
+  } catch (e) { toast(e.message, true); }
+  PIC_BUSY = false; $("#picHint").dataset.h = ""; await refresh(true);
+}
+function renderPictures() {
+  const box = $("#picList"); if (!box || !P) return;
+  const items = picPool(), live = items.filter((e) => !e.off);
+  ["#picRun", "#picClear", "#picStyle"].forEach((s) => ($(s).hidden = !items.length));
+  const st = $("#picStyle"); if (document.activeElement !== st) st.value = (P.pictures && P.pictures.style) || "auto";
+  const isOn = (e) => (Array.isArray(e.placed) ? e.placed.length : !!e.placed);
+  const placed = live.filter(isOn).length, ran = P.pictures && P.pictures.ran;
+  const changed = live.some((e) => (!isOn(e) && !(e.why || "").startsWith("not placed")) || e.stale);
+  $("#picRun").textContent = ran && !changed ? "↻ Place again" : `▶ Place ${live.length > 1 ? live.length + " files" : "it"}`;
+  if (!PIC_BUSY) {
+    const pt = P.pictures_track || {};
+    const h = !items.length ? "" : `${placed} of ${live.length} on the video` + (changed ? " · changes wait for ▶ Place" : "")
+      + (pt.hidden ? ` · ⚠ the “${pt.name}” track is HIDDEN (👁 on the timeline)` : "") + (pt.locked ? ` · 🔒 the “${pt.name}” track is locked` : "")
+      + (pt.muted ? " · its sounds are muted" : "")
+      + " · a note like “Powell, Fed rate” or “scene 3” helps · drag a block on the Pictures track to fine-tune (it stays there)";
+    const hint = $("#picHint"); if (h && hint.dataset.h !== h) { hint.dataset.h = h; hint.textContent = h; }
+  }
+  if (box.contains(document.activeElement)) return;  // typing a note: don't redraw under the cursor
+  const scenes = P.scenes.filter((s) => inVid(s) && !s.src_skipped);
+  const html = items.map((e) => {
+    const a = (P.broll_assets || []).find((x) => x.file === e.file);
+    const th = a && a.thumb ? `<img src="${media("thumbs", a.thumb)}" alt="">` : `<span class="picnothumb">${a ? (a.still ? "🖼" : "🎞") : "⚠"}</span>`;
+    const pin = e.pin || {}, pinSel = pin.scene || "";
+    const recs = Array.isArray(e.placed) ? e.placed : e.placed ? [e.placed] : [];
+    const m = e.media || {}, role = e.role || "cutaway";
+    const where = e.off ? `<span class="bad">left out – you removed its block</span>`
+      : e.stale ? `<span class="bad">⚠ its scene was cut or changed – ▶ Place again</span>`
+      : !a ? `<span class="bad">file missing from Assets</span>`
+      : recs.length > 1 ? `<button class="lnk" data-picsel="${esc(recs[0].anchor)}">→ ${esc(e.why || recs.length + " moments")}</button>`
+      : recs.length ? `<button class="lnk" data-picsel="${esc(recs[0].anchor)}">→ Scene ${e.scene_no}</button> at ${(+recs[0].off).toFixed(1)}s · ${(+recs[0].dur).toFixed(1)}s`
+      : e.why ? `<span class="bad">${esc(e.why)}</span>` : `<span class="muted">waiting for ▶ Place</span>`;
+    const blendTxt = { alpha: "see-through", screen: "black → blended away", key: "green → keyed out" }[m.blend] || "";
+    const kindTxt = m.kind === "anim" ? "GIF" : m.kind === "video" ? `clip ${(+m.dur || 0).toFixed(1)}s` : "picture";
+    const roles = P.pictures_roles || {};
+    const useSel = `<select class="picrole" data-tip="How it is used. Cutaway: covers the screen for a moment while you talk. Transition: a short effect (fire, light leak, swipe) over each new point – “pehla / doosra / teesra reason” – with its whoosh. Transition once: only the first such moment. Overlay: an effect over you at its word. Sticker: a transparent picture / GIF in the corner.">
+        <option value="">Auto: ${esc(roles[e.auto_role] || e.auto_role || "")}</option>${Object.entries(roles).map(([k, v]) => `<option value="${k}" ${e.as === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+    const snd = m.has_audio && role !== "cutaway" && role !== "sticker"
+      ? `<button class="btn ghost small picsnd" data-on="${e.sound === false ? 0 : 1}" data-tip="Its own sound (the whoosh of a transition) – click to switch on / off.">${e.sound === false ? "🔇" : "🔊"}</button>` : "";
+    return `<div class="picitem${e.off ? " off" : ""}" data-file="${esc(e.file)}">${th}
+      <div class="picmeta"><div class="picname" title="${esc(e.file)}">${esc(e.file)}</div>
+        <div class="pickind small">${esc(kindTxt)}${blendTxt ? ` · ${esc(blendTxt)}` : ""}</div>
+        <div class="picwhere small" title="${esc(e.why || "")}">${where}${pin.by === "claude" ? ` <span class="by-claude">🤖</span>` : ""}</div>
+        <div class="picctl">${useSel}${snd}</div>
+        <div class="picctl"><input class="picnote" maxlength="200" placeholder="what it shows (optional)" value="${esc(e.note || "")}" data-tip="A few words help it find its scene: “Powell, Fed rate”, “gold chart”. Or “scene 3” / “scene 3 at 2” to put it there yourself.">
+          <select class="picpin" data-tip="Auto = the studio (and Claude) choose from what you say – transitions go on each new point. Pick a scene to put it there yourself (a transition: into that scene)."><option value="">Auto</option>${scenes.map((s) => `<option value="${s.id}" ${s.id === pinSel ? "selected" : ""}>Scene ${s.no}</option>`).join("")}${pinSel && !scenes.some((s) => s.id === pinSel) ? `<option value="${esc(pinSel)}" selected>(cut scene)</option>` : ""}</select>
+          <button class="btn ghost small picx" data-tip="Remove it from the video and the list (the file stays in Assets).">✕</button></div></div></div>`;
+  }).join("");
+  box.hidden = !items.length;
+  if (box.dataset.h === html) return;
+  box.dataset.h = html; box.innerHTML = html;
+  $$("[data-picsel]", box).forEach((b) => (b.onclick = () => selectScene(b.dataset.picsel)));
+  $$(".picitem", box).forEach((row) => {
+    const file = row.dataset.file;
+    const note = $(".picnote", row);
+    note.onchange = () => picApi({ op: "note", file, note: note.value }).then(() => { box.dataset.h = ""; refresh(true); }).catch((e) => toast(e.message, true));
+    note.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === "Enter") { ev.preventDefault(); note.blur(); } };
+    $(".picpin", row).onchange = (ev) => picApi({ op: "pin", file, scene: ev.target.value || null })
+      .then(() => { toast(ev.target.value ? "Pinned – click ▶ Place to put it there." : "Back to auto – ▶ Place picks its scene."); box.dataset.h = ""; refresh(true); })
+      .catch((e) => toast(e.message, true));
+    $(".picrole", row).onchange = (ev) => picApi({ op: "role", file, as: ev.target.value || null })
+      .then(() => { toast("Changed – click ▶ Place to apply it."); box.dataset.h = ""; refresh(true); }).catch((e) => toast(e.message, true));
+    const sb = $(".picsnd", row);
+    if (sb) sb.onclick = () => picApi({ op: "sound", file, on: sb.dataset.on !== "1" })
+      .then(() => { toast(sb.dataset.on === "1" ? "Its sound is off – ▶ Place to apply." : "Its sound is on – ▶ Place to apply."); box.dataset.h = ""; refresh(true); })
+      .catch((e) => toast(e.message, true));
+    $(".picx", row).onclick = () => picApi({ op: "remove", file }).then((r) => { toast(r.reply); box.dataset.h = ""; refresh(true); autoPreviewTick(); }).catch((e) => toast(e.message, true));
+  });
+}
+$("#picAdd").onclick = () => $("#picFile").click();
+// 📚 From Media: the transitions / clips / pictures / stickers you keep in the Media tab, one click to add
+$("#picLibBtn").onclick = async () => {
+  const box = $("#picLib");
+  if (!box.hidden) { box.hidden = true; return; }
+  box.hidden = false; box.innerHTML = `<span class="spin"></span> Loading your Media…`;
+  try {
+    const lib = (await api("/api/media")).kinds || {};
+    const kinds = ["transitions", "videos", "pictures", "stickers"].filter((k) => lib[k] && lib[k].items.length);
+    if (!kinds.length) { box.innerHTML = `<span class="muted small">Nothing in the Media tab yet – drop transitions / clips / pictures there once and reuse them in every video.</span> <button class="lnk" id="picLibX">close</button>`; $("#picLibX").onclick = () => (box.hidden = true); return; }
+    box.innerHTML = `<div class="piclibhead"><b>From your Media</b> <span class="muted small">click to add</span> <span class="spacer"></span><button class="lnk" id="picLibX">close</button></div>`
+      + kinds.map((k) => `<div class="piclibk"><div class="muted small">${esc(lib[k].icon)} ${esc(lib[k].label)}</div><div class="piclibrow">${lib[k].items.map((it) =>
+        `<button class="piclibit" data-k="${k}" data-n="${esc(it.name)}" title="${esc(it.name)}${it.dur ? ` · ${it.dur}s` : ""}">${it.thumb ? `<img src="${esc(it.thumb)}" alt="">` : k === "pictures" || k === "stickers" ? `<img src="${esc(it.url)}" alt="">` : `<span>🎞</span>`}<span class="piclibn">${esc(it.name)}</span></button>`).join("")}</div></div>`).join("");
+    $("#picLibX").onclick = () => (box.hidden = true);
+    $$(".piclibit", box).forEach((b) => (b.onclick = async () => {
+      b.disabled = true;
+      try { const r = await picApi({ op: "add_lib", kind: b.dataset.k, name: b.dataset.n }); toast(r.reply || "Added."); $("#picList").dataset.h = ""; await refresh(true); }
+      catch (e) { toast(e.message, true); }
+      b.disabled = false;
+    }));
+  } catch (e) { box.innerHTML = `<span class="bad">${esc(e.message)}</span>`; }
+};
+$("#picFile").onchange = (e) => { const f = [...e.target.files]; e.target.value = ""; uploadPictures(f); };
+$("#picStyle").onchange = (e) => picApi({ op: "style", style: e.target.value })
+  .then(() => toast("Saved – click ▶ Place to apply it to all pictures.")).then(() => refresh(true)).catch((x) => toast(x.message, true));
+$("#picRun").onclick = async () => {
+  const b = $("#picRun"); if (b.disabled) return;
+  b.disabled = true; b.innerHTML = `<span class="spin"></span> Placing…`;
+  try {
+    const r = await picApi({ op: "run" });
+    toast(r.reply);
+    SHOW = { sid: (P.scenes.find(inVid) || {}).id, switchView: true, at: Date.now() };
+    $("#picList").dataset.h = ""; await refresh(true); renderPvBadge();
+  } catch (e) { toast(e.message, true); }
+  b.disabled = false; renderPictures();
+};
+$("#picClear").onclick = () => { if (!confirm("Remove all these pictures from the video and this list? (Undo brings them back; the files stay in Assets.)")) return;
+  picApi({ op: "clear" }).then((r) => { toast(r.reply); $("#picList").dataset.h = ""; refresh(true); autoPreviewTick(); }).catch((e) => toast(e.message, true)); };
+(() => {  // drop pictures anywhere on the Tell-the-editor box · paste a copied picture into it
+  const zone = $("#sugBox");
+  const hasFiles = (ev) => [...((ev.dataTransfer && ev.dataTransfer.types) || [])].includes("Files");
+  zone.addEventListener("dragover", (ev) => { if (!hasFiles(ev)) return; ev.preventDefault(); zone.classList.add("picdrop"); });
+  zone.addEventListener("dragleave", (ev) => { if (!zone.contains(ev.relatedTarget)) zone.classList.remove("picdrop"); });
+  zone.addEventListener("drop", (ev) => { if (!hasFiles(ev)) return; ev.preventDefault(); ev.stopPropagation(); zone.classList.remove("picdrop");
+    const fs = [...ev.dataTransfer.files].filter((f) => /^(image|video)\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|mp4|mov|mkv|webm|m4v|heic|heif|avif)$/i.test(f.name));
+    if (!fs.length) return toast("Drop pictures or short videos here (JPG, PNG, WebP, MP4…).", true);
+    uploadPictures(fs); });
+  $("#sugText").addEventListener("paste", (ev) => {
+    const fs = [...((ev.clipboardData && ev.clipboardData.files) || [])].filter((f) => /^image\//.test(f.type));
+    if (!fs.length) return;  // ordinary text paste (a caption script) stays text
+    ev.preventDefault(); uploadPictures(fs); });
+})();
 function renderSuggest() {
   renderSugStatus();
+  renderPictures();
   const ul = $("#sugResult"), last = (P.suggestions || [])[0];
   $("#sugBox").classList.toggle("ready", !!P.auto_edit);
   if (!last) { ul.hidden = true; return; }

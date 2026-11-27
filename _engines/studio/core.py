@@ -439,6 +439,7 @@ def snapshot(pid: str, data: dict, restore_assets: list[str] | None = None) -> N
                  "settings": copy.deepcopy(data.get("settings", {})),
                  "sources": copy.deepcopy(data.get("sources", [])),  # undo can bring back a removed clip's entry
                  "tracks": copy.deepcopy(data.get("tracks", [])),
+                 "pictures": copy.deepcopy(data.get("pictures")),  # 🖼 the picture list moves with its track blocks
                  **({"restore_assets": list(restore_assets)} if restore_assets else {})})
     _atomic_write(_hfile(pid), hist[-30:])
 

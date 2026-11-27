@@ -1155,6 +1155,41 @@ def _ensure_title_font(wd: Path) -> bool:
     return font.exists()
 
 
+_PROXY_LOCK = threading.Lock()
+
+
+def still_proxy(p: Path, w: int, h: int, wd: Path) -> Path:
+    """A held picture is fed to ffmpeg with `-loop 1`, which DECODES IT AGAIN FOR EVERY FRAME: a 48 MP phone photo
+    costs ~2.5 s of render per second on screen. Give ffmpeg a copy just big enough to cover w x h instead (cached by
+    file + size; EXIF rotation is applied in the copy). Small pictures are used as they are."""
+    try:
+        st = p.stat()
+        m = probe(p)
+        pw, ph = int(m.get("width") or 0), int(m.get("height") or 0)
+    except Exception:  # noqa: BLE001
+        return p
+    if not pw or not ph or pw * ph <= max(1, w * h) * 2.2:
+        return p
+    ext = ".jpg" if p.suffix.lower() in (".jpg", ".jpeg") else ".png"
+    key = hashlib.sha1(f"{p}|{st.st_size}|{st.st_mtime}|{w}x{h}".encode()).hexdigest()[:16]
+    out = wd / "pic_cache" / f"{key}{ext}"
+    if out.is_file():
+        return out
+    with _PROXY_LOCK:
+        if out.is_file():
+            return out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(f"{key}.part{ext}")
+        try:
+            run([FFMPEG, "-v", "error", "-y", "-i", p, "-frames:v", "1", "-vf",
+                 f"scale={w}:{h}:force_original_aspect_ratio=increase", *(["-q:v", "2"] if ext == ".jpg" else []), tmp])
+            tmp.replace(out)
+            return out
+        except Exception:  # noqa: BLE001  the original still works, only slower
+            tmp.unlink(missing_ok=True)
+            return p
+
+
 def _track_overlays(graph: list, inputs: list, in_idx: int, vlabel: str, ov: list[dict], w: int, h: int, fps: int,
                     top_h: int, settings: dict, wd: Path, sid: str, band, dim_card: bool = False) -> tuple[str, int]:
     """Timeline-track pictures and titles on this scene (slices from tracks.plan), lowest layer first."""
@@ -1193,18 +1228,59 @@ def _track_overlays(graph: list, inputs: list, in_idx: int, vlabel: str, ov: lis
         else:  # pip: a framed box top-right (clear of the captions)
             bw, bh = round(w * 0.44) // 2 * 2, round(h * 0.28) // 2 * 2
             x, y = w - bw - round(w * 0.04) - 6, round(h * 0.09)
+        blend = o.get("blend") if o.get("blend") in tracks_mod.BLENDS else "normal"
+        src_lbl = f"{in_idx}:v"
+        if o.get("fit_auto") and o.get("ar"):  # decided for THIS frame: a 9:16 photo fills a 9:16 reel but is shown
+            fill_ok = abs(math.log(float(o["ar"]) / (bw / bh))) < 0.18  # whole over blur in a 16:9 export
+            o = dict(o, fit="fill" if fill_ok else "fit")
+        hdr_pre = [] if o.get("still") or o.get("anim") or not is_hdr(p) else hdr_chain()
         if o.get("still"):
-            inputs += ["-loop", "1", "-framerate", str(fps), "-i", p]
+            inputs += ["-loop", "1", "-framerate", str(fps), "-i", still_proxy(p, bw, bh, wd)]
+        elif o.get("anim") or o.get("loop"):  # an animated GIF / a short clip that repeats for as long as its block
+            s_in = float(o.get("src_in") or 0)
+            inputs += (["-ignore_loop", "0"] if p.suffix.lower() == ".gif" else ["-stream_loop", "-1"]) + \
+                ["-t", f"{s_in + b - a + 0.5:.3f}", "-i", p]
+            graph.append(f"[{in_idx}:v]trim=start={s_in:.3f},setpts=PTS-STARTPTS[ovl{k}]")
+            src_lbl = f"ovl{k}"
         else:
             inputs += ["-ss", f"{float(o.get('src_in') or 0):.3f}", "-t", f"{b - a + 0.5:.3f}", "-i", p]
-        br = {"fit": o.get("fit"), "hdr": False if o.get("still") else is_hdr(p)}
+        if blend != "normal":  # fire on black / green screen / transparent GIF: what is under it shows through
+            if where == "pip":  # a sticker: the whole thing, no frame, see-through around it
+                size = f"scale={bw}:{bh}:force_original_aspect_ratio=decrease"
+                ox, oy = f"{x}+({bw}-w)/2", f"{y}+({bh}-h)/2"
+            else:
+                size = f"scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh}"
+                ox, oy = str(x), str(y)
+            fd = o.get("fade") or {}
+            fades = (f",fade=t=in:st=0:d=0.15:alpha=1" if fd.get("in", -1) >= 0 else "") + \
+                (f",fade=t=out:st={max(0.0, b - a - 0.15):.3f}:d=0.15:alpha=1" if fd and fd.get("out", 1e9) <= b + 0.01 else "")
+            chain = ",".join(hdr_pre + [f"fps={fps}", "setpts=PTS-STARTPTS", size, "setsar=1"])
+            if blend == "screen":  # brightness = opacity: black vanishes, flames / light glow over you
+                graph += [f"[{src_lbl}]{chain},format=gbrp,split[ovc{k}][ovm{k}]",
+                          f"[ovm{k}]format=gray,lut=c0='min(255,val*1.6)'[ova{k}]",
+                          f"[ovc{k}][ova{k}]alphamerge,format=rgba{fades}[ovs{k}]"]
+            elif blend == "key":
+                kc = str(o.get("keyc") or "00FF00")
+                kc = kc if re.fullmatch(r"[0-9A-Fa-f]{6}", kc) else "00FF00"
+                spill = "blue" if int(kc[4:6], 16) > int(kc[2:4], 16) else "green"
+                graph.append(f"[{src_lbl}]{chain},format=yuva444p,chromakey=0x{kc}:0.16:0.06,"
+                             f"despill=type={spill}:mix=0.5:expand=0,format=rgba{fades}[ovs{k}]")
+            else:
+                graph.append(f"[{src_lbl}]{chain},format=rgba{fades}[ovs{k}]")
+            graph.append(f"[ovs{k}]setpts=PTS-STARTPTS+{a:.4f}/TB[ovd{k}]")
+            graph.append(f"[{vlabel}][ovd{k}]overlay=x={ox}:y={oy}:eof_action=pass:format=auto:"
+                         f"enable='between(t,{a:.3f},{b:.3f})'[tov{k}]")
+            vlabel = f"tov{k}"
+            in_idx += 1
+            continue
+        br = {"fit": o.get("fit"), "hdr": False if o.get("still") or o.get("anim") else is_hdr(p)}
         extra = [f"pad={bw + 6}:{bh + 6}:3:3:white"] if where == "pip" else []
         if dim_card and where == "top" and top_h:  # under the card's white text: blend with the panel colour (like scene B-roll)
             pc = (settings.get("panel_color") or "#0F1B2D").lstrip("#")
             pr, pg, pb = (int(pc[i:i + 2], 16) if len(pc) == 6 else 30 for i in (0, 2, 4))
             extra = [f"lutrgb=r='val*0.45+{pr * 0.55:.1f}':g='val*0.45+{pg * 0.55:.1f}':b='val*0.45+{pb * 0.55:.1f}'",
                      "format=yuv420p"]
-        graph.append(_broll_graph(f"{in_idx}:v", f"ovs{k}", br, fps, bw, bh, extra))
+        graph.append(_broll_graph(src_lbl, f"ovs{k}", br, fps, bw, bh, extra))
         graph.append(f"[ovs{k}]setpts=PTS-STARTPTS+{a:.4f}/TB[ovd{k}]")
         graph.append(f"[{vlabel}][ovd{k}]overlay=x={x}:y={y}:eof_action=pass:enable='between(t,{a:.3f},{b:.3f})'[tov{k}]")
         vlabel = f"tov{k}"
@@ -1577,13 +1653,13 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
         # input 1 = the B-roll, looped (a cutaway longer than the clip wraps around); its audio is never used.
         # A picture is held for the whole scene.
         if br.get("still"):
-            inputs += ["-loop", "1", "-framerate", str(fps), "-i", Path(br["file"])]
+            inputs += ["-loop", "1", "-framerate", str(fps), "-i", still_proxy(Path(br["file"]), w, h, wd)]
         else:
             inputs += ["-ss", f"{float(br['at']):.3f}", "-stream_loop", "-1", "-i", Path(br["file"])]
         in_idx = 2
     if bg_in is not None:  # the picture is held / the video loops for the whole scene, continuing from where the
         if bg_src_[0] == "picture":  # previous scene left it (no restart at every cut); its sound is never used
-            inputs += ["-loop", "1", "-framerate", str(fps), "-i", bg_src_[1]]
+            inputs += ["-loop", "1", "-framerate", str(fps), "-i", still_proxy(Path(bg_src_[1]), w, h, wd)]
         else:
             ln = bg_src_[3] or 0.0
             inputs += ["-ss", f"{(bg_t0 % ln) if ln > 0.5 else 0.0:.3f}", "-stream_loop", "-1", "-i", bg_src_[1]]

@@ -12,6 +12,15 @@ EXPORT DIALOG (exportopts.py = the one definition of platforms/frames/res/fps/ty
 then deliver() converts the H.264 master (mov/mkv copy, H.265 hvc1, VP9, ProRes, MP3). Records carry opts/summary/
 matches_edit/web/audio_only/ver; the page's player skips exports that don't look like the edit. Never write
 export choices into project settings. `studio_cli.py render <pid> final` = the classic export (no opts).
+PICTURES FOR THE STORY (pictures.py, inbox kind=pictures): the user uploads pictures in Tell the editor and clicks
+▶ Place; the studio already placed them by name/note/topic/order on ONE B-roll track "Pictures". Your job: `studio_cli.py
+pictures <pid> show` (each picture's path – Read it to SEE it – + every scene's words@output-seconds), then for each
+picture `pictures <pid> pin <file> <sceneNo> [at] [dur]` (at = seconds into that scene, a beat before the word; a
+chart that belongs with a photo goes right after it), `pictures <pid> run`, `done`, `render <pid> preview`. Pins by
+the user ("pin=you") are theirs – never re-pin them. Never edit the "Pictures & clips" track by hand.
+Files have a role (cutaway | transition | transition_once | overlay | sticker; `pictures <pid> role <file> <role|auto>`)
+and a detected blend (alpha | screen = black background blended away | key = green screen | normal). Transitions go
+on "pehla / doosra / Second … reason" moments by themselves – only re-pin one that is clearly wrong.
 When the user says **"process studio inbox"**:
 
 1. `.venv\Scripts\python.exe studio_cli.py inbox` — list pending commands.

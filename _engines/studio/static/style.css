@@ -734,3 +734,40 @@ main { padding: 18px; max-width: 1600px; margin: 0 auto; }
 .xp-noplay, .xp-audio { padding: 26px 16px; text-align: center; background: #000; line-height: 1.7; }
 .xp-audio audio { width: 100%; margin-top: 6px; }
 @media (max-width: 560px) { .xp-grid { grid-template-columns: 1fr; } .xp-foot { flex-wrap: wrap; } }
+
+/* 🖼 Pictures for the story (Tell the editor box) */
+.picbox { margin-top: 6px; }
+.picbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.picbar .spacer { flex: 1; }
+.picbar select { background: #1d1f26; color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font-size: 12px; }
+#picHint { min-width: 0; }
+.sugbox.picdrop { border-color: var(--accent); box-shadow: 0 0 0 2px #f9731655; background: #1b1712; }
+.piclist { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; margin-top: 8px; max-height: 300px; overflow-y: auto; }
+.picitem { display: flex; gap: 8px; align-items: flex-start; border: 1px solid var(--line); border-radius: 8px; padding: 6px; background: #17191f; min-width: 0; }
+.picitem.off { opacity: .55; }
+.picitem img, .picnothumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; flex: none; background: #0c0d10; display: grid; place-items: center; font-size: 22px; }
+.picmeta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.picname { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.picwhere { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.picwhere .bad { color: #f87171; }
+.picctl { display: flex; gap: 4px; align-items: center; }
+.picnote { flex: 1; min-width: 0; font: inherit; font-size: 12px; padding: 3px 6px; border-radius: 5px; border: 1px solid var(--line); background: #101216; color: var(--ink); }
+.picpin { font-size: 12px; background: #101216; color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; max-width: 92px; }
+.pickind { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.picrole { flex: 1; min-width: 0; font-size: 12px; background: #101216; color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; }
+.piclib { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #121419; max-height: 260px; overflow-y: auto; }
+.piclibhead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.piclibhead .spacer { flex: 1; }
+.piclibk { margin-bottom: 6px; }
+.piclibrow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.piclibit { display: flex; flex-direction: column; align-items: center; gap: 2px; width: 92px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: #17191f; color: var(--ink); cursor: pointer; }
+.piclibit:hover { border-color: var(--accent); }
+.piclibit img, .piclibit > span:first-child { width: 80px; height: 52px; object-fit: cover; border-radius: 4px; background: #0c0d10; display: grid; place-items: center; }
+.piclibn { font-size: 10px; max-width: 84px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* audit: compact controls – Show select sized to its text, × in the card corner, see-through thumbs on a checker */
+.picbar select { width: auto; flex: none; max-width: 160px; }
+.picitem { position: relative; padding-right: 26px; }
+.picitem .picx { position: absolute; top: 3px; right: 3px; padding: 0 6px; }
+.picpin { max-width: 78px; flex: none; }
+.picnote { min-width: 60px; }
+.picitem img, .picnothumb { background: repeating-conic-gradient(#2a2d35 0 25%, #1a1c22 0 50%) 50% / 12px 12px; object-fit: contain; }

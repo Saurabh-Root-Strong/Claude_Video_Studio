@@ -254,6 +254,21 @@
           <textarea id="sugText" rows="2" data-tip="One box for everything. Many scenes at once: scene 6 calm music · scene 5 money sticker and cash sound · scene 3 zoom on 'double', no transition · last scene thumbs up sticker top left · scenes 2-4 black and white effect · a sticker / sound at 2 s. A line without a scene = the whole video: format 9:16 · remove silences · broll auto · highlight #22C55E · captions upper · music off. Anything the studio can't do goes to Claude." placeholder="e.g.  scene 5: money sticker and cash sound.  scene 3: zoom on 'double'.  remove silences  (no scene = whole video)"></textarea>
           <button id="sugSend" class="btn primary" data-tip="Apply it (one Undo step) and update your edited video. Enter sends, Shift+Enter makes a new line.">Send</button>
         </div>
+        <div id="picBox" class="picbox">
+          <div class="picbar">
+            <button id="picAdd" class="btn small" data-tip="Pictures, GIFs and short clips for your story – Powell for the Fed part, a market chart, a fire / light-leak transition, a sparkle overlay, a transparent GIF. Pick several at once, drop them on this box, or paste a picture (Ctrl+V). Then ▶ Place puts each where it belongs.">📎 Add pictures / clips</button>
+            <button id="picLibBtn" class="btn small ghost" data-tip="Use a file you keep in the Media tab (Transitions, Videos, Pictures, Stickers) – e.g. the same fire transition in every video.">📚 From Media</button>
+            <span class="muted small" id="picHint">Pictures, GIFs, clips, fire / light-leak transitions: drop them here, click ▶ Place – each goes where it belongs (pictures on the words they show, transitions on each new point). A clear name helps (powell.jpg, fire-transition.mp4).</span>
+            <span class="spacer"></span>
+            <select id="picStyle" class="small" hidden data-tip="Where the pictures show. Auto: full screen for a moment (your voice keeps playing); with cards on top (split look) they show in the top panel. Corner box keeps your face on screen the whole time.">
+              <option value="auto">Show: auto</option><option value="full">Full screen</option><option value="top">Top half</option><option value="pip">Corner box</option></select>
+            <button id="picRun" class="btn small primary" hidden data-tip="Put every picture on the scene where you talk about it, timed to the word (one Undo step). Then 🤖 Claude looks at the pictures and fixes any the names couldn't place.">▶ Place pictures</button>
+            <button id="picClear" class="btn small ghost" hidden data-tip="Take all these pictures off the video and out of this list (Undo brings them back). The files stay in Assets.">Remove all</button>
+            <input type="file" id="picFile" accept="image/*,video/*" multiple hidden>
+          </div>
+          <div id="picLib" class="piclib" hidden></div>
+          <div id="picList" class="piclist" hidden></div>
+        </div>
         <div id="sugStatus" class="sugstatus" hidden></div>
         <ul id="sugResult" class="sugresult" hidden></ul>
       </div>

@@ -27,6 +27,7 @@ import library
 
 KINDS = {"video": "Video", "broll": "B-roll", "audio": "Audio", "text": "Text"}
 WHERE = ("full", "top", "bottom", "pip")
+BLENDS = ("normal", "alpha", "screen", "key")  # how a picture block meets what is under it
 TEXT_STYLES = ("title", "lower", "top")
 MAX_TRACKS, MAX_ITEMS = 12, 60
 AUDIO_EXT = core.AUDIO_EXT
@@ -100,6 +101,8 @@ def _clean_item(pid: str, data: dict, kind: str, it: dict, old: dict | None = No
         return None, "That is a picture – put it on a Video or B-roll track."
     if (old or {}).get("src") == out["src"] and old.get("src_len") is not None:
         out["src_len"] = old["src_len"]
+        if old.get("anim"):
+            out["anim"] = True
     else:
         try:
             m = pipeline.probe(p)
@@ -107,12 +110,31 @@ def _clean_item(pid: str, data: dict, kind: str, it: dict, old: dict | None = No
             return None, "That file can't be read."
         if kind == "audio" and not m.get("has_audio"):
             return None, "That file has no sound."
-        out["src_len"] = 0.0 if still else round(float(m.get("duration") or 0), 3)
+        anim = still and p.suffix.lower() == ".gif" and float(m.get("duration") or 0) > 0.15  # an animated GIF moves
+        if anim:
+            out["anim"] = True
+        out["src_len"] = 0.0 if still and not anim else round(float(m.get("duration") or 0), 3)
         out["has_audio"] = bool(m.get("has_audio"))
     if "has_audio" not in out:
         out["has_audio"] = bool((old or {}).get("has_audio", True))
     out["in"] = _num(cur.get("in"), 0.0, 36000.0, 0.0)
-    if out["src_len"] > 0:  # a video / sound can't play past its end: shorten to what's left
+    if kind in ("video", "broll"):  # see-through clips (fire on black, green screen, transparent GIF) + looping
+        if cur.get("blend") in BLENDS and cur.get("blend") != "normal":
+            out["blend"] = cur["blend"]
+            if cur["blend"] == "key":
+                kc = str(cur.get("keyc") or "00FF00").lstrip("#").upper()
+                out["keyc"] = kc if re.fullmatch(r"[0-9A-F]{6}", kc) else "00FF00"
+        if cur.get("loop") or out.get("anim"):
+            out["loop"] = True
+        try:  # the picture's shape: lets an auto-fit block decide fill / fit for each export frame
+            if cur.get("ar") and 0.05 < float(cur["ar"]) < 20:
+                out["ar"] = round(float(cur["ar"]), 4)
+        except (TypeError, ValueError):
+            pass
+        # "auto" fit until YOU choose fill / fit for this block
+        if cur.get("fit_auto") and not (old and "fit" in it and it.get("fit") != old.get("fit")):
+            out["fit_auto"] = True
+    if out["src_len"] > 0 and not out.get("loop"):  # a video / sound can't play past its end: shorten to what's left
         if out["in"] >= out["src_len"] - 0.2:
             out["in"] = max(0.0, round(out["src_len"] - 1.0, 3))
         out["dur"] = round(min(out["dur"], max(0.2, out["src_len"] - out["in"])), 3)
@@ -421,8 +443,14 @@ def plan(pid: str, data: dict, scenes: list[dict], durs: list[float]) -> tuple[l
                 if kind == "text":
                     sl.update(text=it.get("text", ""), style=it.get("style", "title"))
                 else:
-                    sl.update(file=str(p), sig=[st.st_size, st.st_mtime], still=core.is_still(p.name),
+                    sl.update(file=str(p), sig=[st.st_size, st.st_mtime], still=core.is_still(p.name) and not it.get("anim"),
                               src_in=round(float(it.get("in") or 0) + (a - A), 4), where=it.get("where", "full"),
                               fit=it.get("fit", "fill"), hdr=False)
+                    for k_ in ("blend", "keyc", "loop", "anim", "ar", "fit_auto"):
+                        if it.get(k_):
+                            sl[k_] = it[k_]
+                    if sl.get("loop") or sl.get("anim"):
+                        sl["fade"] = {"in": round(A - s0 if A >= s0 else -1, 4), "out": round(B - s0, 4)} \
+                            if it.get("where") == "pip" else None
                 slices[i].append(sl)
     return slices, sounds

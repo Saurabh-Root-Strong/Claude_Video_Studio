@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import math
 import queue
 import re
 import os
@@ -1566,6 +1567,238 @@ try:
           white(c0) and red(c1) and white(c2) and abs(pipeline.probe(outz)["duration"] - 3.0) < 0.1
           and len(core.load(pz_)["scenes"]) == 1 and "stays one scene" in rp["replies"][0] and split_ok,
           f"{c0} {c1} {c2} {rp['replies']}")
+
+    # ---------------------------------------------------------------- 🖼 PICTURES FOR THE STORY (pictures.py)
+    import pictures as pics_mod
+    pp = lambda b: post(f"/api/projects/{pid}/pictures", b)  # noqa: E731
+    pfiles = {"powell.png": ("0xE01010", "1920x1080"), "market chart.png": ("0x10C020", "1600x900"),
+              "IMG_0001.png": ("0x1030E0", "1080x1920")}
+    for n_, (c_, s_) in pfiles.items():
+        subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c={c_}:s={s_}", "-frames:v", "1",
+                        str(ROOT / n_)], check=True)
+    for n_ in pfiles:
+        with open(ROOT / n_, "rb") as fh:
+            client.post(f"/api/projects/{pid}/upload?kind=asset", data={"files": (fh, n_)}, content_type="multipart/form-data")
+    ra = pp({"op": "add", "files": ["IMG_0001.png", "powell.png", "market chart.png", "nope.png", "tone.wav"]}).get_json()
+    ra2 = pp({"op": "add", "files": ["powell.png"]}).get_json()
+    check("pictures: added in the order given; missing file / sound / a second copy refused",
+          ra["added"] == ["IMG_0001.png", "powell.png", "market chart.png"] and len(ra["skipped"]) == 2
+          and not ra2["added"], f"{ra} {ra2}")
+    # the words: your typed script says "Fed interest rate" in one scene, "gold" in the next (story order test)
+    dp0 = core.load(pid)
+    vp = [s_ for s_ in dp0["scenes"] if pics_mod._in_video(dp0, s_)]
+    lens_ = {x["id"]: x["len"] for x in pics_mod.scenes_info(pid, dp0)}
+    ia = max(range(1, len(vp) - 1), key=lambda i: lens_[vp[i]["id"]])  # room for two pictures
+    sA, sB = vp[ia], vp[ia + 1]
+    typed_before = dp0.get("caption_typed")
+    w_ = [["Fed", sA["in"] + 1.0, sA["in"] + 1.3], ["interest", sA["in"] + 1.35, sA["in"] + 1.7],
+          ["rate", sA["in"] + 1.75, sA["in"] + 2.0], ["gold", sB["in"] + 0.5, sB["in"] + 0.8]]
+    core.mutate(pid, lambda d: d.__setitem__("caption_typed", {sA["src"]: {"words": w_, "cover": []}}))
+    rr = pp({"op": "run", "claude": False}).get_json()
+    dp1 = core.load(pid)
+    tkp = next((t_ for t_ in dp1["tracks"] if t_.get("pictures")), None)
+    ent = {e_["file"]: e_ for e_ in dp1["pictures"]["items"]}
+    pw, ch, im = ((ent[k_].get("placed") or [{}])[0] for k_ in ("powell.png", "market chart.png", "IMG_0001.png"))
+    infoA = next(x for x in pics_mod.scenes_info(pid, dp1) if x["id"] == sA["id"])
+    fed_t = next(t_ for n_, t_, _ in infoA["words"] if n_ == "fed")
+    check("pictures: Powell on the scene that says “Fed” (a beat before the word), the chart straight after it, the "
+          "nameless one by story order on the next scene; one Pictures track; fit = whole picture unless frame-shaped",
+          tkp and len(tkp["items"]) == 3 and pw.get("anchor") == sA["id"] and abs(pw["off"] - max(0.15, fed_t - 0.15)) < 0.05
+          and ch.get("anchor") == sA["id"] and abs(ch["off"] - (pw["off"] + pw["dur"])) < 0.05
+          and im.get("anchor") not in (None, sA["id"]) and rr["placed"] == 3,
+          f"{rr.get('report')} fed@{fed_t} lenA={infoA['len']}")
+    # your fine-tuning on the timeline survives ▶ Place again; a deleted block stays out
+    post(f"/api/projects/{pid}/tracks", {"op": "item_set", "track": tkp["id"], "item": ch["item"], "set": {"off": 0.2, "dur": 1.5}})
+    post(f"/api/projects/{pid}/tracks", {"op": "item_remove", "track": tkp["id"], "item": im["item"]})
+    pp({"op": "run", "claude": False})
+    dp2 = core.load(pid)
+    ent2 = {e_["file"]: e_ for e_ in dp2["pictures"]["items"]}
+    tk2 = next(t_ for t_ in dp2["tracks"] if t_.get("pictures"))
+    ch2 = ent2["market chart.png"]
+    check("pictures: a block you moved keeps your spot after ▶ Place again (pinned as yours); a block you deleted "
+          "stays out; no duplicate blocks",
+          ch2["pin"] and ch2["pin"]["by"] == "you" and abs(ch2["placed"][0]["off"] - 0.2) < 0.01
+          and abs(ch2["placed"][0]["dur"] - 1.5) < 0.01 and ent2["IMG_0001.png"].get("off") and len(tk2["items"]) == 2,
+          f"{ch2} {[x.get('off') for x in tk2['items']]}")
+    post(f"/api/projects/{pid}/render", {"kind": "preview"})
+    jp = wait_job(pid, "preview")
+    redok = False
+    if jp["status"] == "done":
+        rec = core.load(pid)["renders"][-1]
+        fp_ = core.work_dir(pid) / rec["file"]
+        st_ = {i: a_ for i, a_, _ in rec["times"]}[sA["id"]]
+        mp_ = pipeline.probe(fp_)
+        px = subprocess.run([core.FFMPEG, "-v", "error", "-ss", f"{st_ + ent2['powell.png']['placed'][0]['off'] + 0.5:.3f}",
+                             "-i", str(fp_), "-frames:v", "1", "-vf",
+                             f"format=rgb24,crop=1:1:{int(mp_['width'] * 0.08)}:{int(mp_['height'] * 0.2)}", "-f", "rawvideo", "-"],
+                            capture_output=True).stdout
+        redok = len(px) >= 3 and px[0] > 150 and px[1] < 90
+    check("pictures render: Powell's picture is on screen during its moment", jp["status"] == "done" and redok,
+          jp.get("error") or "")
+    # Claude is asked ONCE to look at the pictures (only when auto-reply is on and not every picture is yours)
+    real_en, real_exe = appmod.claudebot.enabled, appmod.claudebot.exe
+    appmod.claudebot.enabled, appmod.claudebot.exe = (lambda: True), (lambda: "claude")
+    try:
+        q1 = pp({"op": "run"}).get_json()
+        q2 = pp({"op": "run"}).get_json()
+    finally:
+        appmod.claudebot.enabled, appmod.claudebot.exe = real_en, real_exe
+    waiting = [c_ for c_ in core.load(pid)["commands"] if c_.get("status") == "claude" and c_.get("kind") == "pictures"]
+    desc = pics_mod.describe(pid, core.load(pid))
+    check("pictures: 🤖 Claude asked once (not per click), with the project id; `pictures show` lists picture paths "
+          "+ every scene's words with times",
+          q1["claude"] and not q2["claude"] and len(waiting) == 1 and pid in waiting[0]["text"]
+          and "FILE powell.png  look_at=" in desc and "Fed@" in desc, f"{q1.get('claude')} {q2.get('claude')} {len(waiting)}")
+    for c_ in waiting:
+        post(f"/api/projects/{pid}/command/{c_['id']}/cancel")
+    ok_pin = pics_mod.set_pin(core.load(pid), "market chart.png", sB["id"], by="claude")
+    depth = core.history_depth(pid)
+    rc = pp({"op": "clear"}).get_json()
+    dp3 = core.load(pid)
+    post(f"/api/projects/{pid}/undo")
+    dp4 = core.load(pid)
+    check("pictures: Claude can't move a picture you pinned; Remove all clears list + track (one Undo brings both back)",
+          ok_pin.startswith("You pinned") and not dp3["pictures"]["items"] and not any(t_.get("pictures") for t_ in dp3["tracks"])
+          and len(dp4["pictures"]["items"]) == 3 and any(t_.get("pictures") for t_ in dp4["tracks"])
+          and True,
+          f"{rc} pin={ok_pin!r} items3={len(dp3['pictures']['items'])} trk3={[t_.get('pictures') for t_ in dp3['tracks']]} "
+          f"items4={len(dp4['pictures']['items'])} depth {depth}->{core.history_depth(pid)}")
+    # ---- clips: a fire transition on black (+ whoosh) goes on each "pehla / doosra … reason"; a transparent blinking
+    # GIF is a corner sticker that animates; a plain GIF is a cutaway
+    fire_f, stk_f, meme_f = ROOT / "fire transition.mp4", ROOT / "thumbs up.gif", ROOT / "meme.gif"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=640x360:d=1.2:r=30,drawbox=x=220:y=80:w=200:h=200:color=0xFF7A10:t=fill",
+                    "-f", "lavfi", "-i", "sine=f=300:d=1.2", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", str(fire_f)], check=True)
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=black@0.0:s=200x200:d=1:r=10,format=rgba",
+                    "-f", "lavfi", "-i", "color=c=red:s=80x80:d=1:r=10,format=rgba", "-filter_complex",
+                    "[0:v][1:v]overlay=40:50:enable='lt(mod(t,1),0.5)',split[a][b];[a]palettegen=reserve_transparent=1[p];"
+                    "[b][p]paletteuse=alpha_threshold=128", str(stk_f)], check=True)
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x240:d=1:r=10", str(meme_f)], check=True)
+    for f_ in (fire_f, stk_f, meme_f):
+        with open(f_, "rb") as fh:
+            client.post(f"/api/projects/{pid}/upload?kind=asset", data={"files": (fh, f_.name)}, content_type="multipart/form-data")
+    rc_ = pp({"op": "add", "files": [fire_f.name, stk_f.name, meme_f.name]}).get_json()
+    dc = core.load(pid)
+    roles_ = {f_: pics_mod.role_of(pid, pics_mod.entry(dc, f_)) for f_ in (fire_f.name, stk_f.name, meme_f.name)}
+    check("clips: roles detected – fire on black = transition, transparent GIF = sticker, plain GIF = cutaway; the "
+          "page is told what each became",
+          roles_ == {fire_f.name: "transition", stk_f.name: "sticker", meme_f.name: "cutaway"}
+          and pics_mod.entry(dc, fire_f.name)["media"]["blend"] == "screen" and "transition" in rc_.get("reply", "").lower(),
+          f"{roles_} {rc_.get('reply')}")
+    vC = [s_ for s_ in dc["scenes"] if pics_mod._in_video(dc, s_)]
+    sC = vC[min(len(vC) - 1, ia + 2)]
+    w2 = w_ + [["doosra", sB["in"] + 1.2, sB["in"] + 1.5], ["bada", sB["in"] + 1.55, sB["in"] + 1.8],
+               ["reason", sB["in"] + 1.85, sB["in"] + 2.2]]
+    if sC["id"] != sB["id"]:
+        w2 += [["teesra", sC["in"] + 1.2, sC["in"] + 1.5], ["reason", sC["in"] + 1.55, sC["in"] + 1.9]]
+    core.mutate(pid, lambda d: d.__setitem__("caption_typed", {sA["src"]: {"words": sorted(w2, key=lambda x: x[1]), "cover": []}}))
+    pp({"op": "run", "claude": False})
+    dc2 = core.load(pid)
+    tkc = next(t_ for t_ in dc2["tracks"] if t_.get("pictures"))
+    items_ = {x["id"]: x for x in tkc["items"]}
+    fe = pics_mod.entry(dc2, fire_f.name)
+    fire_items = [items_[r_["item"]] for r_ in fe["placed"]]
+    ms_ = pics_mod.moments(pics_mod.scenes_info(pid, dc2))
+    info2 = {x["id"]: x for x in pics_mod.scenes_info(pid, dc2)}
+    mids = sorted(round(info2[x["anchor"]]["start"] + x["off"] + x["dur"] / 2, 1) for x in fire_items)
+    se = pics_mod.entry(dc2, stk_f.name)
+    sit = items_[se["placed"][0]["item"]] if se["placed"] else {}
+    check("clips: the fire transition sits on EVERY new-point moment (its middle on the word), black blended away, "
+          "with its sound; one Video track for all; the GIF sticker loops in the corner, see-through",
+          tkc["kind"] == "video" and len(fire_items) == len(ms_) >= 1
+          and all(abs(m_ - round(mm["t"], 1)) <= 0.2 for m_, mm in zip(mids, ms_))
+          and all(x.get("blend") == "screen" and x.get("vol", 0) > 0 for x in fire_items)
+          and sit.get("where") == "pip" and sit.get("blend") == "alpha" and sit.get("loop"),
+          f"moments {[round(m['t'], 1) for m in ms_]} mids {mids} kind={tkc['kind']} sticker={sit}")
+    post(f"/api/projects/{pid}/render", {"kind": "preview"})
+    jc = wait_job(pid, "preview")
+    fire_ok = stk_ok = False
+    det = ""
+    if jc["status"] == "done":
+        recc = core.load(pid)["renders"][-1]
+        fpc = core.work_dir(pid) / recc["file"]
+        stc = {i: a_ for i, a_, _ in recc["times"]}
+        mpc = pipeline.probe(fpc)
+        W_, H_ = mpc["width"], mpc["height"]
+
+        def pxc(t, x, y):
+            b_ = subprocess.run([core.FFMPEG, "-v", "error", "-ss", f"{t:.3f}", "-i", str(fpc), "-frames:v", "1", "-vf",
+                                 f"format=rgb24,crop=1:1:{int(x)}:{int(y)}", "-f", "rawvideo", "-"], capture_output=True).stdout
+            return tuple(b_[:3]) if len(b_) >= 3 else (0, 0, 0)
+        fi = fire_items[0]
+        t_mid = stc[fi["anchor"]] + fi["off"] + fi["dur"] / 2
+        t_before = stc[fi["anchor"]] + fi["off"] - 0.1
+        spots = [(W_ * fx_, H_ * fy_) for fx_, fy_ in ((0.04, 0.04), (0.96, 0.04), (0.04, 0.5), (0.96, 0.5), (0.2, 0.15), (0.8, 0.15))]
+        sx, sy = max(spots, key=lambda s_: sum(pxc(t_before, *s_)))  # a bright spot of YOUR picture, outside the flame
+        c_mid, c_corner, c_corner0 = pxc(t_mid, W_ * 0.5, H_ * 0.3), pxc(t_mid, sx, sy), pxc(t_before, sx, sy)
+        fire_ok = c_mid[0] > 170 and 50 < c_mid[1] < 170 and c_mid[2] < 90 and max(abs(a_ - b_) for a_, b_ in zip(c_corner, c_corner0)) < 45 and max(c_corner0) > 60
+        # sticker box (pip, top-right): the GIF's red square blinks (on 0-0.5 s of each second)
+        bw_, bh_ = round(W_ * 0.44) // 2 * 2, round(H_ * 0.28) // 2 * 2
+        x0_, y0_ = W_ - bw_ - round(W_ * 0.04) - 6, round(H_ * 0.09)
+        s_ = min(bw_ / 200, bh_ / 200)
+        gx, gy = x0_ + (bw_ - 200 * s_) / 2 + 80 * s_, y0_ + (bh_ - 200 * s_) / 2 + 90 * s_
+        t0s = stc[sit["anchor"]] + sit["off"]
+        reds = [pxc(t0s + dt, gx, gy) for dt in (0.25, 0.75, 1.25, 1.75)]
+        isred = [c[0] > 170 and c[1] < 90 and c[2] < 90 for c in reds]
+        stk_ok = isred[0] and not isred[1] and isred[2] and not isred[3]
+        det = f"fire mid {c_mid} corner {c_corner} vs {c_corner0} sticker {reds}"
+    check("clips render: fire glows over you with the black gone (your picture shows around it); the GIF sticker "
+          "animates (blinks) for its whole block", jc["status"] == "done" and fire_ok and stk_ok, (jc.get("error") or "") + det)
+    # ---- audit: the ways it can still go wrong
+    import struct as _st
+    land = ROOT / "landscape raw.jpg"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=400x200", "-frames:v", "1",
+                    str(land)], check=True)
+    raw_ = land.read_bytes()
+    tiff_ = b"MM" + _st.pack(">HI", 42, 8) + _st.pack(">H", 1) + _st.pack(">HHIHH", 0x0112, 3, 1, 6, 0) + _st.pack(">I", 0)
+    app1_ = b"Exif\x00\x00" + tiff_
+    phone = ROOT / "phone photo.jpg"  # stored 400x200 + EXIF "turn 90°" = a PORTRAIT photo on the phone
+    phone.write_bytes(raw_[:2] + b"\xff\xe1" + _st.pack(">H", len(app1_) + 2) + app1_ + raw_[2:])
+    mph = pics_mod.inspect(phone)
+    dA = core.load(pid)
+    fe2 = pics_mod.entry(dA, fire_f.name)
+    fire_vol = [x.get("vol") for x in next(t_ for t_ in dA["tracks"] if t_.get("pictures"))["items"]
+                if x["src"]["n"] == fire_f.name]
+    pw_it = next(x for x in next(t_ for t_ in dA["tracks"] if t_.get("pictures"))["items"] if x["src"]["n"] == "powell.png")
+    check("audit: a phone photo is measured the way it is SHOWN (EXIF turn); a transition's sound sits 8 dB under "
+          "YOUR voice (not 90 % of a loud pack); cutaways keep their shape so each export frame picks fill / fit",
+          mph["w"] < mph["h"] and fire_vol and (dA["pictures"].get("voice") or {}).get("db") is not None
+          and all(abs(20 * math.log10(v) + fe2["media"]["snd_db"] - (dA["pictures"]["voice"]["db"] - 8)) < 1.0
+                  for v in fire_vol)
+          and pw_it.get("fit_auto") and abs(pw_it.get("ar", 0) - 1920 / 1080) < 0.01,
+          f"phone {mph.get('w')}x{mph.get('h')} vol {fire_vol} snd {fe2['media'].get('snd_db')} voice {dA['pictures'].get('voice')} powell {pw_it}")
+    tid_ = next(t_ for t_ in dA["tracks"] if t_.get("pictures"))["id"]
+    post(f"/api/projects/{pid}/tracks", {"op": "lock", "track": tid_})
+    lk_rm = pp({"op": "remove", "file": "powell.png"})
+    lk_run = pp({"op": "run", "claude": False})
+    post(f"/api/projects/{pid}/tracks", {"op": "lock", "track": tid_})
+    post(f"/api/projects/{pid}/tracks", {"op": "remove", "track": tid_})  # you delete the whole track
+    pp({"op": "run", "claude": False})
+    dB = core.load(pid)
+    live_b = [e_ for e_ in dB["pictures"]["items"] if not e_.get("off")]
+    check("audit: a LOCKED track refuses Remove / Place; after you delete the whole track, ▶ Place starts fresh "
+          "(nothing marked 'you removed it')",
+          lk_rm.status_code == 400 and lk_run.status_code == 400 and "locked" in lk_rm.get_json()["error"]
+          and any(t_.get("pictures") for t_ in dB["tracks"]) and all(pics_mod._records(e_) for e_ in live_b
+                                                                      if e_["file"] != "IMG_0001.png"),
+          f"{lk_rm.get_json()} {[(e_['file'], bool(e_.get('off')), len(pics_mod._records(e_))) for e_ in dB['pictures']['items']]}")
+    # undo of something unrelated keeps a file you added afterwards; cutting a picture's scene shows a warning
+    with open(land, "rb") as fh:
+        client.post(f"/api/projects/{pid}/upload?kind=asset", data={"files": (fh, land.name)}, content_type="multipart/form-data")
+    post(f"/api/projects/{pid}/command", {"scene": sC["id"], "text": "speed 1.1"})
+    pp({"op": "add", "files": [land.name]})
+    post(f"/api/projects/{pid}/undo")
+    kept_new = pics_mod.entry(core.load(pid), land.name) is not None
+    pw_anchor = pics_mod._records(pics_mod.entry(core.load(pid), "powell.png"))[0]["anchor"]
+    post(f"/api/projects/{pid}/command", {"scene": pw_anchor, "text": "cut"})
+    view_ = client.get(f"/api/projects/{pid}").get_json()
+    stale_ = next(e_ for e_ in view_["pictures"]["items"] if e_["file"] == "powell.png").get("stale")
+    post(f"/api/projects/{pid}/undo")
+    check("audit: Undo of an earlier edit keeps a file you added after it; a picture whose scene you cut is flagged "
+          "(“▶ Place again”) instead of silently vanishing",
+          kept_new and stale_ is True, f"kept={kept_new} stale={stale_}")
+    core.mutate(pid, lambda d: d.__setitem__("caption_typed", typed_before) if typed_before else d.pop("caption_typed", None))
 except Exception:  # sys.exit in `finally` would otherwise swallow the traceback and report "all passed"
     import traceback
     traceback.print_exc()

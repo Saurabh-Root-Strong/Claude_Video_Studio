@@ -24,6 +24,7 @@ import claudebot
 import exportopts
 import extract
 import media as media_lib
+import pictures
 import refaudio
 import typedcaps
 import suggest
@@ -319,6 +320,21 @@ def _decorate(data: dict) -> dict:
     data.setdefault("ui_locks", {})
     data["ref_audio_tool"] = refaudio.available()
     data["claude_bot"] = claudebot.status(data.get("id") or "")
+    data["pictures_roles"] = pictures.ROLE_NAMES
+    in_vid = {s["id"] for s in data["scenes"] if s.get("keep", True) and s.get("role") != "broll" and s["src"] not in skipped}
+    ptk = next((t for t in data.get("tracks") or [] if t.get("pictures")), None)
+    tk_ids = {x.get("id") for x in (ptk or {}).get("items") or []}
+    for e in ((data.get("pictures") or {}).get("items") or []) if isinstance(data.get("pictures"), dict) else []:
+        m = e.get("media") if isinstance(e.get("media"), dict) else {  # never probe here (polled every 2 s)
+            "kind": "still" if core.is_still(e.get("file", "")) else "video", "blend": "normal"}
+        e["auto_role"] = pictures.auto_role(e.get("file", ""), m)[0]
+        e["role"] = e["as"] if e.get("as") in pictures.ROLES else e["auto_role"]
+        recs = pictures._records(e)
+        # its scene was cut / re-analysed away, or its block deleted: it no longer shows – ▶ Place fixes it
+        e["stale"] = bool(recs) and any(r.get("anchor") not in in_vid or r.get("item") not in tk_ids for r in recs)
+    if ptk:
+        data["pictures_track"] = {"hidden": bool(ptk.get("off")), "locked": bool(ptk.get("locked")),
+                                  "muted": bool(ptk.get("mute")), "name": ptk.get("name")}
     bgm = {}  # pictures / videos from the Media tab, for "Green screen: picture / video"
     for k, sub in (("pictures", "Pictures"), ("videos", "Videos")):
         d_ = library.LIB / sub
@@ -469,6 +485,171 @@ def api_autoedit(pid):
     if res.get("error"):
         return jsonify(error=res["error"]), 400
     enqueue(pid, "preview")
+    return jsonify(ok=True, **res)
+
+
+@app.post("/api/projects/<pid>/pictures")
+def api_pictures(pid):
+    """🖼 Pictures for the story (pictures.py). {"op": add {files} | remove {file} | note {file, note} |
+    pin {file, scene|null} | style {style} | run | clear}. run/remove/clear are one undo step and update the preview;
+    run also asks 🤖 Claude to LOOK at the pictures and re-pin the ones their names couldn't place."""
+    _exists(pid)
+    body = request.json or {}
+    op = body.get("op")
+    res: dict = {}
+    lib_meta: dict = {}
+    if op == "add_lib":  # a file from the Media library (Transitions, Videos, Pictures, Stickers): copied into Assets
+        try:  # (before the project lock: copying / probing a clip takes a moment)
+            name = media_lib.add_to_project(pid, str(body.get("kind")), str(body.get("name")), want_name=True)
+            dest = core.assets_dir(pid) / name
+            m = pipeline.probe(dest)
+            still = core.is_still(name)
+            lib_meta.update(name=name, info={"duration": 0.0 if still else m.get("duration"), "width": m.get("width", 0),
+                                             "height": m.get("height", 0), "still": still, "audio": False,
+                                             "has_audio": bool(m.get("has_audio")), "hdr": False})
+            (core.work_dir(pid) / "thumbs").mkdir(parents=True, exist_ok=True)
+            pipeline.thumbnail(dest, 0.0 if still else min(1.0, (m.get("duration") or 0) * 0.3),
+                               core.work_dir(pid) / "thumbs" / _asset_thumb_name(name))
+        except ValueError as e:
+            lib_meta["error"] = str(e)
+        except Exception as e:  # noqa: BLE001
+            if not lib_meta.get("name"):
+                lib_meta["error"] = f"Could not add that file ({str(e)[:120]})."
+
+    voice_cache = None
+    if op == "run":  # how loud your voice is (levels the whoosh under it) – measured once, outside the lock
+        try:
+            d0 = core.load(pid)
+            pictures.voice_db(pid, d0)
+            voice_cache = pictures.pool(d0).get("voice")
+        except Exception:  # noqa: BLE001
+            voice_cache = None
+    pre_media: dict = {}  # what each file IS (several ffmpeg reads) – measured before taking the project lock
+    if op in ("add", "add_lib"):
+        want = [lib_meta["name"]] if lib_meta.get("name") else \
+            [Path(str(f)).name for f in (body.get("files") or []) if isinstance(f, str)][:pictures.MAX_POOL]
+        for f in want:
+            fp_ = core.assets_dir(pid) / f
+            if fp_.is_file() and fp_.suffix.lower() not in core.AUDIO_EXT:
+                try:
+                    pre_media[f] = pictures.inspect(fp_)
+                except Exception:  # noqa: BLE001  measured again (inside) if this failed
+                    pass
+
+    def fn(d):
+        p = pictures.pool(d)
+        if op in ("add", "add_lib"):
+            if op == "add_lib":
+                if lib_meta.get("error"):
+                    res["error"] = lib_meta["error"]
+                    return
+                d.setdefault("assets", {})[lib_meta["name"]] = lib_meta["info"]
+                files = [lib_meta["name"]]
+            else:
+                files = [str(f) for f in (body.get("files") or []) if isinstance(f, str)][:pictures.MAX_POOL]
+            added, skipped = pictures.add(d, files, pre_media)
+            kinds = {}
+            for f in added:
+                kinds.setdefault(pictures.ROLE_NAMES[pictures.role_of(pid, pictures.entry(d, f))], []).append(f)
+            res.update(added=added, skipped=skipped,
+                       reply=(f"Added {len(added)}: " + "; ".join(f"{len(v)} as {k.lower()}" for k, v in kinds.items())
+                              + " – change any in its “Use as” list, then ▶ Place." if added else "")
+                       + (f" Skipped: {', '.join(skipped)}." if skipped else ""))
+            return
+        if op in ("role", "sound"):
+            f = str(body.get("file") or "")
+            err = pictures.set_role(d, f, body.get("as")) if op == "role" else pictures.set_sound(d, f, bool(body.get("on")))
+            if err:
+                res["error"] = err
+            return
+        if op == "note":
+            if not pictures.set_note(d, str(body.get("file") or ""), body.get("note") or ""):
+                res["error"] = "That picture isn't in the list."
+            return
+        if op == "style":
+            if body.get("style") not in pictures.STYLES:
+                res["error"] = "Unknown placement."
+                return
+            p["style"] = body["style"]
+            # the user's choice for ALL: per-picture overrides read back from the timeline give way
+            for e in p["items"]:
+                e.pop("where", None)
+                e.pop("fit", None)
+            return
+        if op == "pin":
+            sc = body.get("scene")
+            if sc not in (None, "") and str(sc).isdigit():
+                n = int(sc)
+                sc = d["scenes"][n - 1]["id"] if 0 < n <= len(d["scenes"]) else "?"
+            err = pictures.set_pin(d, str(body.get("file") or ""), sc or None)
+            if err:
+                res["error"] = err
+            return
+        if op in ("remove", "clear", "run"):
+            j = d.get("job") or {}
+            if op == "run" and j.get("kind") == "analyze" and j.get("status") in ("running", "queued"):
+                res["error"] = "Analysis is still running – wait for it to finish."
+                return
+            if op in ("remove", "clear") and pictures.locked(d):
+                res["error"] = pictures.locked(d)
+                return
+            core.snapshot(pid, d)
+            if op == "remove":
+                if not pictures.remove(d, str(body.get("file") or "")):
+                    core.drop_snapshot(pid)
+                    res["error"] = "That picture isn't in the list."
+                    return
+                res["reply"] = "Removed (Undo brings it back)."
+                res["render"] = True
+                return
+            if op == "clear":
+                n = pictures.clear(d)
+                if not n:
+                    core.drop_snapshot(pid)
+                res.update(reply=f"Removed {n} picture(s) and their blocks (Undo brings them back).", render=bool(n))
+                return
+            if not [e for e in p["items"] if not e.get("off")]:
+                core.drop_snapshot(pid)
+                res["error"] = "Add pictures first (📎 or drop them on this box)."
+                return
+            if not pictures.scenes_info(pid, d):
+                core.drop_snapshot(pid)
+                res["error"] = "No scenes in the video yet – add footage and click Analyze first."
+                return
+            if voice_cache:
+                p["voice"] = voice_cache
+            try:
+                r = pictures.run(pid, d)
+            except ValueError as e:
+                core.drop_snapshot(pid)
+                res["error"] = str(e)
+                return
+            ask = (claudebot.enabled() and claudebot.exe() and body.get("claude", True) is not False
+                   and any(not e.get("off") and (e.get("pin") or {}).get("by") != "you"  # only what needs EYES:
+                           and pictures.role_of(pid, e) in ("cutaway", "overlay", "sticker")  # transitions go on
+                           for e in p["items"])  # their spoken moments by themselves
+                   and not any(c.get("status") == "claude" and c.get("kind") == "pictures" for c in d["commands"]))
+            reply = (f"Placed {r['placed']} block(s) from {len([e for e in p['items'] if not e.get('off')])} file(s)"
+                     + (f", {r['left']} not placed (see the list)" if r["left"] else "")
+                     + " – updating your edited video."
+                     + (" ⚠ The track is hidden – click its 👁 to see them." if r.get("hidden") else "")
+                     + (" 🤖 Claude is now looking at the pictures to check each one is on the right words." if ask else ""))
+            d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "kind": "pictures_auto",
+                                  "text": f"place {len(p['items'])} picture(s)", "status": "done", "reply": reply,
+                                  "by": "studio", "created": core.now_iso()})
+            if ask:
+                d["commands"].append({"id": core.new_id("cmd"), "scene": None, "scene_no": None, "kind": "pictures",
+                                      "text": pictures.claude_text(d).replace("<pid>", pid), "status": "claude",
+                                      "reply": "", "by": None, "created": core.now_iso()})
+            _cap_commands(d)
+            res.update(r, reply=reply, render=True, claude=bool(ask))
+            return
+        res["error"] = "Unknown picture action."
+    core.mutate(pid, fn)
+    if res.get("error"):
+        return jsonify(error=res["error"]), 400
+    if res.pop("render", False):
+        enqueue(pid, "preview")
     return jsonify(ok=True, **res)
 
 
@@ -1734,6 +1915,18 @@ def api_undo(pid):
         d["scenes"], d["settings"] = snap["scenes"], snap["settings"]
         if "tracks" in snap:
             d["tracks"] = snap["tracks"]
+        if "pictures" in snap:
+            # files you ADDED to the list after that step (not yet placed) stay in the list – undoing a trim must not
+            # make your uploads vanish; everything that touches the timeline goes back with the tracks
+            later = [e for e in ((d.get("pictures") or {}).get("items") or []) if not pictures._records(e)]
+            if snap.get("pictures") is not None:
+                d["pictures"] = snap["pictures"]
+            else:
+                d.pop("pictures", None)
+            have = {e.get("file") for e in ((d.get("pictures") or {}).get("items") or [])}
+            keep = [e for e in later if e.get("file") not in have]
+            if keep:
+                pictures.pool(d)["items"].extend(keep)
         # a clip removed in Footage: its scenes come back above – its entry (audio, size, analysis) must come back too,
         # else those scenes render silent and the clip is missing from Footage. Clips added since are kept.
         have = {s["file"] for s in d["sources"]}

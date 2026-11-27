@@ -140,6 +140,45 @@
         Meme sounds only when you write "meme" (no licence – warned).
         Enter sends, Shift+Enter = new line. The list under the box shows
         ✓ done · ✗ refused (why) · → sent to Claude. One Undo per note.
+        🖼 PICTURES & CLIPS (under the box): "📎 Add pictures / clips", or
+          "📚 From Media" (files you keep in the Media tab – the same fire
+          transition in every video), or drop them on the box, or paste a
+          copied picture (Ctrl+V). Pictures, GIFs, MP4 / MOV / WebM clips.
+          Each file gets a USE (detected – change it in its list):
+            Cutaway    covers the screen for a moment (photos, stock clips,
+                       a GIF meme) – placed on the words it shows
+            Transition a fire / light leak / swipe / glitch clip played on
+                       each new point – "pehla / doosra / Second / teesra
+                       … reason" (no such words: at clip changes) – with its
+                       whoosh (🔊/🔇 on the file). "Transition (once)" =
+                       only the first. Several transition files take turns.
+            Overlay    an effect over you (sparkles, smoke) at its word
+            Sticker    a transparent PNG / GIF popping up in the corner
+          Clips on a BLACK background (most fire / light-leak packs) are
+          blended – the black disappears, you stay visible; GREEN screen
+          clips are keyed out; transparent GIF / WebM stay see-through;
+          GIFs animate and loop. E.g.
+          Powell at the podium + a market chart for the Fed-rate reason,
+          gold bars, a war photo… then click  ▶ Place pictures.
+          Each picture goes on the scene where you TALK about it, a beat
+          before the word, for ~2.5 s (your voice keeps playing):
+            - a clear name helps: powell.jpg, fed-rate.png, gold-chart.jpg
+            - or a note on the picture: "Powell, Fed rate" / "scene 3"
+              / "scene 3 at 2"; or pick the scene in its Auto ▾ list
+            - no clue (IMG_2034.jpg)? it follows story order: a chart
+              uploaded right after Powell goes straight after Powell.
+              Number the files (1_…, 2_…) to fix the order.
+            - 🤖 Claude then LOOKS at the pictures and moves any the
+              names couldn't place (auto-reply on; your pins stay).
+          Show: auto = full screen for a moment (top panel when cards are
+          on top) · Top half · Corner box (your face stays on screen).
+          A wide chart in a 9:16 reel is shown WHOLE over a blurred copy –
+          never cropped. Your first second stays on your face (the hook);
+          at most ~70% of a scene is covered.
+          Fine-tune on the timeline: drag / trim a block on the "Pictures"
+          track – ▶ Place again keeps your spot; delete a block = it stays
+          out. ✕ removes one, "Remove all" removes all (Undo works; files
+          stay in Assets). iPhone HEIC pictures: save as JPG first.
         YOUR OWN CAPTIONS: paste the script, e.g.
             captions are wrong, use these:
             [0:00] So, gold achanak se itna downtrend mein ja raha hai

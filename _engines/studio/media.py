@@ -262,10 +262,11 @@ def remove(kind: str, name: str) -> str:
     return f"Deleted “{p.name}” (kept in Library/.trash/{kind} in case you need it back)." + warn
 
 
-def add_to_project(pid: str, kind: str, name: str) -> str:
+def add_to_project(pid: str, kind: str, name: str, want_name: bool = False) -> str:
     """Copy a picture / video / transition clip into the project's Assets: it then shows in Cover with B-roll and on
-    the timeline tracks' file list."""
-    if kind not in ("pictures", "videos", "transitions"):
+    the timeline tracks' file list. want_name: return the file's name in Assets instead of a message (stickers too:
+    🖼 Pictures & clips can use a GIF sticker)."""
+    if kind not in ("pictures", "videos", "transitions") + (("stickers",) if want_name else ()):
         raise ValueError("Only pictures and videos are added to a project – music, sounds and stickers are already "
                          "usable in every project.")
     p = _path(kind, name)
@@ -273,8 +274,10 @@ def add_to_project(pid: str, kind: str, name: str) -> str:
     d.mkdir(parents=True, exist_ok=True)
     for q in d.iterdir():
         if q.is_file() and q.stat().st_size == p.stat().st_size and _fp(q) == _fp(p):
-            return f"“{p.name}” is already in this project (as “{q.name}”)."
+            return q.name if want_name else f"“{p.name}” is already in this project (as “{q.name}”)."
     dest = core.unique_path(d, p.name)
     shutil.copy2(p, dest)
     os.utime(dest)
+    if want_name:
+        return dest.name
     return f"Added “{dest.name}” to this project – pick it in Cover with B-roll or on a timeline track."

@@ -173,6 +173,33 @@ def set_fields(pid, ref, pairs):
     print(json.dumps(sc, ensure_ascii=False))
 
 
+def pictures_cli(pid, sub, args):
+    """🖼 Pictures for the story: show (pictures with paths to LOOK at + every scene's words with times),
+    pin <file> <sceneNo> [at] [dur] (`-` as sceneNo = unpin), note <file> "what it shows", run (re-place + timing)."""
+    import pictures
+    if sub == "show":
+        print(pictures.describe(pid, core.load(pid)))
+        return
+
+    def fn(d):
+        if sub == "pin":
+            f, ref = args[0], args[1]
+            sid = None if ref == "-" else _scene(d, ref)
+            return pictures.set_pin(d, f, sid, args[2] if len(args) > 2 else None, args[3] if len(args) > 3 else None,
+                                    by="claude") or f"pinned {f} -> scene {ref}"
+        if sub == "note":
+            return "noted" if pictures.set_note(d, args[0], args[1]) else "not in the list"
+        if sub == "role":  # role <file> cutaway|transition|transition_once|overlay|sticker|auto
+            return pictures.set_role(d, args[0], args[1]) or f"{args[0]} -> {args[1]}"
+        if sub == "run":
+            core.snapshot(pid, d)
+            r = pictures.run(pid, d)
+            return "\n".join(r["report"])
+        raise SystemExit(f"unknown: pictures {sub}")
+    _, out = core.mutate(pid, fn)
+    print(out)
+
+
 def done(pid, cid, reply):
     def fn(d):
         for c in d["commands"]:
@@ -215,6 +242,8 @@ def main(argv):
         elif sub == "apply":
             for line in storyboard.apply(pid):
                 print(line)
+    elif op == "pictures":  # pictures <pid> show | pin <file> <sceneNo|-> [at] [dur] | note <file> "text" | role <file> <role> | run
+        pictures_cli(rest[0], rest[1] if len(rest) > 1 else "show", rest[2:])
     elif op == "set":
         set_fields(rest[0], rest[1], rest[2:])
     elif op == "done":
