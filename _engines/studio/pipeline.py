@@ -422,8 +422,12 @@ def hdr_chain() -> list[str]:
 
 def thumbnail(src: Path, t: float, out: Path, width: int = 320) -> None:
     pre = ",".join(hdr_chain()) + "," if is_hdr(src) else ""
-    run([FFMPEG, "-y", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", src, "-frames:v", "1",
+    # never seek in a picture: on some JPEGs (start time > 0) ffmpeg 9 with "-ss 0" encodes NOTHING and exits 0
+    seek = [] if t <= 0 or core.is_still(Path(src).name) else ["-ss", f"{t:.3f}"]
+    run([FFMPEG, "-y", "-v", "error", *seek, "-i", src, "-frames:v", "1",
          "-vf", f"{pre}scale={width}:-2", "-q:v", "4", out])
+    if not Path(out).is_file() and seek:  # seeked past a short clip's last frame: take its first one instead
+        run([FFMPEG, "-y", "-v", "error", "-i", src, "-frames:v", "1", "-vf", f"{pre}scale={width}:-2", "-q:v", "4", out])
 
 
 STRIP_N = 24  # frames in a clip's film strip (the timeline shows as many as fit the block)
@@ -1225,8 +1229,9 @@ def _track_overlays(graph: list, inputs: list, in_idx: int, vlabel: str, ov: lis
         elif where == "bottom":
             bh = (h - top_h) if top_h else h // 2 // 2 * 2
             x, y, bw = 0, h - bh, w
-        else:  # pip: a framed box top-right (clear of the captions)
-            bw, bh = round(w * 0.44) // 2 * 2, round(h * 0.28) // 2 * 2
+        else:  # pip: a framed box top-right (clear of the captions); a sticker's box is smaller
+            small = o.get("box") == "small"
+            bw, bh = round(w * (0.30 if small else 0.44)) // 2 * 2, round(h * (0.19 if small else 0.28)) // 2 * 2
             x, y = w - bw - round(w * 0.04) - 6, round(h * 0.09)
         blend = o.get("blend") if o.get("blend") in tracks_mod.BLENDS else "normal"
         src_lbl = f"{in_idx}:v"
@@ -1265,6 +1270,8 @@ def _track_overlays(graph: list, inputs: list, in_idx: int, vlabel: str, ov: lis
                 spill = "blue" if int(kc[4:6], 16) > int(kc[2:4], 16) else "green"
                 graph.append(f"[{src_lbl}]{chain},format=yuva444p,chromakey=0x{kc}:0.16:0.06,"
                              f"despill=type={spill}:mix=0.5:expand=0,format=rgba{fades}[ovs{k}]")
+            elif blend == "soft":  # an ordinary picture over you at half strength – you stay visible through it
+                graph.append(f"[{src_lbl}]{chain},format=rgba,colorchannelmixer=aa=0.5{fades}[ovs{k}]")
             else:
                 graph.append(f"[{src_lbl}]{chain},format=rgba{fades}[ovs{k}]")
             graph.append(f"[ovs{k}]setpts=PTS-STARTPTS+{a:.4f}/TB[ovd{k}]")
@@ -1366,10 +1373,14 @@ def venc_args(nvenc: bool, preview: bool, vq: str | None = None) -> list[str]:
 
 
 def assemble(wd: Path, scenes: list[dict], segs: list[Path], durs: list[float], out: Path, fps: int,
-             preview: bool, extra_sounds: list[dict] | None = None, vq: str | None = None) -> bool:
+             preview: bool, extra_sounds: list[dict] | None = None, vq: str | None = None,
+             extras_out: Path | None = None) -> bool:
     """Join the scene segments WITH transitions and sound effects. False = nothing to add (caller stream-copies).
     Transitions don't change any length: the outgoing scene's last frame is held for the transition (the voice of the
-    next scene starts exactly at the cut), so captions, music and the page's scene times all stay in place."""
+    next scene starts exactly at the cut), so captions, music and the page's scene times all stay in place.
+    extras_out: the sound effects / track sounds go into THIS file (same length) instead of into the joined video's
+    sound – so the voice clean-up (denoise, gate, compressor) never touches a whoosh, a cash sound or track music;
+    finish_audio mixes them back after the voice is done."""
     trans, sounds = _sfx_events(scenes, durs)
     sounds = [{"path": p, "start": st_, "trim": tr_, "gain": g_, "dur": None, "fi": 0.0, "fo": 0.0}
               for p, st_, tr_, g_ in sounds]
@@ -1410,7 +1421,12 @@ def assemble(wd: Path, scenes: list[dict], segs: list[Path], durs: list[float], 
                 (f",afade=t=out:st={max(0.0, sd['dur'] - sd['fo']):.3f}:d={sd['fo']:.3f}" if sd["fo"] > 0 and sd["dur"] else "")
         g.append(f"[{a_in + k}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
                  f"{cut},asetpts=PTS-STARTPTS{fades},volume={sd['gain']:.2f}dB,adelay={ms}:all=1[s{k}]")
-    if sounds:
+    split_ex = bool(sounds and extras_out)
+    if split_ex:  # voice alone in the video; the effects on a silent bed of the same length -> extras_out
+        g.append(f"{base}asplit=2[aout][aref];[aref]volume=0[asil]")
+        g.append(f"[asil]{''.join(f'[s{k}]' for k in range(len(sounds)))}amix=inputs={1 + len(sounds)}:duration=first:"
+                 f"normalize=0:dropout_transition=0[aex]")
+    elif sounds:
         g.append(f"{base}{''.join(f'[s{k}]' for k in range(len(sounds)))}amix=inputs={1 + len(sounds)}:duration=first:"
                  f"normalize=0:dropout_transition=0,alimiter=limit=0.97:attack=2:release=50:latency=1[aout]")
     else:
@@ -1425,6 +1441,9 @@ def assemble(wd: Path, scenes: list[dict], segs: list[Path], durs: list[float], 
     base_cmd = [FFMPEG, "-y", "-v", "error", *inputs, "-filter_complex", ";".join(g), *vmap, "-map", "[aout]"]
     tail = ["-r", str(fps), "-g", str(fps * 2), "-c:a", "aac", "-b:a", "256k", "-t", f"{total:.3f}",
             "-movflags", "+faststart", out.name]
+    if split_ex:  # a second output of the same run: the effects stem, lossless
+        extras_out.unlink(missing_ok=True)
+        tail += ["-map", "[aex]", "-c:a", "pcm_s16le", "-ar", "48000", "-t", f"{total:.3f}", str(extras_out)]
     try:
         run(base_cmd + enc(True) + tail, cwd=wd, timeout=max(600, int(total * 10)))
     except PipelineError:
@@ -1472,6 +1491,9 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
                                               "silence_min", "logo", "logo_position", "remove_silence",
                                               "layout", "split_ratio", "bg_mode", "bg_color", "bg_file", "panel_color",
                                               "face_y", "grade", "main_mute")}
+    _iso = (settings.get("_iso") or {}).get(scene["src"])
+    if _iso:  # 🎙 Studio voice: the segment's sound comes from the isolated-voice file (a different segment)
+        relevant["_iso"] = Path(_iso).name
     src_path = core.raw_dir(pid) / scene["src"]
     st = src_path.stat()
     logo_p = core.BRAND / settings["logo"] if settings.get("logo") else None
@@ -1766,7 +1788,13 @@ def render_segment(pid: str, data: dict, scene: dict, words, silences, w: int, h
             a.append(f"volume={vol:.3f}")
         a += ["aresample=48000", "aformat=sample_fmts=fltp:channel_layouts=stereo",
               f"apad=whole_dur={out_dur:.6f}", f"atrim=end={out_dur:.6f}"]
-        graph.append(f"[0:a]{','.join(a)}[aout]")
+        iso = (settings.get("_iso") or {}).get(scene["src"])
+        if iso and Path(iso).is_file():  # 🎙 Studio: your isolated voice, cut at exactly the clip's points
+            inputs += ["-ss", f"{scene['in']:.3f}", "-t", f"{dur:.3f}", "-i", Path(iso)]
+            graph.append(f"[{in_idx}:a]{','.join(a)}[aout]")
+            in_idx += 1
+        else:
+            graph.append(f"[0:a]{','.join(a)}[aout]")
     else:
         inputs += ["-f", "lavfi", "-t", f"{out_dur:.6f}", "-i", "anullsrc=r=48000:cl=stereo"]
         graph.append(f"[{in_idx}:a]anull[aout]")
@@ -1876,8 +1904,8 @@ def music_file(pid: str, settings: dict) -> Path | None:
     folder = core.BRAND / "music"
     if m != "auto":
         p = folder / Path(m).name
-        if p.is_file():
-            return p
+        # the song YOU picked is gone (deleted / renamed): no music – never quietly a different song or the pad
+        return p if p.is_file() else None
     tracks = sorted(p for p in folder.glob("*") if p.suffix.lower() in MUSIC_EXT) if folder.is_dir() else []
     return tracks[0] if tracks else generated_pad()
 
@@ -1917,6 +1945,74 @@ def music_lufs(path: Path) -> float:
     c[k] = val
     core._atomic_write(cache_f, c)
     return val
+
+
+MUSIC_UNDER = {"soft": 16.0, "medium": 12.0, "loud": 8.0}  # music bed this many LU under the voice
+LOOP_XFADE = 3.0  # a song shorter than the video repeats with a 3 s crossfade – never a hard jump back to bar 1
+
+
+def song_len(path: Path) -> float:
+    try:
+        return float(probe(path).get("duration") or 0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def music_start(path: Path, setting) -> float:
+    """Where in the song the bed starts. "auto" = after its silent intro (many tracks open with 1-4 s of nothing:
+    the reel would start in silence). A number = that point (beyond the song's end -> its start)."""
+    ln = song_len(path)
+    if setting not in (None, "", "auto"):
+        try:
+            s = max(0.0, float(setting))
+        except (TypeError, ValueError):
+            s = 0.0
+        return s if ln <= 0 or s < ln - 2.0 else 0.0
+    cache_f = core.ENGINES / "studio" / "cache" / "music_start.json"
+    st = path.stat()
+    k = f"{path}|{st.st_size}|{st.st_mtime}"
+    c = core.read_json(cache_f, {}) or {}
+    if k in c:
+        return float(c[k])
+    out = run([FFMPEG, "-hide_banner", "-t", "30", "-i", path, "-vn", "-af", "silencedetect=noise=-45dB:d=0.3",
+               "-f", "null", "-"], timeout=120)
+    m_ = re.search(r"silence_start:\s*(-?[\d.]+)[\s\S]*?silence_end:\s*([\d.]+)", out)
+    s = float(m_.group(2)) if m_ and float(m_.group(1)) <= 0.05 else 0.0
+    s = round(max(0.0, s - 0.05), 2) if s < 20 else 0.0  # a "silent" first 20 s = a quiet song, not an intro
+    c[k] = s
+    cache_f.parent.mkdir(exist_ok=True)
+    core._atomic_write(cache_f, c)
+    return s
+
+
+def music_bed(path: Path, start: float, need: float) -> tuple[Path, float]:
+    """(file, seek) to feed the mix. A song long enough is used as it is from `start`; a shorter one is repeated
+    with crossfades into a cached bed exactly as long as needed (from `start` each time)."""
+    ln = song_len(path)
+    avail = ln - start if ln > 0 else 0.0
+    if ln <= 0 or avail >= need + 0.5:
+        return path, start
+    seg = max(1.0, avail)
+    xf = min(LOOP_XFADE, seg / 3)
+    n = min(40, max(2, math.ceil((need + 1.0 - xf) / max(0.5, seg - xf))))
+    st = path.stat()
+    key = hashlib.sha1(f"{path}|{st.st_size}|{st.st_mtime}|{start:.2f}|{n}".encode()).hexdigest()[:16]
+    out = core.ENGINES / "studio" / "cache" / f"bed_{key}.m4a"
+    if out.is_file() and out.stat().st_size > 1000:
+        return out, 0.0
+    ins, g = [], []
+    for i in range(n):
+        ins += ["-ss", f"{start:.2f}", "-i", path]
+        g.append(f"[{i}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a{i}]")
+    cur = "a0"
+    for i in range(1, n):
+        g.append(f"[{cur}][a{i}]acrossfade=d={xf:.2f}:c1=tri:c2=tri[x{i}]")
+        cur = f"x{i}"
+    tmp = out.with_name(out.stem + ".part.m4a")
+    run([FFMPEG, "-y", "-v", "error", *ins, "-filter_complex", ";".join(g), "-map", f"[{cur}]", "-c:a", "aac",
+         "-b:a", "192k", tmp], timeout=600)
+    os.replace(tmp, out)
+    return out, 0.0
 
 
 def duck_filter(lufs: float, duck_db: float) -> str:
@@ -1969,24 +2065,118 @@ def voice_chain(prof: dict) -> str:
     floor, speech = prof.get("floor"), prof.get("speech")
     if floor is not None and floor > -58:  # audible hiss / room tone: denoise just above the measured floor
         nf = max(-80, min(-20, round(floor + 2)))
+        gap = (speech - floor) if speech is not None else 30.0
         nr = 8 if floor < -48 else 12
+        if gap < 20:  # noise close to the voice (a river, traffic, a fan): denoise harder
+            nr = 20
         f.append(f"afftdn=nr={nr}:nf={nf}:tn=1")
+    gate = None
+    if floor is not None and floor > -58 and speech is not None and speech - floor < 20:
+        # a gentle gate LAST (after the compressor, which would lift the noise back up): BETWEEN words the noise
+        # drops by up to 12 dB (range 0.25), under the words nothing changes. Outdoor (river) phone clip: 9.6 -> 17 dB
+        gate = f"agate=threshold={10 ** ((floor + 4) / 20):.5f}:ratio=3:range=0.25:attack=5:release=180"
     f += ["equalizer=f=250:t=q:w=1.1:g=-2.5", "equalizer=f=3200:t=q:w=1.2:g=2.5",
           "treble=g=2:f=8000:t=s:w=0.7", "deesser=i=0.35:m=0.5:f=0.5:s=o"]
     thr = max(-36.0, min(-10.0, (speech if speech is not None else -20.0) - 4.0))
     f.append(f"acompressor=threshold={thr:.1f}dB:ratio=2.5:attack=10:release=160:knee=6:makeup=1")
+    if gate:
+        f.append(gate)
     return ",".join(f)
 
 
+def natural_chain(prof: dict) -> str:
+    """🎙 Natural: your voice as it sounds, only evened out – rumble cut + a gentle compressor keyed to the measured
+    speech level (a quiet line and a loud line end up close, no EQ / denoise colouring). Loudness comes after."""
+    speech = prof.get("speech")
+    thr = max(-40.0, min(-10.0, (speech if speech is not None else -24.0) - 6.0))
+    return f"highpass=f=70,acompressor=threshold={thr:.1f}dB:ratio=2:attack=15:release=200:knee=6:makeup=1"
+
+
+def voice_iso_path(pid: str, src_file: str) -> Path | None:
+    """Where the AI-isolated voice of one footage clip is cached (None: no such clip)."""
+    p = core.raw_dir(pid) / src_file
+    if not p.is_file():
+        return None
+    st = p.stat()
+    clip = hashlib.sha1(src_file.encode()).hexdigest()[:10]  # which clip (its older versions share this prefix)
+    ver = hashlib.sha1(f"{st.st_size}|{st.st_mtime}".encode()).hexdigest()[:10]  # which version of it
+    return core.work_dir(pid) / "voice_iso" / f"{clip}_{ver}.wav"
+
+
+def voice_iso(pid: str, src_file: str, log=None) -> Path | None:
+    """🎙 Studio: the clip's sound with ONLY your voice kept (Demucs, the same AI as Extract → voice only) – a river,
+    traffic, wind or music behind you is removed. Once per clip (~1 min per minute on the CPU), cached; the scenes
+    then cut it at exactly the points they cut the clip. None = not possible (the caller falls back to Clear)."""
+    import refaudio
+    out = voice_iso_path(pid, src_file)
+    if out is None:
+        return None
+    if out.is_file() and out.stat().st_size > 1000:
+        return out
+    if not refaudio.available():
+        if log:
+            log("🎙 Studio voice needs the voice-remover (run Setup.bat) – used Clear instead.")
+        return None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.stem + ".part.wav")
+    if log:
+        log(f"🎙 Isolating your voice in “{src_file}” – first time only, about a minute per minute of footage…")
+    src = core.raw_dir(pid) / src_file
+    with refaudio.SEP_LOCK:  # one separation at a time (memory)
+        if out.is_file() and out.stat().st_size > 1000:  # made meanwhile by another render
+            return out
+        r = subprocess.run([str(refaudio.PY), "-I", str(refaudio.RUNNER), str(FFMPEG), str(src), str(tmp), "vocals"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=4 * 3600,
+                           creationflags=NO_WINDOW)
+    if r.returncode != 0 or not tmp.is_file():
+        tmp.unlink(missing_ok=True)
+        if log:
+            log("🎙 Voice isolation failed (" + ((r.stderr or r.stdout or "?").strip().splitlines() or ["?"])[-1][:120]
+                + ") – used Clear instead.")
+        return None
+    # the separated sound starts at the clip's FIRST AUDIO SAMPLE; a phone / camera file may start its audio a few
+    # ms after its picture – pad by that, or the scenes (cut on the clip's clock) would play the voice early
+    try:
+        o_ = run([FFPROBE, "-v", "error", "-show_entries", "stream=codec_type,start_time", "-of", "csv=p=0", src])
+        starts = {}
+        for ln in o_.splitlines():
+            parts = [x for x in ln.strip().split(",") if x]
+            if len(parts) >= 2 and parts[0] in ("audio", "video") and parts[0] not in starts:
+                starts[parts[0]] = float(parts[1])
+        lag = starts.get("audio", 0.0) - min(starts.values()) if starts else 0.0
+        if lag > 0.005:
+            pad = tmp.with_name(tmp.stem + ".pad.wav")
+            run([FFMPEG, "-v", "error", "-y", "-i", tmp, "-af", f"adelay={round(lag * 1000)}:all=1", "-c:a", "pcm_s16le", pad])
+            os.replace(pad, tmp)
+    except Exception:  # noqa: BLE001  unpadded is still far better than failing
+        pass
+    os.replace(tmp, out)
+    for old in out.parent.glob(f"{out.stem.split('_')[0]}_*.wav"):  # this clip's older versions (clip replaced)
+        if old != out:
+            old.unlink(missing_ok=True)
+    return out
+
+
+def voice_mode(settings: dict) -> str:
+    """studio | clear | natural | raw – 'auto' follows the older "clean up voice" switch (on = clear, off = natural)."""
+    v = str(settings.get("voice") or "auto")
+    if v in ("studio", "clear", "natural", "raw"):
+        return v
+    return "clear" if settings.get("audio_polish") else "natural"
+
+
 def finish_audio(src: Path, dst: Path, dur: float, music: Path | None, polish: bool,
-                 lufs: float = -16.0, duck_db: float = 10.0, trim_db: float = 0.0) -> None:
+                 lufs: float = -16.0, duck_db: float = 10.0, trim_db: float = 0.0, under: float = 12.0,
+                 start: float = 0.0, mode: str = "clear", extras: Path | None = None) -> None:
     """Final mix over the joined video (video stream copied): voice clean-up + loudness target, optional music
     sitting 12 LU under the voice between lines and ducked a further `duck_db` under dialogue."""
     voice = "aresample=48000"
     lufs = max(-24.0, min(-10.0, float(lufs)))
     tgt = f"I={lufs:g}:TP=-1.0:LRA=7"
+    voice_lufs = lufs  # what the voice is at when the music is mixed under it
     if polish:
-        clean = voice_chain(voice_profile(src, dur))
+        prof = voice_profile(src, dur)
+        clean = natural_chain(prof) if mode == "natural" else voice_chain(prof)
         # two-pass loudnorm: one-pass (dynamic) overshoots on short reels (measured -14.3 instead of -16)
         meas = run([FFMPEG, "-hide_banner", "-i", src, "-vn", "-af",
                     f"{clean},loudnorm={tgt}:print_format=json", "-f", "null", "-"],
@@ -2001,24 +2191,51 @@ def finish_audio(src: Path, dst: Path, dur: float, music: Path | None, polish: b
         if "-inf" in ln:  # silent track: nothing to normalise
             ln = "anull"
         voice += f",{clean},{ln},aresample=48000"
+    elif music:  # voice left as recorded: put the music under its REAL level, not under a target it never reaches
+        voice_lufs = measure_lufs(src) or lufs
+    # the effects stem (whooshes, cash sounds, track sounds) gets the SAME gain the voice got – so a whoosh set to
+    # sit under your voice still sits there after the voice was raised – but none of the voice clean-up
+    ex_gain = 0.0
+    if extras is not None and polish:
+        try:
+            ex_gain = lufs - float(m["input_i"])  # loudnorm (linear) moves the voice by exactly this
+        except Exception:  # noqa: BLE001
+            raw_i = measure_lufs(src)
+            ex_gain = (lufs - raw_i) if raw_i is not None else 0.0
+        ex_gain = max(-20.0, min(30.0, ex_gain))
     inputs = ["-i", src]
     trim_db = max(-6.0, min(6.0, float(trim_db or 0.0)))
     # final correction gain (measured after a first mix) + peak limiter at -1 dBTP.
     # alimiter: level=false, or it auto-gains everything up to 0 dB (measured: -14.5 LUFS instead of -16)
     tail = (f",volume={trim_db:.2f}dB" if abs(trim_db) > 0.05 else "") + \
-           (",alimiter=limit=0.891:level=false" if (music or abs(trim_db) > 0.05) else "")
+           (",alimiter=limit=0.891:level=false" if (music or extras is not None or abs(trim_db) > 0.05) else "")
+    mix = ["[vo]"]
+    graph = f"[0:a]{voice}" + (",asplit=2[vo][key];" if music else "[vo];")
+    if extras is not None:
+        ex_idx = len(inputs) // 2
+        inputs += ["-i", extras]
+        graph += (f"[{ex_idx}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                  f"volume={ex_gain:.2f}dB[ex];")
+        mix.append("[ex]")
     if music:
-        inputs += ["-stream_loop", "-1", "-i", music]
-        fade = max(0.0, dur - 1.5)
-        # fixed measured gain (loudnorm on a looped stream pumped it up 1.5 LU): music bed 12 LU under the voice
-        gain = (lufs - 12.0) - music_lufs(music)
-        graph = (f"[0:a]{voice},asplit=2[vo][key];"
-                 f"[1:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
-                 f"volume={gain:.2f}dB,equalizer=f=2500:t=q:w=1.5:g=-5,afade=t=in:d=1,afade=t=out:st={fade:.2f}:d=1.5[m];"
-                 + (f"[m][key]{duck_filter(lufs, duck_db)}[md];" if duck_db > 0.5 else "[key]anullsink;[m]anull[md];") +
-                 f"[vo][md]amix=inputs=2:duration=first:normalize=0{tail}[a]")
+        bed, seek = music_bed(music, max(0.0, float(start or 0)), dur)
+        m_idx = len([x for x in inputs if x == "-i"])
+        # (-stream_loop stays as a last safety net; music_bed already made it long enough – no hard loop jump)
+        inputs += ["-stream_loop", "-1"] + (["-ss", f"{seek:.2f}"] if seek > 0 else []) + ["-i", bed]
+        fo = min(1.5, max(0.3, dur / 4))  # a 3 s clip can't take a 1.5 s fade in AND out
+        fi = min(1.0, max(0.2, dur / 6))
+        fade = max(0.0, dur - fo)
+        # fixed measured gain (loudnorm on a looped stream pumped it up 1.5 LU): music bed `under` LU under the voice
+        gain = (voice_lufs - float(under)) - music_lufs(music)
+        graph += (f"[{m_idx}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                  f"volume={gain:.2f}dB,equalizer=f=2500:t=q:w=1.5:g=-5,afade=t=in:d={fi:.2f},"
+                  f"afade=t=out:st={fade:.2f}:d={fo:.2f}[m];"
+                  + (f"[m][key]{duck_filter(voice_lufs, duck_db)}[md];" if duck_db > 0.5 else "[key]anullsink;[m]anull[md];"))
+        mix.append("[md]")
+    if len(mix) > 1:
+        graph += f"{''.join(mix)}amix=inputs={len(mix)}:duration=first:normalize=0{tail}[a]"
     else:
-        graph = f"[0:a]{voice}{tail}[a]"
+        graph += f"[vo]anull{tail}[a]"
     run([FFMPEG, "-y", "-v", "error", *inputs, "-filter_complex", graph, "-map", "0:v", "-map", "[a]",
          "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-t", f"{dur:.3f}", "-movflags", "+faststart", dst],
         timeout=max(600, int(dur * 3)))
@@ -2190,6 +2407,20 @@ def render_project(pid: str, preview: bool, opts: dict | None = None) -> Path:
                                 f"exports) or pick a smaller file type / resolution.")
         core.job_log(pid, f"Export: {xinfo['summary']}")
 
+    if voice_mode(data["settings"]) == "studio":  # 🎙 your voice isolated by the AI, once per clip (cached)
+        isos = {}
+        for f_ in dict.fromkeys(sc["src"] for sc in scenes):
+            s_ = core.source_by_file(data, f_) or {}
+            if s_.get("has_audio") is False:
+                continue
+            ready = voice_iso_path(pid, f_)
+            if not (ready and ready.is_file()):
+                core.set_job(pid, progress=f"Isolating your voice in {f_} (first time only)")
+            p_ = voice_iso(pid, f_, log=lambda m: core.job_log(pid, m))
+            if p_:
+                isos[f_] = str(p_)
+        data["settings"]["_iso"] = isos  # in-memory only: the scenes read their sound from these
+
     def render_all(nvenc: bool) -> list[Path]:
         segs = []
         for i, sc in enumerate(scenes, 1):
@@ -2230,6 +2461,14 @@ def render_project(pid: str, preview: bool, opts: dict | None = None) -> Path:
     music = music_file(pid, st)
     import refaudio
     rref = refaudio.ref_of(data, st.get("ref_audio"))
+    chosen = str(st.get("music") or "off") not in ("off", "auto")
+    if chosen and music is None:
+        core.job_log(pid, f"🎵 Your song “{st.get('music')}” is missing from Media → Music – rendered without music "
+                          f"(pick another song in the 🎵 Music row).")
+    if rref and chosen:  # a SONG you picked yourself wins over the look's reference background audio
+        core.job_log(pid, f"🎵 Your song “{music.name if music else st.get('music')}” plays instead of the "
+                          f"reference's background audio.")
+        rref = None
     if rref:  # 🎵 the look plays its reference's background music (voice removed) – it REPLACES the music bed
         try:
             core.set_job(pid, progress=f"Background audio of {refaudio.label(data, st['ref_audio'])}")
@@ -2238,16 +2477,19 @@ def render_project(pid: str, preview: bool, opts: dict | None = None) -> Path:
             core.job_log(pid, f"Background audio left out: {e}")
     elif str(st.get("ref_audio") or "none") != "none":
         core.job_log(pid, "Background audio left out: that reference was removed – pick another in the look settings.")
-    polish = bool(st.get("audio_polish", False))
+    vmode = voice_mode(st)  # 🎙 clear | natural | raw
+    polish = vmode != "raw"  # every voice reaches the viewer at a proper loudness unless you chose "as recorded"
     lufs = _num(st.get("loudness"), -16.0)
     duck = _num(st.get("duck_db"), 10.0)  # 0 is a valid choice ("don't duck") – no `or default` here
     durs = [_video_len(sp) for sp in segs]
     fx_join = wd / "joined_fx.part.mp4"
+    ex_path = wd / "extras.part.wav"  # effects stem (kept out of the voice clean-up) – only when the sound is finished
+    ex_path.unlink(missing_ok=True)
     try:
         core.set_job(pid, progress="Joining scenes")
         has_fx = all(d > 0 for d in durs) and assemble(wd, scenes, segs, durs, fx_join,
                                                        int(st.get("fps", 30) or 30), preview, track_sounds,
-                                                       vq=st.get("_vq"))
+                                                       vq=st.get("_vq"), extras_out=ex_path if (music or polish) else None)
     except PipelineError as e:
         fx_join.unlink(missing_ok=True)
         core.job_log(pid, f"Transitions / sound effects could not be added ({str(e).splitlines()[-1][:120]}) – "
@@ -2265,9 +2507,18 @@ def render_project(pid: str, preview: bool, opts: dict | None = None) -> Path:
                     run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
                          joined.name], cwd=wd)
                 jdur = probe(joined)["duration"]
+                ex = ex_path if has_fx and ex_path.is_file() and ex_path.stat().st_size > 1000 else None
                 core.set_job(pid, progress="Mixing audio" + (" + music" if music else ""))
                 try:
-                    finish_audio(joined, tmp_out, jdur, music, polish, lufs, duck)
+                    m_start = 0.0
+                    if music and chosen:  # where the song starts (its silent intro skipped, or your point)
+                        try:
+                            m_start = music_start(music, st.get("music_start", "auto"))
+                        except Exception:  # noqa: BLE001  measuring failed: from the top
+                            m_start = 0.0
+                    finish_audio(joined, tmp_out, jdur, music, polish, lufs, duck,
+                                 under=MUSIC_UNDER.get(str(st.get("music_level") or "medium"), 12.0), start=m_start,
+                                 mode=vmode, extras=ex)
                 except PipelineError as e:
                     if not music:
                         raise
@@ -2275,16 +2526,19 @@ def render_project(pid: str, preview: bool, opts: dict | None = None) -> Path:
                     core.job_log(pid, f"Music '{music.name}' could not be mixed ({str(e).splitlines()[-1][:100]})"
                                       f" – rendered without music")
                     music = None
-                    finish_audio(joined, tmp_out, jdur, None, polish, lufs, duck)
+                    finish_audio(joined, tmp_out, jdur, None, polish, lufs, duck, mode=vmode, extras=ex)
                 if polish:
                     # short clips: the two-pass measurement can land ~1 LU off; measure the real mix and correct once
                     got = measure_lufs(tmp_out)
                     if got is not None and abs(got - lufs) > 0.5:
                         tmp2 = tmp_out.with_name(tmp_out.stem + "2.mp4")
-                        finish_audio(joined, tmp2, jdur, music, polish, lufs, duck, trim_db=lufs - got)
+                        finish_audio(joined, tmp2, jdur, music, polish, lufs, duck, trim_db=lufs - got,
+                                     under=MUSIC_UNDER.get(str(st.get("music_level") or "medium"), 12.0), start=m_start,
+                                     mode=vmode, extras=ex)
                         os.replace(tmp2, tmp_out)
             finally:
                 joined.unlink(missing_ok=True)
+                ex_path.unlink(missing_ok=True)
         else:
             run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst.name, "-c", "copy",
                  "-movflags", "+faststart", tmp_out], cwd=wd)

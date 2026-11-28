@@ -25,6 +25,13 @@ class RefAudioError(RuntimeError):
     pass
 
 
+import threading  # noqa: E402
+
+# ONE separation at a time in this studio (a reference's music, an Extract "music / voice only", a Studio voice): each
+# holds minutes of audio + the model in memory – two at once on a 7 GB PC is how the machine runs out of memory
+SEP_LOCK = threading.Lock()
+
+
 _AVAIL = {"t": 0.0, "v": False}
 
 
@@ -70,8 +77,9 @@ def bg_audio(pid: str, ref: dict, log=None) -> Path:
     tmp = out.with_name(out.stem + ".part.m4a")
     if log:
         log(f"Taking the voice out of “{ref['file']}” – first time only, about a minute per minute of video…")
-    r = subprocess.run([str(PY), "-I", str(RUNNER), str(core.FFMPEG), str(src), str(tmp)], capture_output=True, text=True,
-                       timeout=3600, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    with SEP_LOCK:
+        r = subprocess.run([str(PY), "-I", str(RUNNER), str(core.FFMPEG), str(src), str(tmp)], capture_output=True,
+                           text=True, timeout=3600, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if r.returncode != 0 or not tmp.is_file():
         tmp.unlink(missing_ok=True)
         raise RefAudioError("Separating the background music failed: " + ((r.stderr or r.stdout).strip().splitlines() or ["?"])[-1][:200])

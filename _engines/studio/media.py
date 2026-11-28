@@ -154,7 +154,7 @@ def add_file(tmp: Path, name: str, want: str | None = None) -> dict:
                 continue
             for q in d2.iterdir():
                 if q.is_file() and q.stat().st_size == size and _fp(q) == fp:
-                    return {"ok": False, "dup": True, "name": name, "kind": k2,
+                    return {"ok": False, "dup": True, "name": name, "kind": k2, "existing": q.name,
                             "why": f"already in {KINDS[k2][0]} as “{q.name}”" + ("" if k2 == kind else " – use “move…” there to change its kind")}
         dest = core.unique_path(dest_dir, name)
         shutil.move(str(tmp), dest)

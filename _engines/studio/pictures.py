@@ -46,10 +46,12 @@ import core
 import tracks
 
 STYLES = ("auto", "full", "top", "pip")
-ROLES = ("cutaway", "transition", "transition_once", "overlay", "sticker")
-ROLE_NAMES = {"cutaway": "Cutaway", "transition": "Transition", "transition_once": "Transition (once)",
-              "overlay": "Overlay effect", "sticker": "Sticker"}
-BLENDS = ("normal", "alpha", "screen", "key")
+ROLES = ("cutaway", "pip", "overlay", "sticker", "transition", "transition_once")
+ROLE_NAMES = {"cutaway": "Cutaway – full screen", "pip": "Corner box – you stay visible",
+              "overlay": "Overlay – over you, see-through", "sticker": "Sticker – small corner pop",
+              "transition": "Transition – every new point", "transition_once": "Transition – once"}
+NEEDS_EYES = ("cutaway", "pip", "overlay", "sticker")  # placed on the words a picture SHOWS (Claude looks)
+BLENDS = ("normal", "alpha", "screen", "key", "soft")  # soft = an ordinary picture laid over you at half strength
 MAX_POOL = 40
 STILL_DUR, CLIP_MAX, MIN_SHOW = 2.5, 4.0, 1.2
 TRANS_MAX, OVER_MAX, STICKER_DUR = 3.0, 5.0, 2.2
@@ -195,7 +197,7 @@ def inspect(path: Path) -> dict:
     edge = [(b[(y * n + x) * 4], b[(y * n + x) * 4 + 1], b[(y * n + x) * 4 + 2]) for b in px for x, y in ring]
     green = [c for c in edge if c[1] > 110 and c[1] > c[0] * 1.5 and c[1] > c[2] * 1.5]
     blue = [c for c in edge if c[2] > 110 and c[2] > c[0] * 1.5 and c[2] > c[1] * 1.3]
-    for keyed in (green, blue):
+    for keyed in (green, blue) if kind != "still" else ():  # a green-edged PHOTO / chart is not a green screen
         if len(keyed) >= 0.6 * len(edge):
             r_, g_, b_ = (round(sum(c[i] for c in keyed) / len(keyed)) for i in range(3))
             out["blend"], out["keyc"] = "key", f"{r_:02X}{g_:02X}{b_:02X}"
@@ -550,11 +552,14 @@ def _look(pid: str, data: dict, e: dict, role: str) -> dict:
         fit = e.get("fit") if e.get("fit") in ("fit", "fill") else _fit_for(data, e, where)
         if blend in ("screen", "key"):
             blend = "normal"  # a cutaway covers the screen: no see-through
-    elif role == "sticker":
+    elif role in ("sticker", "pip"):  # a framed box (you stay visible); a sticker is smaller and unframed if see-through
         where, fit = "pip", "fit"
     else:  # transition / overlay: the whole frame, see-through where the clip is black / green / transparent
         where, fit = "full", "fill"
+    if role == "overlay" and blend == "normal":  # an ordinary photo "over you": half see-through, not a cover
+        blend = "soft"
     return {"where": where, "fit": fit, "blend": blend, "keyc": m.get("keyc") if blend == "key" else None,
+            "box": "small" if role == "sticker" else None,
             # a GIF always repeats (a one-frame GIF would otherwise last 0.05 s); a moving sticker too
             "loop": m.get("kind") == "anim" or e["file"].lower().endswith(".gif") or (role == "sticker" and moving),
             # its sound, levelled so it sits under your voice (overlays a little softer: they run longer)
@@ -578,6 +583,8 @@ def _dur(pid: str, e: dict, role: str) -> float:
     d = float(m.get("dur") or 0)
     if role == "sticker":
         return STICKER_DUR
+    if role == "pip":
+        return max(MIN_SHOW, min(CLIP_MAX, d)) if m.get("kind") == "video" and d else STILL_DUR
     if role in ("transition", "transition_once"):
         return max(0.4, min(TRANS_MAX, d if m.get("kind") != "still" else 1.0)) if d or m.get("kind") == "still" else 1.0
     if role == "overlay":
@@ -845,7 +852,7 @@ def plan(pid: str, data: dict) -> dict:
             left.append((e["file"], "the file is gone from Assets (deleted?)"))
     rl = {e["file"]: role_of(pid, e) for e in ok}
     places = _place_group(pid, data, scs, [e for e in ok if rl[e["file"]] == "cutaway"], left, "cutaway", COVER)
-    places += _place_group(pid, data, scs, [e for e in ok if rl[e["file"]] in ("overlay", "sticker")], left, "extra", 0.9)
+    places += _place_group(pid, data, scs, [e for e in ok if rl[e["file"]] in ("overlay", "sticker", "pip")], left, "extra", 0.9)
     places += _place_transitions(pid, data, scs, [e for e in ok if rl[e["file"]] in ("transition", "transition_once")], left)
     return {"places": places, "left": left}
 
@@ -911,7 +918,7 @@ def run(pid: str, data: dict) -> dict:
         e.pop("scene_no", None)
     by_file = {e["file"]: e for e in p["items"]}
     placed, report = 0, []
-    order = {"cutaway": 0, "overlay": 1, "sticker": 2, "transition": 3, "transition_once": 3}  # later = drawn on top
+    order = {"cutaway": 0, "overlay": 1, "pip": 2, "sticker": 2, "transition": 3, "transition_once": 3}  # later = on top
     for x in sorted(pl["places"], key=lambda x: order.get(role_of(pid, by_file[x["file"]]), 0)):
         e = by_file[x["file"]]
         role = role_of(pid, e)
@@ -933,7 +940,8 @@ def run(pid: str, data: dict) -> dict:
         if not e.get("scene_no"):
             e["scene_no"], e["why"] = x["no"], x["why"]
         placed += 1
-        look = ({"alpha": "see-through", "screen": "black blended away", "key": "green keyed out"}.get(lk["blend"])
+        look = ({"alpha": "see-through", "screen": "black blended away", "key": "green keyed out",
+                 "soft": "half see-through over you"}.get(lk["blend"]) or ("corner box" if it["where"] == "pip" else None)
                 or ("whole picture over blur" if it["fit"] == "fit" else "fills"))
         report.append(f"{x['file']} ({ROLE_NAMES[role]}) → scene {x['no']} at {x['at']:.1f}s for {it['dur']:.1f}s "
                       f"({look}{', with its sound' if lk['vol'] > 0 else ''}) – {x['why']}")

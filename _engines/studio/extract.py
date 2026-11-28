@@ -28,6 +28,11 @@ TMP = library.LIB / ".incoming" / "extract"
 MODES = {"mp3": ("🎵 MP3 – sound only", ".mp3", " (audio)"), "mp4": ("🎞 MP4 – video + sound", ".mp4", ""),
          "mute": ("🔇 MP4 – video only, no sound", ".mp4", " (no sound)")}
 MAX_JOBS_KEPT = 30
+# 🎵 MP3 – which part of the sound: everything, or split by the voice-remover (Demucs, _engines/separate)
+PARTS = {"all": ("whole sound", ""), "music": ("background music only – voice removed", " (music only)"),
+         "voice": ("voice only – music removed", " (voice only)")}
+SEP_MAX = 15 * 60  # separating holds the whole stretch in memory (7 GB PC): longer than this -> trim it first
+SEP_SPEED = 1.0    # seconds of CPU work per second of sound (first estimate; the progress bar follows the clock)
 
 _jobs: dict[str, dict] = {}
 _order: list[str] = []
@@ -188,13 +193,85 @@ def _convert(jid: str, src: Path, mode: str, a: float | None, b: float | None, d
         raise ExtractError(msg if len(msg) < 200 and "\n" not in msg else "Converting failed – the file may be damaged.") from e
 
 
-def _name(stem: str, mode: str, a, b) -> str:
+def _name(stem: str, mode: str, a, b, part: str = "all") -> str:
     stem = re.sub(r"\s+", " ", core.safe_filename(stem or "extract")).strip(" .")[:80] or "extract"
     rng = f" {_fmt(a or 0)}-{_fmt(b)}" if b is not None else (f" from {_fmt(a)}" if a else "")
-    return f"{stem}{MODES[mode][2]}{rng}{MODES[mode][1]}"
+    tag = PARTS[part][1] if mode == "mp3" and part in PARTS and part != "all" else MODES[mode][2]
+    return f"{stem}{tag}{rng}{MODES[mode][1]}"
 
 
-def _run(jid: str, mode: str, a, b, url: str | None, src: Path | None, stem: str, tmp_src: bool):
+def _separate(jid: str, src: Path, part: str, a: float | None, b: float | None, dest: Path, work: Path) -> str:
+    """MP3 of ONLY the background music (voice removed) or ONLY the voice. Cuts the asked range FIRST (separating
+    costs ~1 s of CPU per second of sound), separates, encodes. Returns a note for the user ('' = none)."""
+    import refaudio
+    if not refaudio.available():
+        raise ExtractError("The voice-remover isn't installed – run Setup.bat once (it adds it), then try again. "
+                           "“Whole sound” works without it.")
+    m = _probe(src)
+    if not m:
+        raise ExtractError("That file can't be read (damaged, or not a video / sound file).")
+    if not m["a"]:
+        raise ExtractError("This video has no sound – nothing to take music or a voice from.")
+    dur = m["dur"]
+    if a is not None and dur and a >= dur:
+        raise ExtractError(f"“From” ({_fmt(a)}) is after the end of the clip ({_fmt(dur)}).")
+    b = None if b is None or (dur and b >= dur) else b
+    span = ((b if b is not None else dur) - (a or 0)) or dur or 0
+    if span > SEP_MAX:
+        raise ExtractError(f"Separating music from voice works on up to {SEP_MAX // 60} minutes at a time (this is "
+                           f"{_fmt(span)}) – set From / To to the part you need.")
+    if span and span < 1.0:
+        raise ExtractError("That's under a second – nothing to separate.")
+    with _lock:
+        base = 80.0 if (_jobs.get(jid) or {}).get("downloaded") else 0.0
+    _set(jid, stage="Cutting…", progress=round(base + (100 - base) * 0.03, 1))
+    cut = work / "cut.wav"
+    _popen_lines([core.FFMPEG, "-hide_banner", "-v", "error", "-y", *(["-ss", f"{a:.3f}"] if a else []), "-i", src,
+                  *(["-t", f"{(b - (a or 0)):.3f}"] if b is not None else []), "-vn", "-ac", "2", "-ar", "44100",
+                  "-c:a", "pcm_s16le", cut], lambda _l: None, timeout=60 * 30)
+    sep_out = work / "part.wav"
+    est = max(20.0, span * SEP_SPEED + 15)  # + model load
+    what = "music" if part == "music" else "voice"
+    while not refaudio.SEP_LOCK.acquire(timeout=2):  # one separation at a time (memory): wait, and say so
+        _set(jid, stage="Waiting – another voice / music separation is running…")
+    try:
+        p = subprocess.Popen([str(refaudio.PY), "-I", str(refaudio.RUNNER), str(core.FFMPEG), str(cut), str(sep_out),
+                              "vocals" if part == "voice" else "music"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, encoding="utf-8", errors="replace",
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        t0 = time.time()
+        while p.poll() is None:  # no progress from the model: the bar follows the clock (never claims 100 %)
+            el = time.time() - t0
+            frac = min(0.95, el / est)
+            _set(jid, stage=f"Separating the {what} from the rest… {int(el)} s (about {int(est)} s)",
+                 progress=round(base + (100 - base) * (0.05 + 0.85 * frac), 1))
+            if el > 60 * 90:
+                p.kill()
+                raise ExtractError("Separating took over 90 minutes and was stopped.")
+            time.sleep(1)
+        out, err = p.communicate()
+    finally:
+        refaudio.SEP_LOCK.release()
+    if p.returncode != 0 or not sep_out.is_file():
+        last = ((err or out or "").strip().splitlines() or ["?"])[-1]
+        raise ExtractError("Separating failed – " + ("the computer ran out of memory, try a shorter part"
+                                                   if "memory" in last.lower() else last[:160]))
+    _set(jid, stage="Making the MP3…", progress=round(base + (100 - base) * 0.95, 1))
+    tmp_out = dest.with_name(dest.stem + ".part" + dest.suffix)
+    try:
+        _popen_lines([core.FFMPEG, "-hide_banner", "-v", "error", "-y", "-i", sep_out, "-c:a", "libmp3lame", "-q:a",
+                      "0", "-map_metadata", "-1", tmp_out], lambda _l: None, timeout=60 * 30)
+        tmp_out.replace(dest)
+    finally:
+        tmp_out.unlink(missing_ok=True)
+    lv = re.search(r"LEVEL (-?[\d.]+) (-?[\d.]+)", out or "")
+    if lv and float(lv.group(1)) < float(lv.group(2)) - 22:
+        return ("Almost no background music in it – it's nearly all talking, so the file is very quiet."
+                if part == "music" else "Almost no voice in it – it's nearly all music, so the file is very quiet.")
+    return ""
+
+
+def _run(jid: str, mode: str, a, b, url: str | None, src: Path | None, stem: str, tmp_src: bool, part: str = "all"):
     work = TMP / jid
     with _run_lock:
         try:
@@ -205,9 +282,13 @@ def _run(jid: str, mode: str, a, b, url: str | None, src: Path | None, stem: str
                 stem = title or stem
                 _set(jid, downloaded=True, title=stem)
             OUT.mkdir(parents=True, exist_ok=True)
-            dest = core.unique_path(OUT, _name(stem, mode, a, b))
-            _convert(jid, src, mode, a, b, dest)
-            _set(jid, status="done", progress=100, stage="Ready", file=dest.name, size=dest.stat().st_size)
+            dest = core.unique_path(OUT, _name(stem, mode, a, b, part))
+            note = ""
+            if mode == "mp3" and part in ("music", "voice"):
+                note = _separate(jid, src, part, a, b, dest, work)
+            else:
+                _convert(jid, src, mode, a, b, dest)
+            _set(jid, status="done", progress=100, stage="Ready", file=dest.name, size=dest.stat().st_size, note=note)
         except ExtractError as e:
             _set(jid, status="error", stage="", error=str(e))
         except Exception as e:  # noqa: BLE001  a job must always end, never hang as "running"
@@ -219,11 +300,18 @@ def _run(jid: str, mode: str, a, b, url: str | None, src: Path | None, stem: str
 
 
 def start(mode: str, frm=None, to=None, url: str | None = None, src: Path | None = None, stem: str = "",
-          tmp_src: bool = False) -> dict:
-    """Queue one extraction. Exactly one of url / src. Raises ExtractError for bad input (nothing queued)."""
+          tmp_src: bool = False, part: str = "all") -> dict:
+    """Queue one extraction. Exactly one of url / src. Raises ExtractError for bad input (nothing queued).
+    part (MP3 only): all | music (voice removed) | voice (music removed)."""
+    part = part if part in PARTS and mode == "mp3" else "all"
     try:
         if mode not in MODES:
             raise ExtractError("Choose MP3, MP4 or video only.")
+        if part != "all":
+            import refaudio
+            if not refaudio.available():
+                raise ExtractError("The voice-remover isn't installed – run Setup.bat once (it adds it). "
+                                   "“Whole sound” works without it.")
         a, b = parse_time(frm), parse_time(to)
         if a is not None and b is not None and b <= a:
             raise ExtractError("“To” must be after “From”.")
@@ -238,7 +326,8 @@ def start(mode: str, frm=None, to=None, url: str | None = None, src: Path | None
             Path(src).unlink(missing_ok=True)
         raise
     jid = core.new_id("x")
-    job = {"id": jid, "mode": mode, "mode_label": MODES[mode][0], "status": "queued", "progress": 0, "stage": "Waiting…",
+    label = MODES[mode][0] + (f" · {PARTS[part][0]}" if part != "all" else "")
+    job = {"id": jid, "mode": mode, "part": part, "mode_label": label, "status": "queued", "progress": 0, "stage": "Waiting…",
            "title": stem or (url or ""), "from": a, "to": b, "file": None, "error": "", "created": core.now_iso(), "url": url or ""}
     with _lock:
         _jobs[jid] = job
@@ -249,7 +338,8 @@ def start(mode: str, frm=None, to=None, url: str | None = None, src: Path | None
                 break
             _order.remove(old)
             _jobs.pop(old, None)
-    threading.Thread(target=_run, args=(jid, mode, a, b, url, Path(src) if src else None, stem, tmp_src), daemon=True).start()
+    threading.Thread(target=_run, args=(jid, mode, a, b, url, Path(src) if src else None, stem, tmp_src, part),
+                     daemon=True).start()
     return dict(job)
 
 

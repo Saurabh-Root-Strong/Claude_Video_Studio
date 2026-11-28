@@ -83,7 +83,10 @@ def _prompt(pid: str, items: list[dict]) -> str:
             f"(inbox / show {pid} / cmd {pid} <sceneNo|-> \"...\" / set ... / storyboard ... / render {pid} preview / "
             f"done {pid} <cmd_id> \"reply\"). You cannot run any other program or edit code.\n"
             f"Pending commands:\n{lst}\n"
-            f"Finish EVERY one with `done {pid} <cmd_id> \"<what you did, in plain words>\"` – if something can't be "
+            f"Finish EVERY one with `done {pid} <cmd_id> \"<what you did, in plain words>\"`. A reply longer than one "
+            f"short sentence, or with quotes or line breaks (lists, suggestions, plans): FIRST Write it to "
+            f"Storyboards/{pid}/reply_<cmd_id>.md, then `done {pid} <cmd_id> @Storyboards/{pid}/reply_<cmd_id>.md` – "
+            f"a quoted shell argument gets cut at its first quote / line break. If something can't be "
             f"done with these tools, still mark it done and say why and what the user can do instead. Keep replies "
             f"short. When anything changed the video, end with `render {pid} preview`.")
 

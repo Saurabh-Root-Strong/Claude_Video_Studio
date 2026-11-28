@@ -12,13 +12,18 @@ EXPORT DIALOG (exportopts.py = the one definition of platforms/frames/res/fps/ty
 then deliver() converts the H.264 master (mov/mkv copy, H.265 hvc1, VP9, ProRes, MP3). Records carry opts/summary/
 matches_edit/web/audio_only/ver; the page's player skips exports that don't look like the edit. Never write
 export choices into project settings. `studio_cli.py render <pid> final` = the classic export (no opts).
+VOICE: settings voice studio (Demucs-isolated voice per clip, cached work/voice_iso; segments read it) | clear | natural |
+raw | auto (= clear if audio_polish else natural); loudness LUFS target. GET /api/projects/<pid>/voice_check = plain hints.
+MUSIC: settings music (off | auto | file in Brand Kit/music = Media → Music), music_level soft|medium|loud (16/12/8 LU
+under the voice), music_start auto (skips silent intro) | seconds, duck_db. A short song is looped with crossfades
+(pipeline.music_bed). A chosen song beats the look's ref_audio. Set via `look <pid> <R|none> music=... music_level=...`.
 PICTURES FOR THE STORY (pictures.py, inbox kind=pictures): the user uploads pictures in Tell the editor and clicks
 ▶ Place; the studio already placed them by name/note/topic/order on ONE B-roll track "Pictures". Your job: `studio_cli.py
 pictures <pid> show` (each picture's path – Read it to SEE it – + every scene's words@output-seconds), then for each
 picture `pictures <pid> pin <file> <sceneNo> [at] [dur]` (at = seconds into that scene, a beat before the word; a
 chart that belongs with a photo goes right after it), `pictures <pid> run`, `done`, `render <pid> preview`. Pins by
 the user ("pin=you") are theirs – never re-pin them. Never edit the "Pictures & clips" track by hand.
-Files have a role (cutaway | transition | transition_once | overlay | sticker; `pictures <pid> role <file> <role|auto>`)
+Files have a role (cutaway | pip | overlay | sticker | transition | transition_once; `pictures <pid> role <file> <role|auto>`)
 and a detected blend (alpha | screen = black background blended away | key = green screen | normal). Transitions go
 on "pehla / doosra / Second … reason" moments by themselves – only re-pin one that is clearly wrong.
 When the user says **"process studio inbox"**:
@@ -31,7 +36,9 @@ When the user says **"process studio inbox"**:
    - Raw fields: `studio_cli.py set <pid> <sceneNo> in=3.2 out=7.9 text="Title" text_pos=center`.
    - Motion graphics: render with Remotion (`_engines\remotion`) or HyperFrames (`_engines\hyperframes`, `-w 1`,
      never publish/share/cloud) — v1 renderer has no overlay track yet, so explain what was made and where.
-4. `studio_cli.py done <pid> <cmd_id> "what I did, in plain words"` for each command (UI shows the reply).
+4. `studio_cli.py done <pid> <cmd_id> "what I did, in plain words"` for each command (UI shows the reply). A reply with
+   quotes / line breaks / more than a sentence: Write it to Storyboards/<pid>/reply_<cmd_id>.md and pass `@Storyboards/<pid>/reply_<cmd_id>.md`
+   (a quoted shell argument is CUT at its first quote or line break – seen 27 Nov: replies stored as 19 characters).
 5. Optionally `studio_cli.py render <pid> preview` so the user can watch the result in the UI.
 
 HINGLISH / CAPTION WORDING ("fix the Hinglish", "captions in Hinglish", wrong caption words):

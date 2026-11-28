@@ -88,6 +88,11 @@
        "File..." / drop a file on the card, or pick a clip "from Media".
        Choose:  🎵 MP3 - sound only   🎞 MP4 - video with sound
                 🔇 MP4 - video only (no sound)
+       MP3 also asks WHICH sound: Whole sound · Background music only
+       (voice removed) · Voice only (music removed). Separating takes
+       about a minute per minute of sound - set From / To to just the
+       part you need (up to 15 min at a time). Then "+ Save to Media →
+       🎵 Music" and pick it in the 🎵 Music row of your video.
        From / To (optional): just that part, e.g. 1:15 to 1:40 (or 75 /
        100). Empty = whole clip. Click ⬇ Extract - it runs in the
        background with a progress bar; you can keep working.
@@ -140,11 +145,38 @@
         Meme sounds only when you write "meme" (no licence – warned).
         Enter sends, Shift+Enter = new line. The list under the box shows
         ✓ done · ✗ refused (why) · → sent to Claude. One Undo per note.
+        🎙 VOICE (row under the box) – the most important sound in a talking reel:
+            Studio   the AI keeps ONLY your voice – river, wind, traffic, a fan
+                     or music behind you is removed (first time ~1 min per minute
+                     of footage, then instant). Best for outdoor phone videos.
+            Clear    background noise lowered, crisp presence, even level, the
+                     noise between words pushed down (instant)
+            Natural  your voice as it sounds – just louder and evened out
+            As recorded  untouched (a quiet recording stays quiet!)
+          Loudness: reels −14 (like most reels – recommended) · standard −16 ·
+          soft −19. The music always sits under your voice at ITS real level.
+          "Your recording: …" says what the studio hears: quiet, noisy, or
+          distorted (a mic too close – that one can't be repaired, record a
+          little further away next time).
+        🎵 MUSIC (row under the box): pick a song – your songs live in Media →
+          🎵 Music; "⬆ Add song" puts one there for every video. ▶ listens from
+          where it will start. It plays under your voice and dips while you talk:
+            Level        soft (talking reels) · medium · loud (energetic)
+            Dips         under voice · a lot · steady (no dip)
+            Starts at    empty = auto: skips the song's silent intro;
+                         type 0:45 to start at the chorus
+          A song shorter than the video repeats with a smooth 3 s crossfade
+          (no jump back to bar 1); it fades out on the last second.
+          A song you pick replaces a look's reference background audio.
+          No songs yet? "Built-in soft pad" is an original, free bed.
+          ⚠ Royalty-free music only (YouTube Audio Library, Pixabay Music…):
+          film / artist songs get reels muted or blocked (Content ID). Posting
+          to Instagram with its own music? Keep Off and add it in the app.
         🖼 PICTURES & CLIPS (under the box): "📎 Add pictures / clips", or
           "📚 From Media" (files you keep in the Media tab – the same fire
           transition in every video), or drop them on the box, or paste a
           copied picture (Ctrl+V). Pictures, GIFs, MP4 / MOV / WebM clips.
-          Each file gets a USE (detected – change it in its list):
+          Each file gets a USE (detected – change it in its list; once the pictures are on the video, a change shows at once):
             Cutaway    covers the screen for a moment (photos, stock clips,
                        a GIF meme) – placed on the words it shows
             Transition a fire / light leak / swipe / glitch clip played on
@@ -152,7 +184,9 @@
                        … reason" (no such words: at clip changes) – with its
                        whoosh (🔊/🔇 on the file). "Transition (once)" =
                        only the first. Several transition files take turns.
-            Overlay    an effect over you (sparkles, smoke) at its word
+            Corner box the picture in a framed box top-right – your face stays on screen
+            Overlay    an effect over you (sparkles, smoke) at its word; a normal photo is laid
+                       over you half see-through
             Sticker    a transparent PNG / GIF popping up in the corner
           Clips on a BLACK background (most fire / light-leak packs) are
           blended – the black disappears, you stay visible; GREEN screen

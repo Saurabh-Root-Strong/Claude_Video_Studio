@@ -771,3 +771,13 @@ main { padding: 18px; max-width: 1600px; margin: 0 auto; }
 .picpin { max-width: 78px; flex: none; }
 .picnote { min-width: 60px; }
 .picitem img, .picnothumb { background: repeating-conic-gradient(#2a2d35 0 25%, #1a1c22 0 50%) 50% / 12px 12px; object-fit: contain; }
+/* Claude's answer to a note: whole, with its line breaks, scrollable when long */
+.sgreply { white-space: pre-wrap; margin: 4px 0 2px 18px; padding: 6px 8px; border-left: 2px solid var(--claude); background: #17151a; border-radius: 4px; max-height: 320px; overflow-y: auto; color: var(--ink); font-size: 12.5px; line-height: 1.45; }
+.cmd .a { white-space: pre-wrap; }
+.picitem.busy { opacity: .55; pointer-events: none; }
+/* 🎵 Music row (Tell the editor) */
+.musbar { margin-top: 6px; }
+.musbar select { width: auto; flex: none; max-width: 240px; }
+.musstart { width: 52px; font: inherit; font-size: 12px; padding: 2px 5px; border-radius: 5px; border: 1px solid var(--line); background: #101216; color: var(--ink); }
+#musNote { flex: 1 1 260px; min-width: 0; }
+.xpart { font-size: 12px; background: #101216; color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; max-width: 290px; }

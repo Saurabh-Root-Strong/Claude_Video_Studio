@@ -27,7 +27,7 @@ import library
 
 KINDS = {"video": "Video", "broll": "B-roll", "audio": "Audio", "text": "Text"}
 WHERE = ("full", "top", "bottom", "pip")
-BLENDS = ("normal", "alpha", "screen", "key")  # how a picture block meets what is under it
+BLENDS = ("normal", "alpha", "screen", "key", "soft")  # how a picture block meets what is under it
 TEXT_STYLES = ("title", "lower", "top")
 MAX_TRACKS, MAX_ITEMS = 12, 60
 AUDIO_EXT = core.AUDIO_EXT
@@ -126,6 +126,8 @@ def _clean_item(pid: str, data: dict, kind: str, it: dict, old: dict | None = No
                 out["keyc"] = kc if re.fullmatch(r"[0-9A-F]{6}", kc) else "00FF00"
         if cur.get("loop") or out.get("anim"):
             out["loop"] = True
+        if cur.get("box") == "small":  # a sticker: a smaller corner box than a picture-in-picture
+            out["box"] = "small"
         try:  # the picture's shape: lets an auto-fit block decide fill / fit for each export frame
             if cur.get("ar") and 0.05 < float(cur["ar"]) < 20:
                 out["ar"] = round(float(cur["ar"]), 4)
@@ -446,7 +448,7 @@ def plan(pid: str, data: dict, scenes: list[dict], durs: list[float]) -> tuple[l
                     sl.update(file=str(p), sig=[st.st_size, st.st_mtime], still=core.is_still(p.name) and not it.get("anim"),
                               src_in=round(float(it.get("in") or 0) + (a - A), 4), where=it.get("where", "full"),
                               fit=it.get("fit", "fill"), hdr=False)
-                    for k_ in ("blend", "keyc", "loop", "anim", "ar", "fit_auto"):
+                    for k_ in ("blend", "keyc", "loop", "anim", "ar", "fit_auto", "box"):
                         if it.get(k_):
                             sl[k_] = it[k_]
                     if sl.get("loop") or sl.get("anim"):

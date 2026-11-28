@@ -1096,6 +1096,32 @@ try:
         check("broken music file -> render still succeeds, without music, and says so",
               jb["status"] == "done" and any("could not be mixed" in x for x in jb.get("log", [])), jb.get("error") or "")
         check("duck_db 0 is kept as 0 (no '0 or default' bug)", core.load(p3)["settings"]["duck_db"] == 0)
+        # 🎵 a chosen song: silent intro skipped, a short song repeats with crossfades (no gap), level / start validated
+        song = core.BRAND / "music" / "intro song.mp3"
+        subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo:d=2", "-f", "lavfi",
+                        "-i", "sine=f=330:d=4:r=44100", "-filter_complex",
+                        "[1:a]aformat=channel_layouts=stereo,volume=0.3[s];[0:a][s]concat=n=2:v=0:a=1", str(song)], check=True)
+        bad_ = [post(f"/api/projects/{p3}/brief", {"settings": s_}).status_code
+                for s_ in ({"music_level": "huge"}, {"music_start": "abc"}, {"music": "../../x.mp3"})]
+        okr = post(f"/api/projects/{p3}/brief", {"settings": {"music": "intro song.mp3", "music_level": "loud",
+                                                              "music_start": "0:01.5", "duck_db": 10}})
+        s3 = core.load(p3)["settings"]
+        st_auto = pipeline.music_start(song, "auto")
+        bed_, seek_ = pipeline.music_bed(song, st_auto, 20.0)
+        sil_ = subprocess.run([core.FFMPEG, "-v", "info", "-i", str(bed_), "-af", "silencedetect=noise=-45dB:d=0.2", "-f",
+                               "null", "-"], capture_output=True, text=True).stderr
+        post(f"/api/projects/{p3}/brief", {"settings": {"music_start": "auto"}})
+        n_bad0 = sum("could not be mixed" in x for x in (core.load(p3).get("job") or {}).get("log", []))  # log keeps old jobs
+        post(f"/api/projects/{p3}/render", {"kind": "preview"})
+        jm = wait_job(p3, "preview")
+        check("music: a song you pick starts after its silent intro, repeats with a smooth crossfade when shorter than "
+              "the video (no silent gap), level / start / file validated; the render mixes it",
+              bad_ == [400, 400, 400] and okr.status_code == 200 and s3["music_level"] == "loud"
+              and s3["music_start"] == 1.5 and 1.7 <= st_auto <= 2.0 and pipeline.song_len(bed_) >= 20
+              and "silence_start" not in sil_ and jm["status"] == "done"
+              and sum("could not be mixed" in x for x in jm.get("log", [])) == n_bad0,
+              f"bad {bad_} start {st_auto} bed {pipeline.song_len(bed_):.1f}s {jm.get('error') or ''}")
+        post(f"/api/projects/{p3}/brief", {"settings": {"music": "off"}})
         (core.BRAND / "music" / "broken.mp3").unlink()
         post(f"/api/projects/{p3}/brief", {"settings": {"music": "auto", "duck_db": 18}})
         # duck depth: ducked music alone vs the voice, music RMS in speech vs in pauses
@@ -1734,7 +1760,7 @@ try:
         c_mid, c_corner, c_corner0 = pxc(t_mid, W_ * 0.5, H_ * 0.3), pxc(t_mid, sx, sy), pxc(t_before, sx, sy)
         fire_ok = c_mid[0] > 170 and 50 < c_mid[1] < 170 and c_mid[2] < 90 and max(abs(a_ - b_) for a_, b_ in zip(c_corner, c_corner0)) < 45 and max(c_corner0) > 60
         # sticker box (pip, top-right): the GIF's red square blinks (on 0-0.5 s of each second)
-        bw_, bh_ = round(W_ * 0.44) // 2 * 2, round(H_ * 0.28) // 2 * 2
+        bw_, bh_ = round(W_ * 0.30) // 2 * 2, round(H_ * 0.19) // 2 * 2  # a sticker's (small) corner box
         x0_, y0_ = W_ - bw_ - round(W_ * 0.04) - 6, round(H_ * 0.09)
         s_ = min(bw_ / 200, bh_ / 200)
         gx, gy = x0_ + (bw_ - 200 * s_) / 2 + 80 * s_, y0_ + (bh_ - 200 * s_) / 2 + 90 * s_
@@ -1795,10 +1821,115 @@ try:
     view_ = client.get(f"/api/projects/{pid}").get_json()
     stale_ = next(e_ for e_ in view_["pictures"]["items"] if e_["file"] == "powell.png").get("stale")
     post(f"/api/projects/{pid}/undo")
+    # ---- a change to a placed picture shows AT ONCE; every "Use as" is visibly different; Claude isn't asked twice
+    def blk(file_):
+        dd_ = core.load(pid)
+        rec_ = pics_mod._records(pics_mod.entry(dd_, file_))
+        tk_ = next(t_ for t_ in dd_["tracks"] if t_.get("pictures"))
+        return next((x for x in tk_["items"] if rec_ and x["id"] == rec_[0]["item"]), {})
+    looks = {}
+    for role_ in ("pip", "overlay", "sticker", "cutaway"):
+        rr_ = pp({"op": "role", "file": "market chart.png", "as": role_}).get_json()
+        b_ = blk("market chart.png")
+        looks[role_] = (rr_.get("applied"), b_.get("where"), b_.get("blend"), b_.get("box"))
+    check("roles: changing “Use as” re-places at once (no extra click); corner box = framed box, overlay = half "
+          "see-through over you, sticker = smaller box, cutaway = full screen",
+          looks["pip"] == (True, "pip", None, None) and looks["overlay"] == (True, "full", "soft", None)
+          and looks["sticker"] == (True, "pip", None, "small") and looks["cutaway"][:3] == (True, "full", None), str(looks))
+    real_en2, real_exe2 = appmod.claudebot.enabled, appmod.claudebot.exe
+    appmod.claudebot.enabled, appmod.claudebot.exe = (lambda: True), (lambda: "claude")
+    try:
+        for c_ in core.load(pid)["commands"]:
+            if c_.get("status") == "claude":
+                post(f"/api/projects/{pid}/command/{c_['id']}/cancel")
+
+        def pin_all(d):
+            for e_ in d["pictures"]["items"]:
+                if not e_.get("pin") and e_.get("as") not in ("transition", "transition_once"):
+                    sc_ = next(s_ for s_ in d["scenes"] if pics_mod._in_video(d, s_))
+                    e_["pin"] = {"scene": sc_["id"], "by": "claude"}
+        core.mutate(pid, pin_all)  # as if Claude had looked at every picture
+        again = pp({"op": "run"}).get_json()
+    finally:
+        appmod.claudebot.enabled, appmod.claudebot.exe = real_en2, real_exe2
+    # a JPEG whose start time isn't 0: "-ss 0" made ffmpeg encode nothing -> no thumbnail, silently
+    odd = ROOT / "odd start.jpg"
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=320x200", "-frames:v", "1",
+                    "-output_ts_offset", "0.04", str(odd)], check=True)
+    th_ = ROOT / "odd_thumb.jpg"
+    pipeline.thumbnail(odd, 0.0, th_)
+    check("Place again doesn't call Claude for pictures it already pinned (each call ~2 min); a picture always gets "
+          "its thumbnail (never seeks inside a still)",
+          again.get("claude") is False and th_.is_file(), f"claude={again.get('claude')} thumb={th_.is_file()}")
     check("audit: Undo of an earlier edit keeps a file you added after it; a picture whose scene you cut is flagged "
           "(“▶ Place again”) instead of silently vanishing",
           kept_new and stale_ is True, f"kept={kept_new} stale={stale_}")
     core.mutate(pid, lambda d: d.__setitem__("caption_typed", typed_before) if typed_before else d.pop("caption_typed", None))
+
+    # ---------------------------------------------------------------- ⬇ Extract: MP3 of the music only / the voice only
+    import extract as xmod
+    import refaudio as ra_mod
+
+    def xwait(job_):
+        t0_ = time.time()
+        while time.time() - t0_ < 600:
+            jj_ = next(x for x in xmod.jobs() if x["id"] == job_["id"])
+            if jj_["status"] in ("done", "error"):
+                return jj_
+            time.sleep(1)
+        return {"status": "timeout"}
+    tune = ROOT / "just a tune.wav"   # music, no voice at all
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=5", "-f", "lavfi", "-i",
+                    "sine=f=660:d=5", "-filter_complex", "[0:a][1:a]amix=inputs=2,volume=0.6", str(tune)], check=True)
+    long_ = ROOT / "long talk.wav"    # 16 min: over the separation limit
+    subprocess.run([core.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "anoisesrc=d=960:a=0.05:r=8000", str(long_)], check=True)
+    j_mp4 = xmod.start("mp4", src=tune, stem="x", part="music")
+    j_long = xwait(xmod.start("mp3", src=long_, stem="long", part="music"))
+    if ra_mod.available():
+        j_voice = xwait(xmod.start("mp3", src=tune, stem="tune", part="voice"))
+        sep_ok = (j_voice["status"] == "done" and "(voice only)" in j_voice["file"]
+                  and "Almost no voice" in (j_voice.get("note") or ""))
+    else:
+        j_voice, sep_ok = {"status": "skipped (voice-remover not installed)"}, True
+    check("extract: MP3 'music only' / 'voice only' – a part over 15 min is refused (trim it), the choice is ignored "
+          "for MP4, and voice from a tune with no voice comes out with a clear 'almost no voice' note",
+          j_mp4["part"] == "all" and j_long["status"] == "error" and "15 minutes" in j_long.get("error", "") and sep_ok,
+          f"mp4 part={j_mp4['part']} long={j_long.get('status')}:{j_long.get('error', '')[:80]} voice={j_voice.get('status')} "
+          f"{j_voice.get('file')} note={j_voice.get('note')!r}")
+    # ---------------------------------------------------------------- 🎙 VOICE: clarity + loudness for every video
+    def render_lufs(settings_):
+        post(f"/api/projects/{pid}/brief", {"settings": settings_})
+        post(f"/api/projects/{pid}/render", {"kind": "preview"})
+        jv_ = wait_job(pid, "preview")
+        fv_ = core.work_dir(pid) / core.load(pid)["renders"][-1]["file"]
+        return jv_, (pipeline.measure_lufs(fv_) if jv_["status"] == "done" else None)
+    vc = client.get(f"/api/projects/{pid}/voice_check").get_json()
+    st_v0 = dict(core.load(pid)["settings"])
+    j_raw, l_raw = render_lufs({"voice": "raw", "music": "off", "audio_polish": False})
+    j_nat, l_nat = render_lufs({"voice": "natural", "loudness": -14})
+    j_clr, l_clr = render_lufs({"voice": "clear", "loudness": -16})
+    auto_mode = pipeline.voice_mode({"voice": "auto", "audio_polish": True}), pipeline.voice_mode({"voice": "auto"})
+    bad_v = post(f"/api/projects/{pid}/brief", {"settings": {"voice": "loud!"}}).status_code
+    check("voice: every video reaches its loudness (natural -14 / clear -16, +-1) unless 'as recorded'; the old "
+          "'clean up voice' switch still means clear; the recording check answers in plain words",
+          l_nat is not None and abs(l_nat + 14) <= 1.0 and l_clr is not None and abs(l_clr + 16) <= 1.0
+          and j_raw["status"] == "done" and auto_mode == ("clear", "natural") and bad_v == 400
+          and isinstance(vc.get("hints"), list) and vc["hints"],
+          f"raw {l_raw} natural {l_nat} clear {l_clr} auto {auto_mode} hints {vc.get('hints')}")
+    if ra_mod.available():
+        n_iso0 = sum("Isolating your voice" in x for x in (core.load(pid).get("job") or {}).get("log", []))
+        j_st, l_st = render_lufs({"voice": "studio", "loudness": -16})
+        isos_ = list((core.work_dir(pid) / "voice_iso").glob("*.wav")) if (core.work_dir(pid) / "voice_iso").is_dir() else []
+        j_st2, _ = render_lufs({"voice": "studio", "loudness": -15})  # second time: the isolated voice is reused
+        n_iso2 = sum("Isolating your voice" in x for x in j_st2.get("log", []))
+        st_ok = (j_st["status"] == "done" and l_st is not None and abs(l_st + 16) <= 1.0 and isos_
+                 and n_iso2 == sum("Isolating your voice" in x for x in j_st.get("log", [])) and n_iso2 > n_iso0)
+        st_det = f"studio {j_st['status']} {l_st} isos {len(isos_)} isolating-lines {n_iso0}->{n_iso2}"
+    else:
+        st_ok, st_det = True, "skipped (voice-remover not installed)"
+    check("voice: Studio isolates your voice ONCE per clip (cached, reused next render) and reaches the loudness",
+          st_ok, st_det)
+    post(f"/api/projects/{pid}/brief", {"settings": {k_: st_v0.get(k_) for k_ in ("voice", "loudness", "audio_polish", "music")}})
 except Exception:  # sys.exit in `finally` would otherwise swallow the traceback and report "all passed"
     import traceback
     traceback.print_exc()

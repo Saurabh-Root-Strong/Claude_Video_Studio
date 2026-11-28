@@ -556,34 +556,50 @@ def api_pictures(pid):
                               + " – change any in its “Use as” list, then ▶ Place." if added else "")
                        + (f" Skipped: {', '.join(skipped)}." if skipped else ""))
             return
-        if op in ("role", "sound"):
+        if op in ("role", "sound", "note", "style", "pin"):
+            # once the pictures are ON the video, a change shows at once (re-placed, one Undo step) – before, it
+            # was only stored and the video looked unchanged until "Place again"
+            live = bool(p.get("ran")) and any(pictures._records(e) for e in p["items"]) and not pictures.locked(d)
+            if live:
+                core.snapshot(pid, d)
             f = str(body.get("file") or "")
-            err = pictures.set_role(d, f, body.get("as")) if op == "role" else pictures.set_sound(d, f, bool(body.get("on")))
-            if err:
-                res["error"] = err
-            return
-        if op == "note":
-            if not pictures.set_note(d, str(body.get("file") or ""), body.get("note") or ""):
-                res["error"] = "That picture isn't in the list."
-            return
-        if op == "style":
-            if body.get("style") not in pictures.STYLES:
-                res["error"] = "Unknown placement."
+            if op == "role":
+                res["error"] = pictures.set_role(d, f, body.get("as"))
+            elif op == "sound":
+                res["error"] = pictures.set_sound(d, f, bool(body.get("on")))
+            elif op == "note":
+                res["error"] = "" if pictures.set_note(d, f, body.get("note") or "") else "That picture isn't in the list."
+            elif op == "style":
+                if body.get("style") not in pictures.STYLES:
+                    res["error"] = "Unknown placement."
+                else:
+                    p["style"] = body["style"]
+                    for e in p["items"]:  # your choice for ALL: per-block overrides read back from the timeline give way
+                        e.pop("where", None)
+                        e.pop("fit", None)
+            else:
+                sc = body.get("scene")
+                if sc not in (None, "") and str(sc).isdigit():
+                    n = int(sc)
+                    sc = d["scenes"][n - 1]["id"] if 0 < n <= len(d["scenes"]) else "?"
+                res["error"] = pictures.set_pin(d, f, sc or None)
+            if res.get("error") or not live:
+                if live:
+                    core.drop_snapshot(pid)
+                if not res.get("error"):
+                    res.pop("error", None)
+                    res["reply"] = "Saved – click ▶ Place to put it on the video."
                 return
-            p["style"] = body["style"]
-            # the user's choice for ALL: per-picture overrides read back from the timeline give way
-            for e in p["items"]:
-                e.pop("where", None)
-                e.pop("fit", None)
-            return
-        if op == "pin":
-            sc = body.get("scene")
-            if sc not in (None, "") and str(sc).isdigit():
-                n = int(sc)
-                sc = d["scenes"][n - 1]["id"] if 0 < n <= len(d["scenes"]) else "?"
-            err = pictures.set_pin(d, str(body.get("file") or ""), sc or None)
-            if err:
-                res["error"] = err
+            res.pop("error", None)
+            try:
+                r = pictures.run(pid, d)
+            except ValueError as e:
+                core.drop_snapshot(pid)
+                res["reply"] = f"Saved, but not re-placed: {e}"
+                return
+            mine = [ln for ln in r["report"] if f and ln.startswith(f)] if op != "style" else []
+            res.update(r, render=True, applied=True,
+                       reply="Updated on the video" + (f": {mine[0]}" if mine else "") + " – the edited view refreshes in a moment.")
             return
         if op in ("remove", "clear", "run"):
             j = d.get("job") or {}
@@ -625,9 +641,10 @@ def api_pictures(pid):
                 res["error"] = str(e)
                 return
             ask = (claudebot.enabled() and claudebot.exe() and body.get("claude", True) is not False
-                   and any(not e.get("off") and (e.get("pin") or {}).get("by") != "you"  # only what needs EYES:
-                           and pictures.role_of(pid, e) in ("cutaway", "overlay", "sticker")  # transitions go on
-                           for e in p["items"])  # their spoken moments by themselves
+                   # only files NOBODY has pinned yet (Claude already looked at the ones it pinned – asking again
+                   # on every "Place again" cost ~2 min each); transitions go on their spoken moments by themselves
+                   and any(not e.get("off") and not e.get("pin") and not pictures.SCENE_RE.search(e.get("note") or "")
+                           and pictures.role_of(pid, e) in pictures.NEEDS_EYES for e in p["items"])
                    and not any(c.get("status") == "claude" and c.get("kind") == "pictures" for c in d["commands"]))
             reply = (f"Placed {r['placed']} block(s) from {len([e for e in p['items'] if not e.get('off')])} file(s)"
                      + (f", {r['left']} not placed (see the list)" if r["left"] else "")
@@ -651,6 +668,67 @@ def api_pictures(pid):
     if res.pop("render", False):
         enqueue(pid, "preview")
     return jsonify(ok=True, **res)
+
+
+@app.get("/api/projects/<pid>/voice_check")
+def api_voice_check(pid):
+    """🎙 How your recording sounds: loudness, room noise, distortion – per clip, measured once (cached by file size +
+    time in work/voice_check.json) – and what the studio does about it, in plain words."""
+    _exists(pid)
+    d = core.load(pid)
+    cache_f = core.work_dir(pid) / "voice_check.json"
+    cache = core.read_json(cache_f, {}) or {}
+    out, changed = [], False
+    for s in d["sources"]:
+        if s.get("include") is False or s.get("has_audio") is False:
+            continue
+        p = core.raw_dir(pid) / s["file"]
+        if not p.is_file():
+            continue
+        st_ = p.stat()
+        k = f"{s['file']}|{st_.st_size}|{st_.st_mtime}"
+        if k not in cache or (cache[k].get("v") != 2 and not cache[k].get("error")):  # v2: clipping = flat runs
+            try:
+                prof = pipeline.voice_profile(p, float(s.get("duration") or 60))
+                lu = pipeline.measure_lufs(p)
+                # real distortion = FLAT-TOPPED runs at full scale (astats flat factor / peak count) – not a few
+                # peaks touching 0 dB, which every phone limiter produces (that was a false alarm)
+                vd = pipeline.run([core.FFMPEG, "-hide_banner", "-i", p, "-vn", "-af",
+                                   "astats=measure_perchannel=none:measure_overall=Peak_level+Flat_factor+Peak_count",
+                                   "-f", "null", "-"], timeout=900)
+                ff_ = re.findall(r"Flat factor:\s*(-?[\d.]+)", vd)
+                pc_ = re.findall(r"Peak count:\s*(-?[\d.]+)", vd)
+                pk_ = re.findall(r"Peak level dB:\s*(-?[\d.]+)", vd)
+                cache[k] = {"lufs": lu, "floor": prof.get("floor"), "speech": prof.get("speech"),
+                            "flat": float(ff_[-1]) if ff_ else 0.0, "peaks": float(pc_[-1]) if pc_ else 0.0,
+                            "peak": float(pk_[-1]) if pk_ else None, "v": 2}
+            except Exception as e:  # noqa: BLE001
+                cache[k] = {"error": str(e)[:120]}
+            changed = True
+        out.append(dict(cache[k], file=s["file"]))
+    if changed:
+        cache_f.parent.mkdir(parents=True, exist_ok=True)
+        core._atomic_write(cache_f, cache)
+    st = d["settings"]
+    mode, target = pipeline.voice_mode(st), float(st.get("loudness") or -16)
+    hints = []
+    for c in out:
+        if c.get("error") or c.get("lufs") is None:
+            continue
+        name = c["file"] if len(out) > 1 else "Your recording"
+        if c["lufs"] < target - 4:
+            hints.append(f"{name} is quiet ({c['lufs']:.0f} LUFS)" + (
+                f" – raised to {target:.0f} LUFS" if mode != "raw" else " – ⚠ “As recorded” leaves it quiet for viewers"))
+        if c.get("floor") is not None and c.get("speech") is not None and c["floor"] > -58 and c["speech"] - c["floor"] < 20:
+            hints.append(f"background noise is high (only {c['speech'] - c['floor']:.0f} dB under your voice)" + (
+                " – Studio removes it" if mode == "studio" else " – Clear lowers it; Studio (AI) removes it best"
+                if mode == "clear" else " – choose Studio (AI) to remove it, or Clear to lower it"))
+        if c.get("flat", 0) >= 1.0 or (c.get("peak") is not None and c["peak"] >= -0.1 and c.get("peaks", 0) >= 100):
+            hints.append("your voice distorts in loud parts (the mic was overloaded) – that can't be fully repaired; "
+                         "next time record a little further from the mic")
+    if out and not hints:
+        hints.append("your recording sounds healthy")
+    return jsonify(clips=out, hints=hints, mode=mode, target=target)
 
 
 @app.post("/api/projects/<pid>/suggest")
@@ -864,7 +942,8 @@ def api_claude_auto():
 
 @app.get("/api/extract")
 def api_extract_list():
-    return jsonify(jobs=extract.jobs(), files=extract.files(), modes={k: v[0] for k, v in extract.MODES.items()})
+    return jsonify(jobs=extract.jobs(), files=extract.files(), modes={k: v[0] for k, v in extract.MODES.items()},
+                   parts={k: v[0] for k, v in extract.PARTS.items()}, separator=refaudio.available())
 
 
 @app.post("/api/extract")
@@ -873,6 +952,7 @@ def api_extract_start():
     or a multipart file. Runs in the background; poll GET /api/extract."""
     form = request.form if request.files else (request.json or {})
     mode, frm, to = str(form.get("mode") or ""), form.get("from"), form.get("to")
+    part = str(form.get("part") or "all")  # MP3: all | music (voice removed) | voice (music removed)
     try:
         f = request.files.get("file")
         if f:
@@ -883,16 +963,16 @@ def api_extract_start():
             extract.TMP.mkdir(parents=True, exist_ok=True)
             tmp = extract.TMP / f"{core.new_id('up')}{ext}"
             f.save(tmp)
-            job = extract.start(mode, frm, to, src=tmp, stem=Path(name).stem, tmp_src=True)
+            job = extract.start(mode, frm, to, src=tmp, stem=Path(name).stem, tmp_src=True, part=part)
         elif form.get("media"):
             kind, _, nm = str(form.get("media")).partition("/")
             try:
                 src = media_lib._path(kind, nm)
             except ValueError as e:
                 return jsonify(error=str(e)), 400
-            job = extract.start(mode, frm, to, src=src, stem=src.stem)
+            job = extract.start(mode, frm, to, src=src, stem=src.stem, part=part)
         else:
-            job = extract.start(mode, frm, to, url=str(form.get("url") or ""))
+            job = extract.start(mode, frm, to, url=str(form.get("url") or ""), part=part)
     except extract.ExtractError as e:
         return jsonify(error=str(e)), 400
     except OSError as e:

@@ -219,6 +219,11 @@
             <button data-m="mp4" data-tip="Video with its sound – MP4 (H.264 + AAC, plays everywhere)">🎞 MP4 – video</button>
             <button data-m="mute" data-tip="Video WITHOUT sound – MP4 (for B-roll, a green-screen background, a transition)">🔇 MP4 – video only</button>
           </div>
+          <select id="xPart" class="xpart" data-tip="Which part of the sound. Background music only = the voice is taken out (then use it as Music in your video). Voice only = the music is taken out. Separating takes about a minute per minute of sound – set From / To to just the part you need.">
+            <option value="all">Whole sound</option>
+            <option value="music">Background music only (voice removed)</option>
+            <option value="voice">Voice only (music removed)</option>
+          </select>
           <label class="muted small">From <input id="xFrom" class="xt" placeholder="0:00" data-tip="Optional: start here (1:15 or 75). Empty = from the start." /></label>
           <label class="muted small">To <input id="xTo" class="xt" placeholder="end" data-tip="Optional: stop here (2:30 or 150). Empty = to the end." /></label>
           <button class="btn" id="xGo">⬇ Extract</button>
@@ -265,6 +270,28 @@
             <button id="picRun" class="btn small primary" hidden data-tip="Put every picture on the scene where you talk about it, timed to the word (one Undo step). Then 🤖 Claude looks at the pictures and fixes any the names couldn't place.">▶ Place pictures</button>
             <button id="picClear" class="btn small ghost" hidden data-tip="Take all these pictures off the video and out of this list (Undo brings them back). The files stay in Assets.">Remove all</button>
             <input type="file" id="picFile" accept="image/*,video/*" multiple hidden>
+          </div>
+          <div id="vocBar" class="picbar musbar">
+            <b class="small">🎙 Voice</b>
+            <select id="vocMode" data-tip="How your voice is treated before anything else. Clear = background noise / hiss removed, crisp presence, even level (best for phone recordings). Natural = your voice as it sounds, just louder and evened out. As recorded = untouched (quiet recordings stay quiet).">
+              <option value="studio">Studio – AI keeps only your voice (best outdoors)</option><option value="clear">Clear – noise removed, crisp (recommended)</option><option value="natural">Natural – just louder &amp; even</option><option value="raw">As recorded</option></select>
+            <select id="vocLoud" data-tip="How loud the finished video is. Reels / Shorts / TikTok play around −14 LUFS – quieter videos sound weak next to them. The music always sits under your voice at its own level.">
+              <option value="-14">Loudness: reels (−14)</option><option value="-16">Loudness: standard (−16)</option><option value="-19">Loudness: soft (−19)</option></select>
+            <span class="muted small" id="vocNote">checking your recording…</span>
+          </div>
+          <div id="musBar" class="picbar musbar">
+            <b class="small">🎵 Music</b>
+            <select id="musSong" data-tip="Background music under your voice. Your songs live in the Media tab (🎵 Music); add one here with ⬆. It plays quietly between your lines and dips under your voice."></select>
+            <button id="musPlay" class="btn small ghost" data-tip="Listen to the song from where it will start.">▶</button>
+            <button id="musAdd" class="btn small ghost" data-tip="Add a song (MP3, M4A, WAV…) – it is kept in Media → Music for every video.">⬆ Add song</button>
+            <select id="musLevel" data-tip="How loud the music sits under your voice. Soft = barely there (talking reels), Medium = noticeable, Loud = energetic (still under the words).">
+              <option value="soft">Level: soft</option><option value="medium">Level: medium</option><option value="loud">Level: loud</option></select>
+            <select id="musDuck" data-tip="While you speak the music dips further so every word is clear; in pauses it comes back.">
+              <option value="10">Dips under voice</option><option value="18">Dips a lot</option><option value="0">Steady (no dip)</option></select>
+            <label class="small muted" data-tip="Where in the song the music starts. Auto skips its silent intro. Type 0:45 to start at the chorus.">Starts at <input id="musStart" class="musstart" placeholder="auto" maxlength="8"></label>
+            <span class="muted small" id="musNote"></span>
+            <input type="file" id="musFile" accept="audio/*,.mp3,.m4a,.wav,.aac,.ogg,.flac" hidden>
+            <audio id="musAudio" preload="none"></audio>
           </div>
           <div id="picLib" class="piclib" hidden></div>
           <div id="picList" class="piclist" hidden></div>

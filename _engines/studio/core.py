@@ -84,9 +84,15 @@ DEFAULT_SETTINGS = {
     "grade": True,                 # light brightness/contrast lift on the speaker
     # final mix
     "audio_polish": False,         # high-pass + denoise + compression + loudness -16 LUFS
+    # 🎙 voice: clear (noise removal + presence EQ + even level + loudness) | natural (just evened out + loudness) |
+    # raw (as recorded) | auto (= clear when audio_polish is on, else natural – a quiet phone recording must never
+    # reach the viewer at -24 LUFS with music sitting on top of it)
+    "voice": "auto",
     "music": "off",                # off | auto (Brand Kit/music, else a generated soft pad) | file in Brand Kit/music
     "loudness": -16,               # final speech loudness, LUFS (audio_polish)
     "duck_db": 10,                 # how far music drops under dialogue, dB
+    "music_level": "medium",       # soft | medium | loud = music bed 16 / 12 / 8 LU under the voice (between lines)
+    "music_start": "auto",         # auto (skip the song's silent intro) | seconds into the song to start from
     "ref_audio": "none",           # none | ref:<reference id> = that reference's background music (voice removed)
 }
 
@@ -240,7 +246,7 @@ def new_project(name: str) -> dict:
 STYLE_KEYS = ("format", "fit", "fps", "captions", "caption_script", "caption_font", "caption_color", "highlight_color",
               "caption_position", "caption_case", "caption_words", "remove_silence", "silence_min", "logo",
               "logo_position", "layout", "split_ratio", "bg_mode", "bg_color", "bg_file", "panel_color", "grade",
-              "audio_polish", "music", "loudness", "duck_db", "ref_audio")
+              "audio_polish", "music", "loudness", "duck_db", "ref_audio", "music_level", "music_start", "voice")
 
 
 def ref_id(r: dict) -> str:
@@ -596,6 +602,17 @@ def clean_setting(key: str, value):
             return True, round(max(-24.0, min(float(value), -10.0)), 1)
         if key == "duck_db":
             return True, round(max(0.0, min(float(value), 30.0)), 1)
+        if key == "voice":
+            return value in ("auto", "studio", "clear", "natural", "raw"), value
+        if key == "music_level":
+            return value in ("soft", "medium", "loud"), value
+        if key == "music_start":
+            if str(value).strip().lower() in ("auto", ""):
+                return True, "auto"
+            v = str(value).strip()
+            m_ = re.fullmatch(r"(\d{1,3}):([0-5]?\d(?:\.\d+)?)", v)  # "1:05" as written on a song's timeline
+            secs = int(m_.group(1)) * 60 + float(m_.group(2)) if m_ else float(v)
+            return 0 <= secs <= 3600, round(secs, 2)
         if key == "split_ratio":
             return True, round(max(0.25, min(float(value), 0.60)), 3)
         if key == "face_y":

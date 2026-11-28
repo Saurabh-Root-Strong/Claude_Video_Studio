@@ -201,6 +201,23 @@ def pictures_cli(pid, sub, args):
 
 
 def done(pid, cid, reply):
+    """reply = the text, or @<file> (e.g. @Storyboards/<pid>/reply.md): a long / multi-line reply passed through a
+    shell argument gets CUT at its first quote or line break – a file arrives whole."""
+    if reply.startswith("@"):
+        from pathlib import Path
+        p = Path(reply[1:])
+        if not p.is_absolute():
+            p = core.ROOT / p
+        try:  # only a reply file inside the studio folder (never e.g. a key file elsewhere on the PC)
+            p.resolve().relative_to(core.ROOT.resolve())
+        except ValueError:
+            raise SystemExit("the reply file must be inside the studio folder (e.g. Storyboards/<pid>/reply.md)")
+        try:
+            reply = p.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            raise SystemExit(f"can't read the reply file {p}: {e}")
+    reply = reply[:12000]
+
     def fn(d):
         for c in d["commands"]:
             if c["id"] == cid:

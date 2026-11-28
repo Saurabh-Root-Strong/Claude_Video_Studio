@@ -624,7 +624,8 @@ function renderXChosen() {
   const c = $("#xClear"); if (c) c.onclick = () => { XFILE = null; $("#xMedia").value = ""; renderXChosen(); };
   $("#xUrl").disabled = !!t;
 }
-function setXMode(m) { XMODE = m; store.set("cve.xmode", m); $$("#xModes button").forEach((b) => b.classList.toggle("active", b.dataset.m === m)); }
+function setXMode(m) { XMODE = m; store.set("cve.xmode", m); $$("#xModes button").forEach((b) => b.classList.toggle("active", b.dataset.m === m));
+  const xp = $("#xPart"); if (xp) xp.hidden = m !== "mp3"; }  // music / voice separation is for MP3 (sound) only
 async function loadExtract() {
   try { XD = await api("/api/extract"); } catch { return; }
   renderExtract();
@@ -634,7 +635,8 @@ async function loadExtract() {
 function renderExtract() {
   const box = $("#xList"); if (!box) return;
   const live = XD.jobs.filter((j) => j.status !== "done" || !XD.files.some((f) => f.name === j.file));
-  for (const j of XD.jobs) if (j.status === "done" && !XSEEN.has(j.id)) { XSEEN.add(j.id); if (XINIT) toast(`Ready: ${j.file} – ⬇ Download it below.`); }
+  for (const j of XD.jobs) if (j.status === "done" && !XSEEN.has(j.id)) { XSEEN.add(j.id); if (XINIT) toast(`Ready: ${j.file} – ⬇ Download it below.` + (j.note ? ` ⚠ ${j.note}` : ""), !!j.note); }
+  const xp = $("#xPart"); if (xp && XD.separator === false) { [...xp.options].forEach((o) => { if (o.value !== "all") { o.disabled = true; o.textContent = o.textContent.replace(/ – needs.*$/, "") + " – needs Setup.bat"; } }); }
   XINIT = true;  // the first look only learns what was already finished (no "Ready" toasts on opening the tab)
   const jobRow = (j) => j.status === "error"
     ? `<div class="xitem err"><span>✗</span><span class="xn"><b>${esc(j.title || "Extract")}</b> · ${esc(j.mode_label)}<br><span class="bad">${esc(j.error)}</span></span><button class="btn ghost small" data-xdis="${esc(j.id)}">OK</button></div>`
@@ -668,11 +670,11 @@ async function startExtract() {
   try {
     let j;
     if (src.file) {
-      const fd = new FormData(); fd.append("file", src.file); fd.append("mode", XMODE); fd.append("from", $("#xFrom").value); fd.append("to", $("#xTo").value);
+      const fd = new FormData(); fd.append("file", src.file); fd.append("mode", XMODE); fd.append("part", XMODE === "mp3" ? $("#xPart").value : "all"); fd.append("from", $("#xFrom").value); fd.append("to", $("#xTo").value);
       const r = await fetch("/api/extract", { method: "POST", body: fd }); j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || "Upload failed");
-    } else j = await api("/api/extract", { method: "POST", body: { ...src, mode: XMODE, from: $("#xFrom").value, to: $("#xTo").value } });
-    toast("Started – it shows below; you can keep working.");
+    } else j = await api("/api/extract", { method: "POST", body: { ...src, mode: XMODE, part: XMODE === "mp3" ? $("#xPart").value : "all", from: $("#xFrom").value, to: $("#xTo").value } });
+    toast(XMODE === "mp3" && $("#xPart").value !== "all" ? "Started – separating voice and music takes about a minute per minute of sound; it shows below, you can keep working." : "Started – it shows below; you can keep working.");
     XFILE = null; $("#xUrl").value = ""; $("#xMedia").value = ""; renderXChosen(); loadExtract();
   } catch (e) { toast(e.message, true); }
   finally { go.disabled = false; go.textContent = "⬇ Extract"; }
@@ -2157,7 +2159,8 @@ function renderPictures() {
       + " · a note like “Powell, Fed rate” or “scene 3” helps · drag a block on the Pictures track to fine-tune (it stays there)";
     const hint = $("#picHint"); if (h && hint.dataset.h !== h) { hint.dataset.h = h; hint.textContent = h; }
   }
-  if (box.contains(document.activeElement)) return;  // typing a note: don't redraw under the cursor
+  // typing a note: don't redraw under the cursor (a dropdown you just used keeps focus – that must NOT freeze the card)
+  if (box.contains(document.activeElement) && document.activeElement.classList.contains("picnote")) return;
   const scenes = P.scenes.filter((s) => inVid(s) && !s.src_skipped);
   const html = items.map((e) => {
     const a = (P.broll_assets || []).find((x) => x.file === e.file);
@@ -2194,17 +2197,12 @@ function renderPictures() {
   $$(".picitem", box).forEach((row) => {
     const file = row.dataset.file;
     const note = $(".picnote", row);
-    note.onchange = () => picApi({ op: "note", file, note: note.value }).then(() => { box.dataset.h = ""; refresh(true); }).catch((e) => toast(e.message, true));
+    note.onchange = () => picChange({ op: "note", file, note: note.value }, row);
     note.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === "Enter") { ev.preventDefault(); note.blur(); } };
-    $(".picpin", row).onchange = (ev) => picApi({ op: "pin", file, scene: ev.target.value || null })
-      .then(() => { toast(ev.target.value ? "Pinned – click ▶ Place to put it there." : "Back to auto – ▶ Place picks its scene."); box.dataset.h = ""; refresh(true); })
-      .catch((e) => toast(e.message, true));
-    $(".picrole", row).onchange = (ev) => picApi({ op: "role", file, as: ev.target.value || null })
-      .then(() => { toast("Changed – click ▶ Place to apply it."); box.dataset.h = ""; refresh(true); }).catch((e) => toast(e.message, true));
+    $(".picpin", row).onchange = (ev) => picChange({ op: "pin", file, scene: ev.target.value || null }, row);
+    $(".picrole", row).onchange = (ev) => picChange({ op: "role", file, as: ev.target.value || null }, row);
     const sb = $(".picsnd", row);
-    if (sb) sb.onclick = () => picApi({ op: "sound", file, on: sb.dataset.on !== "1" })
-      .then(() => { toast(sb.dataset.on === "1" ? "Its sound is off – ▶ Place to apply." : "Its sound is on – ▶ Place to apply."); box.dataset.h = ""; refresh(true); })
-      .catch((e) => toast(e.message, true));
+    if (sb) sb.onclick = () => picChange({ op: "sound", file, on: sb.dataset.on !== "1" }, row);
     $(".picx", row).onclick = () => picApi({ op: "remove", file }).then((r) => { toast(r.reply); box.dataset.h = ""; refresh(true); autoPreviewTick(); }).catch((e) => toast(e.message, true));
   });
 }
@@ -2231,8 +2229,23 @@ $("#picLibBtn").onclick = async () => {
   } catch (e) { box.innerHTML = `<span class="bad">${esc(e.message)}</span>`; }
 };
 $("#picFile").onchange = (e) => { const f = [...e.target.files]; e.target.value = ""; uploadPictures(f); };
-$("#picStyle").onchange = (e) => picApi({ op: "style", style: e.target.value })
-  .then(() => toast("Saved – click ▶ Place to apply it to all pictures.")).then(() => refresh(true)).catch((x) => toast(x.message, true));
+$("#picStyle").onchange = (e) => picChange({ op: "style", style: e.target.value }, null);
+// a change to a picture (use / scene / sound / note / show): the server re-places at once when the pictures are already
+// on the video – the edited view then updates by itself. While it works, that card's controls wait (no double change).
+async function picChange(body, row) {
+  const ctl = row ? $$("select, input, button", row) : [$("#picStyle")];
+  ctl.forEach((x) => (x.disabled = true));
+  if (row) row.classList.add("busy");
+  try {
+    const r = await picApi(body);
+    toast(r.reply || "Saved.");
+    if (r.applied) { SHOW = { sid: (P.scenes.find(inVid) || {}).id, switchView: true, at: Date.now() }; }
+    $("#picList").dataset.h = "";
+    await refresh(true); renderPvBadge(); autoPreviewTick();
+  } catch (e) { toast(e.message, true); $("#picList").dataset.h = ""; refresh(true); }
+  ctl.forEach((x) => (x.disabled = false));
+  if (row) row.classList.remove("busy");
+}
 $("#picRun").onclick = async () => {
   const b = $("#picRun"); if (b.disabled) return;
   b.disabled = true; b.innerHTML = `<span class="spin"></span> Placing…`;
@@ -2260,18 +2273,147 @@ $("#picClear").onclick = () => { if (!confirm("Remove all these pictures from th
     if (!fs.length) return;  // ordinary text paste (a caption script) stays text
     ev.preventDefault(); uploadPictures(fs); });
 })();
+// 🎵 MUSIC: pick a song (Media → Music), listen, level, dip under voice, where it starts. Saved into the active look.
+let MUS_SONGS = null, MUS_LOADING = false;
+async function musLoad(force) {
+  if (MUS_LOADING || (MUS_SONGS && !force)) return;
+  MUS_LOADING = true;
+  try { const k = (await api("/api/media")).kinds || {}; MUS_SONGS = (k.music && k.music.items) || []; }
+  catch { MUS_SONGS = MUS_SONGS || []; }
+  MUS_LOADING = false; renderMusic(true);
+}
+const musFmt = (s) => { s = Math.max(0, +s || 0); return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`; };
+function renderMusic(force) {
+  const sel = $("#musSong"); if (!sel || !P) return;
+  if (MUS_SONGS === null) { musLoad(); }
+  const st = P.settings || {}, songs = MUS_SONGS || [], cur = st.music || "off";
+  const html = `<option value="off">Off</option>`
+    + `<option value="auto">${songs.length ? `Auto – first song (${esc(songs[0].name)})` : "Built-in soft pad (free)"}</option>`
+    + songs.map((s) => `<option value="${esc(s.name)}">${esc(s.name)}${s.dur ? ` · ${musFmt(s.dur)}` : ""}</option>`).join("")
+    + (cur !== "off" && cur !== "auto" && !songs.some((s) => s.name === cur) ? `<option value="${esc(cur)}">⚠ ${esc(cur)} (missing)</option>` : "");
+  if (force || sel.dataset.h !== html) { sel.dataset.h = html; sel.innerHTML = html; }
+  if (document.activeElement !== sel) sel.value = cur;
+  if (document.activeElement !== $("#musLevel")) $("#musLevel").value = st.music_level || "medium";
+  const dk = String(Math.round(+(st.duck_db ?? 10)));
+  if (document.activeElement !== $("#musDuck")) $("#musDuck").value = ["0", "10", "18"].includes(dk) ? dk : "10";
+  if (document.activeElement !== $("#musStart")) $("#musStart").value = st.music_start === "auto" || st.music_start == null ? "" : musFmt(st.music_start);
+  const on = cur !== "off";
+  ["#musLevel", "#musDuck", "#musStart"].forEach((s) => ($(s).disabled = !on));
+  $("#musPlay").disabled = !on || (cur === "auto" && !songs.length);
+  const song = songs.find((s) => s.name === (cur === "auto" ? (songs[0] || {}).name : cur));
+  const refOn = st.ref_audio && st.ref_audio !== "none";
+  const notes = [];
+  if (on && refOn) notes.push(cur === "auto" ? "the look's reference background audio plays instead – pick a song to use yours" : "your song replaces the look's reference background audio");
+  if (on && song && song.dur && P.totals && song.dur < (P.totals.est || 0) - 1) notes.push(`song ${musFmt(song.dur)} < video ${musFmt(P.totals.est)} – it repeats with a smooth crossfade`);
+  if (on && cur !== "auto") notes.push("use royalty-free music only (YouTube Audio Library, Pixabay…) – film / artist songs get reels muted or blocked");
+  if (!on) notes.push("posting to Instagram with its own music? keep Off and add it in the app");
+  const nt = $("#musNote"); const ntxt = notes.join(" · "); if (nt.textContent !== ntxt) nt.textContent = ntxt;
+}
+async function musSave(settings, msg) {
+  try {
+    await api(`/api/projects/${PID}/brief`, { method: "POST", body: { settings } });
+    toast(msg || "Music saved – your edited video updates in a moment.");
+    await refresh(true); autoPreviewTick(); renderPvBadge();
+  } catch (e) { toast(e.message, true); renderMusic(true); }
+}
+$("#musSong").onchange = (e) => { musStop(); musSave({ music: e.target.value }, e.target.value === "off" ? "Music off." : "Music on – your edited video updates in a moment."); };
+$("#musLevel").onchange = (e) => musSave({ music_level: e.target.value });
+$("#musDuck").onchange = (e) => musSave({ duck_db: +e.target.value });
+$("#musStart").onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") { e.preventDefault(); e.target.blur(); } };
+$("#musStart").onchange = (e) => {
+  const v = e.target.value.trim();
+  if (v && !/^(\d{1,3}:[0-5]?\d(\.\d+)?|\d+(\.\d+)?)$/.test(v)) { toast("Type a time like 0:45 (or leave empty = auto).", true); return renderMusic(true); }
+  musSave({ music_start: v || "auto" }, v ? `Music starts at ${v} of the song.` : "Music starts after the song's silent intro.");
+};
+function musStop() { const a = $("#musAudio"); if (!a.paused) a.pause(); $("#musPlay").textContent = "▶"; }
+$("#musPlay").onclick = () => {
+  const a = $("#musAudio"), st = P.settings || {}, songs = MUS_SONGS || [];
+  if (!a.paused) return musStop();
+  const name = st.music === "auto" ? (songs[0] || {}).name : st.music;
+  const s = songs.find((x) => x.name === name);
+  if (!s) return toast("That song isn't in Media → Music any more.", true);
+  if (a.dataset.src !== s.url) { a.src = s.url; a.dataset.src = s.url; }
+  const start = st.music_start === "auto" || st.music_start == null ? 0 : +st.music_start;
+  a.currentTime = start; a.play().then(() => ($("#musPlay").textContent = "⏸")).catch(() => toast("Can't play that file in the browser – it still mixes into the video.", true));
+  a.onended = musStop;
+};
+$("#musAdd").onclick = () => $("#musFile").click();
+$("#musFile").onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  const fd = new FormData(); fd.append("files", f, f.name);
+  toast(`Adding ${f.name}…`);
+  try {
+    const r = await fetch(`/api/media/upload?kind=music`, { method: "POST", body: fd });
+    const j = await r.json().catch(() => ({}));
+    const res = (j.results || [])[0] || {};
+    if (!r.ok || !res.ok) {
+      if (res.dup && res.kind === "music" && res.existing) { await musLoad(true); return musSave({ music: res.existing }, `Already in Music – using “${res.existing}”.`); }
+      if (res.dup) return toast(`${res.why} – in the Media tab, move it to 🎵 Music to use it as background music.`, true);
+      return toast(res.why || j.error || "Couldn't add that file.", true);
+    }
+    await musLoad(true);
+    musSave({ music: res.name || f.name }, `Added “${res.name || f.name}” – music on.`);
+  } catch { toast("Upload failed – is the black Start Studio window still open?", true); }
+};
+// 🎙 VOICE: clarity (clear / natural / as recorded) + loudness; the recording check says what it hears, in plain words
+let VOC = { pid: null, sig: "", hints: null, busy: false };
+async function vocCheck(force) {
+  if (!P || VOC.busy) return;
+  const sig = PID + "|" + (P.sources || []).map((s) => s.file + (s.include === false ? "-" : "")).join(",") + "|" + (P.settings || {}).voice + (P.settings || {}).loudness;
+  if (!force && VOC.sig === sig && VOC.hints) return;
+  VOC.busy = true; VOC.sig = sig;
+  try { const r = await api(`/api/projects/${PID}/voice_check`); VOC.hints = r.hints || []; }
+  catch { VOC.hints = []; }
+  VOC.busy = false; renderVoice();
+}
+function renderVoice() {
+  const sel = $("#vocMode"); if (!sel || !P) return;
+  const st = P.settings || {};
+  const mode = ["studio", "clear", "natural", "raw"].includes(st.voice) ? st.voice : (st.audio_polish ? "clear" : "natural");
+  if (document.activeElement !== sel) sel.value = mode;
+  const lv = String(Math.round(+(st.loudness ?? -16)));
+  const ls = $("#vocLoud");
+  if (document.activeElement !== ls) {
+    if (![...ls.options].some((o) => o.value === lv)) ls.insertAdjacentHTML("beforeend", `<option value="${lv}">Loudness: ${lv} LUFS</option>`);
+    ls.value = lv;
+  }
+  vocCheck(false);
+  const t = VOC.hints === null ? "checking your recording…" : VOC.hints.length ? "Your recording: " + VOC.hints.join(" · ") : "";
+  const n = $("#vocNote"); if (n.textContent !== t) n.textContent = t;
+}
+async function vocSave(settings, msg) {
+  try {
+    await api(`/api/projects/${PID}/brief`, { method: "POST", body: { settings } });
+    toast(msg); VOC.hints = null; await refresh(true); autoPreviewTick(); renderPvBadge(); vocCheck(true);
+  } catch (e) { toast(e.message, true); renderVoice(); }
+}
+$("#vocMode").onchange = (e) => vocSave({ voice: e.target.value }, { studio: "Voice: studio – the AI keeps only your voice (river, wind, traffic removed). First time takes about a minute per minute of footage, then it is instant.", clear: "Voice: clear – noise removed, crisp and even. Your edited video updates in a moment.",
+  natural: "Voice: natural – louder and even, nothing else changed.", raw: "Voice: as recorded – nothing changed (quiet recordings stay quiet)." }[e.target.value]);
+$("#vocLoud").onchange = (e) => vocSave({ loudness: +e.target.value }, `Loudness ${e.target.value} LUFS – your edited video updates in a moment.`);
 function renderSuggest() {
   renderSugStatus();
   renderPictures();
+  renderVoice();
+  renderMusic();
   const ul = $("#sugResult"), last = (P.suggestions || [])[0];
   $("#sugBox").classList.toggle("ready", !!P.auto_edit);
   if (!last) { ul.hidden = true; return; }
   ul.hidden = false;
-  ul.innerHTML = `<li class="muted small">Last note (${esc(new Date(last.at).toLocaleTimeString())}):</li>` + last.results.map((x) => {
-    const ic = x.ok ? "✓" : x.ok === null ? "→" : "✗", cls = x.ok ? "ok" : x.ok === null ? "cl" : "bad";
+  // a line sent to Claude: show Claude's ANSWER here when it arrives (the command it became, same text, this note)
+  const since = (last.at || "").slice(0, 19);
+  const claudeCmd = (x) => (P.commands || []).find((c) => (c.created || "").slice(0, 19) >= since
+    && (c.status === "claude" || c.by === "claude") && /^suggestion: /.test(c.text || "") && c.text.slice(12).trim() === String(x.text || "").trim());
+  const html = `<li class="muted small">Last note (${esc(new Date(last.at).toLocaleTimeString())}):</li>` + last.results.map((x) => {
+    const cc = x.ok === null ? claudeCmd(x) : null;
+    const answered = cc && cc.status === "done" && cc.reply;
+    const ic = x.ok || answered ? "✓" : x.ok === null ? "→" : "✗", cls = x.ok || answered ? "ok" : x.ok === null ? "cl" : "bad";
     const sc = x.scene && P.scenes[x.scene - 1];
     const who = sc ? `<button class="lnk" data-sgsel="${sc.id}">Scene ${x.scene}</button>` : x.scene ? `Scene ${x.scene}` : "Whole video";
-    return `<li class="${cls}"><b>${ic}</b> ${who} · <i>${esc(x.text)}</i> – ${esc(x.reply)}</li>`; }).join("");
+    const said = answered ? `<div class="sgreply"><span class="by-claude">🤖 Claude</span>\n${esc(cc.reply)}</div>`
+      : cc && cc.status === "claude" ? ` – waiting for Claude…` : ` – ${esc(x.reply)}`;
+    return `<li class="${cls}"><b>${ic}</b> ${who} · <i>${esc(x.text)}</i>${said}</li>`; }).join("");
+  if (ul.dataset.h === html) return;
+  ul.dataset.h = html; ul.innerHTML = html;
   $$("[data-sgsel]", ul).forEach((b) => (b.onclick = () => selectScene(b.dataset.sgsel)));
 }
 function renderAutoReport() {
